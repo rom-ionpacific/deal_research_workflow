@@ -1,12 +1,17 @@
 -- 001_initial.sql -- create the research schema and the three core tables.
 -- Idempotent: safe to re-run.
 
+-- pg_trgm lives in the dealcloud schema in this DB (deal_cloud_enhancer
+-- created it there). search_path must include dealcloud so gin_trgm_ops
+-- and similarity() resolve unqualified for the rest of the migration.
+SET search_path TO research, dealcloud, public;
+
 CREATE EXTENSION IF NOT EXISTS pgcrypto;        -- gen_random_uuid()
 CREATE EXTENSION IF NOT EXISTS pg_trgm;          -- trigram similarity for orgs/search
 
 CREATE SCHEMA IF NOT EXISTS research;
 
-SET search_path TO research, public;
+SET search_path TO research, dealcloud, public;
 
 -- ============================================================
 -- session
