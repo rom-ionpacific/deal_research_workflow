@@ -59,15 +59,38 @@ async def slack_events(
     if payload.get("type") == "url_verification":
         return PlainTextResponse(content=payload.get("challenge", ""))
 
+    event = payload.get("event") or {}
+    # Full raw event dump for debugging the loop. Slack's documented
+    # `bot_id` / `subtype:bot_message` markers don't appear to be
+    # tripping for our DM echoes; keep this until we understand why,
+    # then trim.
+    print(f"[slack/events] RAW event={json.dumps(event)[:1000]} "
+          f"authorizations={json.dumps(payload.get('authorizations'))[:300]}",
+          flush=True)
+
     event_id = payload.get("event_id")
     if event_id and not claim_event(event_id):
         return EMPTY_OK  # Slack retry; we already processed this.
 
-    event = payload.get("event") or {}
     event_type = event.get("type")
 
-    # Skip the bot's own messages or any bot_message subtype to avoid loops.
-    if event.get("bot_id") or event.get("subtype") == "bot_message":
+    # Robust echo filter. Belt-and-suspenders because the documented
+    # `bot_id` flag wasn't tripping for our DM replies in prod
+    # (looped 50+ times). We also gate on `app_id` matching our app
+    # and on `user` matching the bot's user_id (resolved via auth.test
+    # at first call).
+    from ..services.slack.client import bot_user_id
+    bot_uid = bot_user_id()
+    if (
+        event.get("bot_id")
+        or event.get("subtype") in ("bot_message", "message_changed",
+                                     "message_deleted", "message_replied")
+        or (bot_uid and event.get("user") == bot_uid)
+        or event.get("app_id")  # any app-posted message
+    ):
+        print(f"[slack/events] FILTERED echo (subtype={event.get('subtype')!r} "
+              f"bot_id={event.get('bot_id')!r} app_id={event.get('app_id')!r} "
+              f"user={event.get('user')!r} bot_uid={bot_uid!r})", flush=True)
         return EMPTY_OK
 
     if event_type not in ("message", "app_mention"):
