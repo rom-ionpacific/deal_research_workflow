@@ -82,13 +82,22 @@ async def slack_events(
     if not user_id:
         return EMPTY_OK
 
+    # DM replies stay top-level (threading in a DM hides the reply
+    # inside a "View thread" expander -- bad UX). For app_mention in a
+    # channel we thread off the user's message so the conversation
+    # doesn't clutter the channel.
+    is_dm = event.get("channel_type") == "im"
+    thread_ts = None if is_dm else (event.get("thread_ts") or event.get("ts"))
+
+    print(f"[slack/events] received {event_type} channel_type={event.get('channel_type')} "
+          f"user={user_id} text_len={len(text)} thread_ts={thread_ts}",
+          flush=True)
+
     background.add_task(
         _dispatch_turn,
         team_id=payload.get("team_id") or "",
         channel_id=event.get("channel") or "",
-        # In a thread reply, thread_ts is set; for a top-level message
-        # we open a thread off the message itself (use ts).
-        thread_ts=event.get("thread_ts") or event.get("ts"),
+        thread_ts=thread_ts,
         user_id=user_id,
         text=text,
         trigger="event",
@@ -178,21 +187,29 @@ def _dispatch_turn(
     """Resolve identity then hand off to conversation.handle_turn.
     Runs in a thread (BackgroundTask) so blocking Slack calls are fine.
     """
-    email = slack_user_to_email(user_id)
-    if not is_ion_email(email):
-        log.info("Rejecting non-Ion user %s (email=%s)", user_id, email)
-        return
+    try:
+        email = slack_user_to_email(user_id)
+        print(f"[slack/dispatch] trigger={trigger} user={user_id} email={email!r} "
+              f"channel={channel_id} thread_ts={thread_ts}", flush=True)
+        if not is_ion_email(email):
+            print(f"[slack/dispatch] rejecting non-Ion user {user_id} email={email!r}",
+                  flush=True)
+            return
 
-    handle_turn(
-        team_id=team_id,
-        channel_id=channel_id,
-        thread_ts=thread_ts,
-        user_id=user_id,
-        user_email=email or "",
-        text=text,
-        trigger=trigger,
-        response_url=response_url,
-    )
+        handle_turn(
+            team_id=team_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            user_id=user_id,
+            user_email=email or "",
+            text=text,
+            trigger=trigger,
+            response_url=response_url,
+        )
+    except Exception as e:
+        # BackgroundTask exceptions are otherwise swallowed; surface here.
+        print(f"[slack/dispatch] EXCEPTION: {type(e).__name__}: {e}", flush=True)
+        raise
 
 
 def _dispatch_action(*, payload: dict[str, Any]) -> None:

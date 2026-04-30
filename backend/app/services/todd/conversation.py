@@ -33,7 +33,8 @@ def handle_turn(
     """Single conversation turn. Runs in a BackgroundTask, so blocking
     Slack calls are fine."""
     if client is None:
-        log.warning("Slack client not configured; dropping turn from %s", user_email)
+        print(f"[todd/handle_turn] Slack client not configured; dropping turn from {user_email}",
+              flush=True)
         return
 
     placeholder = (
@@ -41,10 +42,14 @@ def handle_turn(
         "_(V1 stub: org disambiguation + 5-question dossier ship in Phase 2.)_"
     )
     try:
-        client.chat_postMessage(
+        resp = client.chat_postMessage(
             channel=channel_id,
             thread_ts=thread_ts,
             text=placeholder,
         )
-    except Exception:
-        log.exception("Slack chat_postMessage failed for %s", user_email)
+        print(f"[todd/handle_turn] posted ok ts={resp.get('ts')} channel={channel_id} "
+              f"thread_ts={thread_ts}", flush=True)
+    except Exception as e:
+        print(f"[todd/handle_turn] chat_postMessage FAILED for {user_email}: "
+              f"{type(e).__name__}: {e}", flush=True)
+        raise
