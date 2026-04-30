@@ -30,7 +30,14 @@ from ..services.todd.conversation import handle_turn
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/slack", tags=["slack"])
 
-EMPTY_OK = Response(status_code=status.HTTP_200_OK)
+
+def empty_ok() -> Response:
+    """Fresh empty 200 per request. Don't use a module-level singleton --
+    Starlette mutates response state during send (notably attaching
+    BackgroundTasks), so a reused instance silently drops tasks queued
+    on the second-and-later request. Cost me an afternoon of debugging
+    a Slack DM loop."""
+    return Response(status_code=status.HTTP_200_OK)
 
 
 def _decode_form(body: bytes) -> dict[str, str]:
@@ -70,7 +77,7 @@ async def slack_events(
 
     event_id = payload.get("event_id")
     if event_id and not claim_event(event_id):
-        return EMPTY_OK  # Slack retry; we already processed this.
+        return empty_ok()  # Slack retry; we already processed this.
 
     event_type = event.get("type")
 
@@ -91,19 +98,19 @@ async def slack_events(
         print(f"[slack/events] FILTERED echo (subtype={event.get('subtype')!r} "
               f"bot_id={event.get('bot_id')!r} app_id={event.get('app_id')!r} "
               f"user={event.get('user')!r} bot_uid={bot_uid!r})", flush=True)
-        return EMPTY_OK
+        return empty_ok()
 
     if event_type not in ("message", "app_mention"):
-        return EMPTY_OK
+        return empty_ok()
 
     # `message` events fire on every channel; only react in DMs.
     if event_type == "message" and event.get("channel_type") != "im":
-        return EMPTY_OK
+        return empty_ok()
 
     user_id = event.get("user")
     text = (event.get("text") or "").strip()
     if not user_id:
-        return EMPTY_OK
+        return empty_ok()
 
     # DM replies stay top-level (threading in a DM hides the reply
     # inside a "View thread" expander -- bad UX). For app_mention in a
@@ -126,7 +133,7 @@ async def slack_events(
         trigger="event",
         response_url=None,
     )
-    return EMPTY_OK
+    return empty_ok()
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +149,7 @@ async def slack_commands(
 
     if form.get("command") != "/todd":
         # Not our command, but Slack expects 200.
-        return EMPTY_OK
+        return empty_ok()
 
     user_id = form.get("user_id") or ""
     text = (form.get("text") or "").strip()
@@ -184,14 +191,14 @@ async def slack_interactivity(
     form = _decode_form(body)
     raw_payload = form.get("payload")
     if not raw_payload:
-        return EMPTY_OK
+        return empty_ok()
 
     payload = json.loads(raw_payload)
     if payload.get("type") != "block_actions":
-        return EMPTY_OK
+        return empty_ok()
 
     background.add_task(_dispatch_action, payload=payload)
-    return EMPTY_OK
+    return empty_ok()
 
 
 # ---------------------------------------------------------------------------
