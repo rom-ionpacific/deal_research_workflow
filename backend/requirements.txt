@@ -7,3 +7,4 @@ python-dotenv>=1.0
 anthropic>=0.42
 sse-starlette>=2.1
 python-multipart>=0.0.12
+slack-sdk>=3.31

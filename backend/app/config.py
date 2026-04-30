@@ -13,6 +13,12 @@ class Settings(BaseSettings):
     azure_tenant_id: str = ""
     flask_secret_key: str = ""
 
+    # Todd the Walrus -- Slack app credentials. Empty in local dev means
+    # the Slack endpoints will refuse signed requests (good: prevents
+    # accidental staging access without proper config).
+    slack_signing_secret: str = ""
+    slack_bot_token: str = ""
+
     allowed_origins: str = ""
 
     @property
