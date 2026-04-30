@@ -22,6 +22,13 @@ services:
         sync: false
       - key: FLASK_SECRET_KEY
         sync: false
+      # Todd the Walrus -- Slack credentials. Set in Render dashboard
+      # after blueprint sync; signing secret is on the Slack app's
+      # "Basic Information" page, bot token on "OAuth & Permissions".
+      - key: SLACK_SIGNING_SECRET
+        sync: false
+      - key: SLACK_BOT_TOKEN
+        sync: false
       - key: ALLOWED_ORIGINS
         sync: false
       - key: PYTHON_VERSION
