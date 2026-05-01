@@ -72,6 +72,44 @@ def handle_turn(
         return
 
     query = (text or "").strip()
+    try:
+        _do_turn(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            query=query,
+            response_url=response_url,
+        )
+    except Exception as e:
+        # Without this, a drop in handle_turn leaves the user staring
+        # at "Todd is on it..." forever -- they get no feedback. Post
+        # a friendly error and re-raise so we still see the trace in
+        # Render logs.
+        print(f"[todd/handle_turn] EXCEPTION on query={query!r}: "
+              f"{type(e).__name__}: {e}", flush=True)
+        try:
+            _post(channel_id, thread_ts,
+                  "Todd hit an error",
+                  [section(
+                      f":warning: *Sorry, Todd hit an error looking up _{query or '(empty)'}_.*\n"
+                      f"_(`{type(e).__name__}: {str(e)[:160]}`)_\n"
+                      "Try again, or ping the engineer."
+                  )],
+                  response_url=response_url)
+        except Exception as post_err:
+            print(f"[todd/handle_turn] error-message post also failed: {post_err}",
+                  flush=True)
+        raise
+
+
+def _do_turn(
+    *,
+    channel_id: str,
+    thread_ts: Optional[str],
+    query: str,
+    response_url: Optional[str],
+) -> None:
+    """The actual conversation logic. Wrapped by handle_turn so any
+    exception surfaces an error message to the user."""
     if not query:
         _post(channel_id, thread_ts,
               "Send me an org name and I'll dig.",
@@ -79,7 +117,7 @@ def handle_turn(
               response_url=response_url)
         return
 
-    print(f"[todd/handle_turn] start query={query!r} user={user_email}", flush=True)
+    print(f"[todd/handle_turn] start query={query!r}", flush=True)
 
     # 1. Search
     candidates = search_organizations(query, limit=SEARCH_LIMIT)
@@ -197,17 +235,32 @@ def handle_picked(
     button. Posts a brief 'got it' ack and then runs the dossier
     flow for the picked org bundle. The button click brings its own
     response_url, fresh for 5 follow-ups."""
-    name_map = _resolve_org_names(chosen_canonical_ids)
-    canonical_names = [name_map.get(i, f"org#{i}") for i in chosen_canonical_ids]
-    fb, blocks = render_picked(query, canonical_names)
-    _post(channel_id, thread_ts, fb, blocks, response_url=response_url)
-    post_dossier(
-        channel_id=channel_id,
-        thread_ts=thread_ts,
-        query=query,
-        chosen_canonical_ids=chosen_canonical_ids,
-        response_url=response_url,
-    )
+    try:
+        name_map = _resolve_org_names(chosen_canonical_ids)
+        canonical_names = [name_map.get(i, f"org#{i}") for i in chosen_canonical_ids]
+        fb, blocks = render_picked(query, canonical_names)
+        _post(channel_id, thread_ts, fb, blocks, response_url=response_url)
+        post_dossier(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            query=query,
+            chosen_canonical_ids=chosen_canonical_ids,
+            response_url=response_url,
+        )
+    except Exception as e:
+        print(f"[todd/handle_picked] EXCEPTION query={query!r} ids={chosen_canonical_ids}: "
+              f"{type(e).__name__}: {e}", flush=True)
+        try:
+            _post(channel_id, thread_ts,
+                  "Todd hit an error",
+                  [section(
+                      f":warning: *Sorry, Todd hit an error fetching that bundle.*\n"
+                      f"_(`{type(e).__name__}: {str(e)[:160]}`)_"
+                  )],
+                  response_url=response_url)
+        except Exception:
+            pass
+        raise
 
 
 def _build_disambiguation_options(

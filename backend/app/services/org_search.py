@@ -30,21 +30,21 @@ hits AS (
            CASE
              WHEN lower(o.name) = lower((SELECT qtext FROM q)) THEN 1.00
              WHEN lower(o.name) LIKE lower((SELECT qtext FROM q)) || '%%'  THEN 0.85
-             ELSE 0.70 * similarity(o.name, (SELECT qtext FROM q))
+             ELSE 0.70 * dealcloud.similarity(o.name, (SELECT qtext FROM q))
            END AS score,
            'name'::text AS match_kind
     FROM dealcloud.organization o
     WHERE
        lower(o.name) = lower((SELECT qtext FROM q))
        OR lower(o.name) LIKE lower((SELECT qtext FROM q)) || '%%'
-       OR similarity(o.name, (SELECT qtext FROM q)) > 0.3
+       OR dealcloud.similarity(o.name, (SELECT qtext FROM q)) > 0.3
     UNION ALL
     -- Match on alias
     SELECT oa.organization_id AS id, oa.alias AS hit_name, o.name AS canonical_name,
            CASE
              WHEN lower(oa.alias) = lower((SELECT qtext FROM q)) THEN 0.95
              WHEN lower(oa.alias) LIKE lower((SELECT qtext FROM q)) || '%%' THEN 0.80
-             ELSE 0.65 * similarity(oa.alias, (SELECT qtext FROM q))
+             ELSE 0.65 * dealcloud.similarity(oa.alias, (SELECT qtext FROM q))
            END AS score,
            'alias'::text AS match_kind
     FROM dealcloud.organization_alias oa
@@ -52,7 +52,7 @@ hits AS (
     WHERE
        lower(oa.alias) = lower((SELECT qtext FROM q))
        OR lower(oa.alias) LIKE lower((SELECT qtext FROM q)) || '%%'
-       OR similarity(oa.alias, (SELECT qtext FROM q)) > 0.3
+       OR dealcloud.similarity(oa.alias, (SELECT qtext FROM q)) > 0.3
 ),
 ranked AS (
     SELECT id, canonical_name, hit_name, score, match_kind,
