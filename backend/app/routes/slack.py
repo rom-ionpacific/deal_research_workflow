@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from ..services.slack.dedupe import claim_event
 from ..services.slack.signing import verify_slack_signature
 from ..services.slack.users import is_ion_email, slack_user_to_email
-from ..services.todd.conversation import handle_turn
+from ..services.todd.conversation import handle_picked, handle_turn
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/slack", tags=["slack"])
@@ -159,24 +159,20 @@ async def slack_commands(
         _dispatch_turn,
         team_id=form.get("team_id") or "",
         channel_id=channel_id,
-        # Slash commands don't auto-thread; the placeholder reply we
-        # return below opens the thread, and the real reply (posted
-        # later) lands in that thread via response_url.
+        # Slash commands don't auto-thread. The bot will post its own
+        # intro via chat.postMessage and capture that ts to thread the
+        # 5 answer messages under it -- cleaner than the in_channel
+        # placeholder we used in Phase 1, which had no ts to thread off.
         thread_ts=None,
         user_id=user_id,
         text=text,
         trigger="slash",
         response_url=form.get("response_url"),
     )
-
-    # Slack shows this immediately to the user. The placeholder text
-    # opens the thread that Todd will continue posting into.
-    return JSONResponse(
-        {
-            "response_type": "in_channel",
-            "text": f":walrus: *Todd is on it* -- looking up _{text or '(empty query)'}_...",
-        }
-    )
+    # Empty 200 ack. The user sees their own command echo from Slack;
+    # the bot's intro arrives ~1-2s later via chat.postMessage and
+    # answers thread under it.
+    return empty_ok()
 
 
 # ---------------------------------------------------------------------------
@@ -243,8 +239,64 @@ def _dispatch_turn(
 
 
 def _dispatch_action(*, payload: dict[str, Any]) -> None:
-    """Block Kit interactivity -- stub in Phase 1. Phase 2 will route
-    button clicks (org disambiguation, escalation) to the conversation
-    engine."""
-    log.info("Slack interactivity received (Phase 1 stub); ignoring: %s",
-             payload.get("actions"))
+    """Route Block Kit button clicks to the conversation engine.
+
+    Currently handles `todd_pick_*` and `todd_pick_all` actions from
+    the disambiguation message. The button's `value` is JSON encoding
+    `{q, ids}` so we can resume without a DB lookup.
+    """
+    try:
+        actions = payload.get("actions") or []
+        if not actions:
+            return
+        action = actions[0]
+        action_id = action.get("action_id", "")
+        if not action_id.startswith("todd_pick"):
+            print(f"[slack/interactivity] ignoring unknown action_id={action_id!r}",
+                  flush=True)
+            return
+
+        raw_value = action.get("value") or "{}"
+        try:
+            parsed = json.loads(raw_value)
+        except json.JSONDecodeError:
+            print(f"[slack/interactivity] bad value JSON: {raw_value[:120]!r}",
+                  flush=True)
+            return
+
+        query = parsed.get("q", "") or ""
+        org_ids = parsed.get("ids") or []
+        if not isinstance(org_ids, list) or not org_ids:
+            print(f"[slack/interactivity] missing/empty ids: {parsed!r}", flush=True)
+            return
+
+        # Auth
+        user_id = (payload.get("user") or {}).get("id") or ""
+        email = slack_user_to_email(user_id)
+        if not is_ion_email(email):
+            print(f"[slack/interactivity] rejecting non-Ion user {user_id} email={email!r}",
+                  flush=True)
+            return
+
+        # Channel + thread context. If the disambiguation message was
+        # in a thread (app_mention), keep posting in that thread.
+        # Otherwise (slash/DM), thread answers under the disambiguation
+        # message itself by using its ts as thread_ts.
+        channel = (payload.get("channel") or {}).get("id") or ""
+        msg = payload.get("message") or {}
+        thread_ts = msg.get("thread_ts") or msg.get("ts")
+
+        print(f"[slack/interactivity] picked action_id={action_id} query={query!r} "
+              f"ids={org_ids} channel={channel} thread_ts={thread_ts}",
+              flush=True)
+
+        handle_picked(
+            channel_id=channel,
+            thread_ts=thread_ts,
+            query=query,
+            chosen_canonical_ids=[int(x) for x in org_ids],
+        )
+    except Exception as e:
+        print(f"[slack/interactivity] EXCEPTION: {type(e).__name__}: {e}",
+              flush=True)
+        raise
