@@ -108,7 +108,15 @@ async def slack_events(
         return empty_ok()
 
     user_id = event.get("user")
-    text = (event.get("text") or "").strip()
+    raw_text = (event.get("text") or "").strip()
+    # Strip `<@U...>` mention tokens (and the optional `|name` suffix
+    # Slack adds when the bot's display name has been resolved). For
+    # app_mention events the user's text is e.g. `<@U0B1TGA60EL> moove`,
+    # which we'd otherwise pass to org search verbatim and find nothing.
+    import re
+    text = re.sub(r"<@[A-Z0-9]+(?:\|[^>]*)?>", "", raw_text).strip()
+    # Collapse whitespace runs the strip might have left behind
+    text = re.sub(r"\s+", " ", text)
     if not user_id:
         return empty_ok()
 
@@ -159,20 +167,23 @@ async def slack_commands(
         _dispatch_turn,
         team_id=form.get("team_id") or "",
         channel_id=channel_id,
-        # Slash commands don't auto-thread. The bot will post its own
-        # intro via chat.postMessage and capture that ts to thread the
-        # 5 answer messages under it -- cleaner than the in_channel
-        # placeholder we used in Phase 1, which had no ts to thread off.
         thread_ts=None,
         user_id=user_id,
         text=text,
         trigger="slash",
         response_url=form.get("response_url"),
     )
-    # Empty 200 ack. The user sees their own command echo from Slack;
-    # the bot's intro arrives ~1-2s later via chat.postMessage and
-    # answers thread under it.
-    return empty_ok()
+    # Slash command response: visible immediately to the user (and
+    # everyone in the channel since `in_channel`). Subsequent dossier
+    # messages get posted via response_url from the background task --
+    # which works even when the bot isn't a member of the channel
+    # where /todd was issued (Slack only adds the bot to channels
+    # someone explicitly invites it to). Chat.postMessage would fail
+    # with channel_not_found in those cases.
+    return JSONResponse({
+        "response_type": "in_channel",
+        "text": f":walrus: *Todd is on it* -- looking up _{text or '(empty query)'}_...",
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -278,16 +289,19 @@ def _dispatch_action(*, payload: dict[str, Any]) -> None:
                   flush=True)
             return
 
-        # Channel + thread context. If the disambiguation message was
-        # in a thread (app_mention), keep posting in that thread.
-        # Otherwise (slash/DM), thread answers under the disambiguation
-        # message itself by using its ts as thread_ts.
+        # Channel + thread context.
         channel = (payload.get("channel") or {}).get("id") or ""
         msg = payload.get("message") or {}
         thread_ts = msg.get("thread_ts") or msg.get("ts")
+        # Each interactivity payload comes with its own response_url,
+        # fresh for 5 follow-ups. We use it for the dossier in case the
+        # disambiguation was issued from a slash command (where the bot
+        # may not be in the channel).
+        click_response_url = payload.get("response_url")
 
         print(f"[slack/interactivity] picked action_id={action_id} query={query!r} "
-              f"ids={org_ids} channel={channel} thread_ts={thread_ts}",
+              f"ids={org_ids} channel={channel} thread_ts={thread_ts} "
+              f"has_response_url={bool(click_response_url)}",
               flush=True)
 
         handle_picked(
@@ -295,6 +309,7 @@ def _dispatch_action(*, payload: dict[str, Any]) -> None:
             thread_ts=thread_ts,
             query=query,
             chosen_canonical_ids=[int(x) for x in org_ids],
+            response_url=click_response_url,
         )
     except Exception as e:
         print(f"[slack/interactivity] EXCEPTION: {type(e).__name__}: {e}",
