@@ -39,6 +39,35 @@ def _bullet_list(lines: list[str], cap: int = 5) -> str:
     return out
 
 
+def _provenance_suffix(deal: dict) -> str:
+    """Render a small provenance marker for an underlying-deal row.
+
+    - dealcloud only:           "" (default; no marker)
+    - dealcloud+llm_derived:    " · _DC + IC memos_"
+    - llm_derived only:         " · _derived from {N} IC memo(s)_"
+    - is_value_driver:          ":star:" prepended to the suffix
+    """
+    src = (deal.get("connection_source") or "dealcloud").lower()
+    n_docs = deal.get("derived_n_docs")
+    vd = deal.get("is_value_driver")
+
+    parts: list[str] = []
+    if vd:
+        parts.append(":star:")
+    if src == "dealcloud":
+        pass  # no extra marker
+    elif src == "dealcloud+llm_derived":
+        parts.append("_DC + IC memos_")
+    elif src == "llm_derived":
+        if n_docs:
+            parts.append(f"_derived from {_plural(n_docs, 'IC memo')}_")
+        else:
+            parts.append("_LLM-derived_")
+    if not parts:
+        return ""
+    return " · " + " ".join(parts)
+
+
 def header(text: str) -> dict:
     return {"type": "header", "text": {"type": "plain_text", "text": text[:150]}}
 
@@ -81,6 +110,7 @@ def render_q1(data: dict, org_label: str) -> tuple[str, list[dict]]:
         lines = [
             f"*{d['deal_name']}* — under *{d.get('parent_org_name', 'unknown')}*"
             f" ({d['status']}, {_fmt_date(d.get('date'))})"
+            f"{_provenance_suffix(d)}"
             for d in und.get("deals", [])
         ]
         blocks.append(section(
@@ -133,6 +163,7 @@ def render_q2(data: dict, org_label: str) -> tuple[str, list[dict]]:
         lines = [
             f"*{d['deal_name']}* — under *{d.get('parent_org_name', 'unknown')}*"
             f" ({d['status']}, {_fmt_date(d.get('date'))})"
+            f"{_provenance_suffix(d)}"
             for d in und
         ]
         blocks.append(section(f"*As underlying:*\n{_bullet_list(lines, cap=10)}"))

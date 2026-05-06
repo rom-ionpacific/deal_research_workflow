@@ -36,6 +36,11 @@ $$;
 -- Partnership) where the org is the counterparty OR an underlying.
 -- (Strict definition: confirmed positions only. Active Pipeline and
 -- Warming Station are tracked under Q2's "assessed" lens.)
+-- Underlying rows include both DealCloud-sourced and LLM-derived
+-- (from IC-memo doc tags via the deal_cloud_enhancer enrichment).
+-- connection_source values: 'dealcloud', 'llm_derived',
+-- 'dealcloud+llm_derived'. derived_n_docs is the supporting evidence
+-- count for derived rows (NULL for dealcloud-only).
 -- doc_only_underlying_hints: documents that mention BOTH the bundle AND
 -- another DC-counterparty, EXCLUDING firm-level overview decks. A doc
 -- with >10 distinct org mentions is treated as a portfolio summary,
@@ -56,20 +61,32 @@ counterparty_top AS (
      LIMIT 5
 ),
 underlying_all AS (
+    -- Include both is_underlying and is_value_driver. DealCloud's two
+    -- source fields (Organization.RelatedDeal -> is_underlying,
+    -- Deal.Companiesexposure -> is_value_driver) aren't perfectly
+    -- consistent: ~100 DUC rows have only is_value_driver=TRUE. The
+    -- design intent is that every value driver is also an underlying
+    -- company. So treat any DUC row as a portfolio-relationship signal.
     SELECT d.id AS deal_id, d.name AS deal_name,
            d.organization_id AS parent_org_id,
            o_parent.name      AS parent_org_name,
-           d.status, d.new_deal_date AS date
+           d.status, d.new_deal_date AS date,
+           duc.connection_source,
+           duc.derived_n_docs,
+           duc.is_value_driver
       FROM dealcloud.deal_underlying_company duc
       JOIN dealcloud.deal d ON d.id = duc.deal_id
       LEFT JOIN dealcloud.organization o_parent ON o_parent.id = d.organization_id
      WHERE duc.organization_id = ANY(org_ids)
-       AND duc.is_underlying = TRUE
+       AND (duc.is_underlying = TRUE OR duc.is_value_driver = TRUE)
        AND d.status IN ('Portfolio Company', 'Partnership')
 ),
 underlying_top AS (
+    -- Sort dealcloud-confirmed rows ahead of llm_derived-only ones, then
+    -- by date. Keeps highest-confidence positions visible first.
     SELECT * FROM underlying_all
-     ORDER BY date DESC NULLS LAST, deal_id DESC
+     ORDER BY (connection_source = 'llm_derived') ASC,
+              date DESC NULLS LAST, deal_id DESC
      LIMIT 5
 ),
 target_doc_ids AS (
@@ -167,18 +184,23 @@ counterparty_top AS (
      LIMIT 10
 ),
 underlying_all AS (
+    -- See Q1's underlying_all comment re: is_underlying vs is_value_driver.
     SELECT d.id AS deal_id, d.name AS deal_name,
            o_parent.name AS parent_org_name,
-           d.status, d.new_deal_date AS date
+           d.status, d.new_deal_date AS date,
+           duc.connection_source,
+           duc.derived_n_docs,
+           duc.is_value_driver
       FROM dealcloud.deal_underlying_company duc
       JOIN dealcloud.deal d ON d.id = duc.deal_id
       LEFT JOIN dealcloud.organization o_parent ON o_parent.id = d.organization_id
      WHERE duc.organization_id = ANY(org_ids)
-       AND duc.is_underlying = TRUE
+       AND (duc.is_underlying = TRUE OR duc.is_value_driver = TRUE)
 ),
 underlying_top AS (
     SELECT * FROM underlying_all
-     ORDER BY date DESC NULLS LAST, deal_id DESC
+     ORDER BY (connection_source = 'llm_derived') ASC,
+              date DESC NULLS LAST, deal_id DESC
      LIMIT 10
 ),
 status_breakdown AS (
