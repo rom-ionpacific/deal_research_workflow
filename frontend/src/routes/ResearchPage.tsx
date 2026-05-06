@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 
+import ChatPanel from "../components/ChatPanel";
 import { api, type OrgSearchResult, type Phase } from "../lib/api";
 
 const PHASES: Phase[] = [
@@ -34,21 +35,33 @@ export default function ResearchPage() {
   const { current_version } = session.data;
 
   return (
-    <div className="max-w-5xl mx-auto p-6">
-      <PhaseStepper currentPhase={current_version.phase} />
-      {current_version.phase === "org_select" && (
-        <OrgSelectPhase
-          sessionId={sessionId!}
-          parentVersionId={current_version.id}
-          state={current_version.state}
-          onSaved={() => qc.invalidateQueries({ queryKey: ["session", sessionId] })}
-        />
-      )}
-      {current_version.phase !== "org_select" && (
-        <div className="mt-8 text-slate-500 text-sm">
-          Phase <code>{current_version.phase}</code> not built yet — coming next.
+    <div className="h-full grid grid-cols-[1fr_400px]">
+      <div className="overflow-y-auto">
+        <div className="max-w-3xl mx-auto p-6">
+          <PhaseStepper currentPhase={current_version.phase} />
+          {current_version.phase === "org_select" && (
+            <OrgSelectPhase
+              sessionId={sessionId!}
+              parentVersionId={current_version.id}
+              state={current_version.state}
+              onSaved={() =>
+                qc.invalidateQueries({ queryKey: ["session", sessionId] })
+              }
+            />
+          )}
+          {current_version.phase !== "org_select" && (
+            <div className="mt-8 text-slate-500 text-sm">
+              Phase <code>{current_version.phase}</code> not built yet — coming
+              next.
+            </div>
+          )}
         </div>
-      )}
+      </div>
+      <ChatPanel
+        sessionId={sessionId!}
+        phase={current_version.phase}
+        parentVersionId={current_version.id}
+      />
     </div>
   );
 }

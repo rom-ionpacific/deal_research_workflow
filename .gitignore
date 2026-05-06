@@ -12,6 +12,8 @@ venv/
 node_modules/
 dist/
 .vite/
+package-lock.json
+*.tsbuildinfo
 
 # Editor / OS
 .DS_Store

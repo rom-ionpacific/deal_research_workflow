@@ -60,6 +60,50 @@ export interface OrgSearchResult {
   sample_evidence: string[];
 }
 
+// ----- chat -----
+
+export interface ChatMessage {
+  id: string;
+  session_id: string;
+  phase: string;
+  role: "user" | "assistant" | "tool";
+  content: Record<string, unknown>;
+  pre_version_id: string | null;
+  post_version_id: string | null;
+  parent_message_id: string | null;
+  model_id: string | null;
+  tokens_in: number | null;
+  tokens_out: number | null;
+  latency_ms: number | null;
+  error: string | null;
+  created_at: string;
+}
+
+// SSE events the backend emits. See backend/app/services/chat_research/
+// orchestrator.py for the producer side.
+export type ChatEvent =
+  | { type: "turn_start"; session_id: string; phase: string;
+      user_message_id: string; current_version_id: string; undo_unit_id: string }
+  | { type: "assistant_start" }
+  | { type: "text_delta"; text: string }
+  | { type: "thinking_delta"; text: string }
+  | { type: "assistant_message"; message_id: string; stop_reason: string;
+      ai_message_id?: string;
+      content: Array<Record<string, unknown>>;
+      usage: { input_tokens: number; output_tokens: number;
+        cache_creation_input_tokens: number; cache_read_input_tokens: number } }
+  | { type: "tool_call"; tool_use_id: string; name: string;
+      input: Record<string, unknown>; assistant_message_id: string }
+  | { type: "tool_result"; tool_use_id: string; name: string;
+      output: string; is_error: boolean; tool_message_id?: string;
+      mutates_state?: boolean }
+  | { type: "version_created"; version_id: string; phase: string;
+      summary: string }
+  | { type: "turn_complete"; stop_reason: string }
+  | { type: "turn_done"; session_id: string; current_version_id: string }
+  | { type: "turn_failed"; reason: string; last_stop_reason?: string }
+  | { type: "error"; message: string };
+
 // ----- endpoints -----
 export const api = {
   whoami: () => request<{ email: string }>("/api/v1/me"),
@@ -91,4 +135,105 @@ export const api = {
     request<OrgSearchResult[]>(
       `/api/v1/orgs/search?q=${encodeURIComponent(q)}&limit=${limit}`
     ),
+
+  listMessages: (sessionId: string, limit = 200) =>
+    request<ChatMessage[]>(
+      `/api/v1/sessions/${sessionId}/messages?limit=${limit}`
+    ),
 };
+
+// -- SSE chat stream --------------------------------------------------------
+
+// Browser EventSource can only do GET and can't set request headers, so
+// it's a non-starter for our X-User-Email-authenticated POST. Roll a
+// thin SSE parser over fetch + ReadableStream instead.
+//
+// Frame format (matches the backend's _sse_format):
+//   event: <type>\ndata: <json>\n\n
+//
+// Caller passes onEvent for typed dispatch. The returned promise resolves
+// when the stream closes cleanly; reject on network/parse errors. Pass an
+// AbortSignal to cancel mid-stream (the backend's StreamingResponse
+// observes the disconnect and tears the loop down via the orchestrator's
+// finally block).
+
+export interface ChatStreamRequest {
+  sessionId: string;
+  phase: Phase;
+  message: string;
+  parentId?: string;
+  signal?: AbortSignal;
+  onEvent: (ev: ChatEvent) => void;
+}
+
+export async function streamChat(req: ChatStreamRequest): Promise<void> {
+  const email = useUI.getState().userEmail;
+  const headers = new Headers();
+  headers.set("Content-Type", "application/json");
+  headers.set("Accept", "text/event-stream");
+  if (email) headers.set("X-User-Email", email);
+
+  const res = await fetch(`${BASE}/api/v1/sessions/${req.sessionId}/chat`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      phase: req.phase,
+      message: req.message,
+      parent_id: req.parentId,
+    }),
+    signal: req.signal,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} ${res.statusText}: ${body}`);
+  }
+  if (!res.body) {
+    throw new Error("Response has no body — SSE not supported by this fetch?");
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+
+      // Each SSE frame is delimited by a blank line. Walk forward,
+      // dispatching every complete frame and keeping the trailing
+      // partial in the buffer for the next iteration.
+      let sep: number;
+      while ((sep = buf.indexOf("\n\n")) !== -1) {
+        const frame = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        dispatchFrame(frame, req.onEvent);
+      }
+    }
+    // Flush any trailing frame (shouldn't normally happen since the
+    // backend always ends frames with \n\n, but be defensive).
+    if (buf.trim()) dispatchFrame(buf, req.onEvent);
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // Best-effort; aborted reads can throw on releaseLock.
+    }
+  }
+}
+
+function dispatchFrame(frame: string, onEvent: (ev: ChatEvent) => void): void {
+  let dataStr = "";
+  for (const line of frame.split("\n")) {
+    if (line.startsWith("data:")) dataStr += line.slice(5).trim();
+    // The orchestrator sets `event:` on every frame, but the JSON body
+    // already carries `type`, so we don't need to read the event line.
+  }
+  if (!dataStr) return;
+  try {
+    onEvent(JSON.parse(dataStr) as ChatEvent);
+  } catch (err) {
+    console.warn("SSE: malformed JSON in data:", dataStr, err);
+  }
+}
