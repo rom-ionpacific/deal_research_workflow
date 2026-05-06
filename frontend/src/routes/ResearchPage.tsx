@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 
 import ChatPanel from "../components/ChatPanel";
+import OrgCard from "../components/OrgCard";
 import { api, type OrgSearchResult, type Phase } from "../lib/api";
 
 const PHASES: Phase[] = [
@@ -107,13 +108,27 @@ function OrgSelectPhase({
     return () => clearTimeout(t);
   }, [q]);
 
+  const selected = (state.selected_org_ids as number[] | undefined) ?? [];
+
+  // Search + selected-by-ids are independent queries. Search is debounced
+  // and only fires when the user types; selected-by-ids fires whenever
+  // the selection changes (incl. via AI tool calls -> version_created
+  // -> ['session', sessionId] invalidates -> selected[] updates here).
   const search = useQuery({
     queryKey: ["orgs", "search", debouncedQ],
     queryFn: () => api.searchOrgs(debouncedQ, 15),
     enabled: debouncedQ.length > 0,
   });
 
-  const selected = (state.selected_org_ids as number[] | undefined) ?? [];
+  const selectedQuery = useQuery({
+    queryKey: ["orgs", "by-ids", [...selected].sort((a, b) => a - b)],
+    queryFn: () => api.getOrgsByIds(selected),
+    enabled: selected.length > 0,
+    // Selection's enriched data is stable -- the underlying
+    // organization_summary table refreshes nightly, so a 5min stale
+    // window is plenty.
+    staleTime: 5 * 60_000,
+  });
 
   const append = useMutation({
     mutationFn: (newSelected: number[]) =>
@@ -136,15 +151,44 @@ function OrgSelectPhase({
     append.mutate(next);
   };
 
+  // Hide already-selected orgs from search results so the list isn't
+  // duplicated -- they're already shown above in the sticky panel.
+  const searchVisible = (search.data ?? []).filter(
+    (r) => !selected.includes(r.org_id)
+  );
+
   return (
     <div>
       <h2 className="text-lg font-semibold mb-1">
         Phase 1 — Select organizations
       </h2>
       <p className="text-sm text-slate-500 mb-4">
-        Search by name; click candidates to add or remove from the selection.
-        Each click creates a new session version (deep-link friendly, undoable).
+        Search by name and click candidates to add or remove. Selected orgs
+        stay pinned at the top regardless of search query. Each click is
+        a new session version (deep-link friendly, undoable).
       </p>
+
+      {selected.length > 0 && (
+        <div className="mb-6">
+          <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+            Selected ({selected.length})
+          </div>
+          {selectedQuery.isLoading && (
+            <div className="text-xs text-slate-500">Loading details...</div>
+          )}
+          <div className="space-y-2">
+            {(selectedQuery.data ?? []).map((r: OrgSearchResult) => (
+              <OrgCard
+                key={r.org_id}
+                org={r}
+                selected={true}
+                onToggle={() => toggle(r.org_id)}
+                disabled={append.isPending}
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
       <input
         type="text"
@@ -155,24 +199,6 @@ function OrgSelectPhase({
         className="w-full border border-slate-300 rounded-md px-3 py-2 mb-4"
       />
 
-      {selected.length > 0 && (
-        <div className="mb-4">
-          <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
-            Selected ({selected.length})
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {selected.map((id) => (
-              <span
-                key={id}
-                className="px-2 py-1 rounded-full bg-slate-900 text-white text-xs"
-              >
-                org_id={id}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
       {search.isLoading && (
         <div className="text-slate-500 text-sm">Searching...</div>
       )}
@@ -181,33 +207,22 @@ function OrgSelectPhase({
           {(search.error as Error).message}
         </div>
       )}
+      {debouncedQ.length > 0 && !search.isLoading &&
+        searchVisible.length === 0 && (search.data?.length ?? 0) === 0 && (
+        <div className="text-slate-500 text-sm">No matches.</div>
+      )}
 
-      <ul className="divide-y border rounded-md">
-        {search.data?.map((r: OrgSearchResult) => {
-          const isSel = selected.includes(r.org_id);
-          return (
-            <li key={r.org_id}>
-              <button
-                onClick={() => toggle(r.org_id)}
-                disabled={append.isPending}
-                className={
-                  "w-full text-left px-4 py-3 hover:bg-slate-50 flex items-center gap-3 " +
-                  (isSel ? "bg-slate-100" : "")
-                }
-              >
-                <input type="checkbox" readOnly checked={isSel} />
-                <div className="flex-1">
-                  <div className="font-medium">{r.name}</div>
-                  <div className="text-xs text-slate-500">
-                    {r.why_match} · score {r.score.toFixed(2)}
-                  </div>
-                </div>
-                <code className="text-xs text-slate-400">#{r.org_id}</code>
-              </button>
-            </li>
-          );
-        })}
-      </ul>
+      <div className="space-y-2">
+        {searchVisible.map((r: OrgSearchResult) => (
+          <OrgCard
+            key={r.org_id}
+            org={r}
+            selected={false}
+            onToggle={() => toggle(r.org_id)}
+            disabled={append.isPending}
+          />
+        ))}
+      </div>
     </div>
   );
 }

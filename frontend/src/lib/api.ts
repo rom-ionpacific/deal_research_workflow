@@ -52,12 +52,27 @@ export interface SessionWithCurrent {
   current_version: Version;
 }
 
+export interface OrgContact {
+  email: string;
+  name: string | null;
+}
+
 export interface OrgSearchResult {
   org_id: number;
   name: string;
-  score: number;
-  why_match: string;
+  // score / why_match are present on /orgs/search hits but not on
+  // /orgs/by-ids batch fetches.
+  score: number | null;
+  why_match: string | null;
   sample_evidence: string[];
+  // enriched fields from dealcloud.organization_summary; refreshed
+  // nightly. Counts default to 0 when the org isn't in the summary
+  // table; the contact fields are nullable.
+  document_count: number;
+  communication_count: number;
+  latest_update_at: string | null;
+  main_contact: OrgContact | null;
+  main_ion_contact: OrgContact | null;
 }
 
 // ----- chat -----
@@ -134,6 +149,11 @@ export const api = {
   searchOrgs: (q: string, limit = 10) =>
     request<OrgSearchResult[]>(
       `/api/v1/orgs/search?q=${encodeURIComponent(q)}&limit=${limit}`
+    ),
+
+  getOrgsByIds: (ids: number[]) =>
+    request<OrgSearchResult[]>(
+      `/api/v1/orgs/by-ids?ids=${ids.join(",")}`
     ),
 
   listMessages: (sessionId: string, limit = 200) =>
