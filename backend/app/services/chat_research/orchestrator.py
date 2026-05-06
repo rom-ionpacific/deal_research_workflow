@@ -98,8 +98,15 @@ class TurnRequest:
 
 def _sse_format(event_type: str, payload: dict) -> str:
     """Format an SSE frame. Newlines in JSON are escaped by `json.dumps`,
-    so the single `data:` line is safe."""
-    body = json.dumps(payload, default=str)
+    so the single `data:` line is safe.
+
+    Always injects ``type`` into the data body (with the explicit
+    ``event_type`` arg winning over anything in payload). The SSE spec
+    has the type on the ``event:`` line, but our frontend reads it from
+    the JSON body for convenience -- without this merge, orchestrator-
+    only events like turn_start/turn_done lack ``type`` in the body and
+    silently slip past the frontend's ``switch(ev.type)``."""
+    body = json.dumps({**payload, "type": event_type}, default=str)
     return f"event: {event_type}\ndata: {body}\n\n"
 
 

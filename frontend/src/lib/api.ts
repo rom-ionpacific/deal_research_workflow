@@ -224,15 +224,27 @@ export async function streamChat(req: ChatStreamRequest): Promise<void> {
 }
 
 function dispatchFrame(frame: string, onEvent: (ev: ChatEvent) => void): void {
+  // Read both the `event:` line and the `data:` line. The SSE spec
+  // makes `event:` the authoritative type; we use it as a fallback
+  // when the JSON body lacks one. Earlier orchestrator code emitted
+  // turn_start / turn_done with payloads that didn't include `type`,
+  // and the frontend's switch silently no-op'd, leaving the input
+  // disabled forever. This makes either source of truth work.
   let dataStr = "";
+  let eventType = "";
   for (const line of frame.split("\n")) {
     if (line.startsWith("data:")) dataStr += line.slice(5).trim();
-    // The orchestrator sets `event:` on every frame, but the JSON body
-    // already carries `type`, so we don't need to read the event line.
+    else if (line.startsWith("event:")) eventType = line.slice(6).trim();
   }
   if (!dataStr) return;
   try {
-    onEvent(JSON.parse(dataStr) as ChatEvent);
+    const parsed = JSON.parse(dataStr) as Partial<ChatEvent> & {
+      type?: string;
+    };
+    if (!parsed.type && eventType) {
+      (parsed as { type: string }).type = eventType;
+    }
+    onEvent(parsed as ChatEvent);
   } catch (err) {
     console.warn("SSE: malformed JSON in data:", dataStr, err);
   }
