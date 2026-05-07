@@ -24,9 +24,13 @@ Two responsibilities:
     inside one transaction the cron can't observe a partially-built
     room. Returns (room_id, new_version_id, new_session_row).
 
-V0 scope: presets only. Custom questions are not natively supported
-by `historical_data_room_question` (which only references
-preset_question_id). See research_workflow.md for follow-up.
+Custom questions: stored in the same `data_room_preset_question`
+table, but with `grouping=NULL` and `originator=<user.email>` (the
+'default' grouping is reserved for the seed set). This mirrors the
+org-history-viewer pattern: edits create new rows rather than
+UPDATE-ing in place, so already-built historical rooms keep their
+exact question text intact. The session's `preset_question_ids`
+holds the union of default + custom ids.
 
 Multi-org sessions: `historical_data_room.main_organization_id` is a
 single column, so we pick `selected_org_ids[0]`. The full list is
@@ -74,15 +78,16 @@ class BuiltDataRoom:
 
 
 def list_preset_questions() -> list[dict]:
-    """Return active preset questions in the default grouping. Custom
-    questions added by other features (if/when added) live under
-    different `grouping` values; we filter them out here so Phase 3's
-    UI only shows what's intended for end-user picking."""
+    """Return active default-grouping preset questions. Used by the
+    frontend to render the always-visible defaults section + by the
+    chat tool's read path. Custom questions are loaded separately by
+    id (see `get_preset_questions_by_ids`) since the UI only surfaces
+    the customs already in the user's question plan."""
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
             """
-            SELECT id, label, question_text, sort_order, grouping
+            SELECT id, label, question_text, sort_order, grouping, originator
               FROM dealcloud.data_room_preset_question
              WHERE is_active = TRUE
                AND grouping = 'default'
@@ -90,6 +95,61 @@ def list_preset_questions() -> list[dict]:
             """
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def get_preset_questions_by_ids(ids: list[int]) -> list[dict]:
+    """Fetch active rows by id. Returns rows in the order requested
+    (preserving the user's intended question order); silently drops
+    inactive or missing ids. Used to render custom rows already in
+    `preset_question_ids` -- the defaults endpoint won't include them."""
+    if not ids:
+        return []
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT id, label, question_text, sort_order, grouping, originator
+              FROM dealcloud.data_room_preset_question
+             WHERE id = ANY(%s)
+               AND is_active = TRUE
+            """,
+            (ids,),
+        )
+        by_id = {r["id"]: dict(r) for r in cur.fetchall()}
+    return [by_id[i] for i in ids if i in by_id]
+
+
+def create_preset_question(
+    label: str, question_text: str, user_email: str
+) -> dict:
+    """Insert a new custom preset question owned by `user_email`. The
+    edit flow also calls this -- editing is modeled as "spawn a new row,
+    leave the old row in place" so historical data rooms that reference
+    the original keep working. Caller is responsible for then swapping
+    the new id into the session's `preset_question_ids` (and removing
+    the old id, in the edit case)."""
+    label = label.strip()
+    question_text = question_text.strip()
+    if not label or not question_text:
+        raise BuildError("label and question_text are required")
+    if len(label) > 200:
+        raise BuildError("label too long (max 200 chars)")
+    if len(question_text) > 2000:
+        raise BuildError("question_text too long (max 2000 chars)")
+
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            INSERT INTO dealcloud.data_room_preset_question
+                (label, question_text, originator, grouping, is_active)
+            VALUES (%s, %s, %s, NULL, TRUE)
+            RETURNING id, label, question_text, sort_order,
+                      grouping, originator
+            """,
+            (label, question_text, user_email),
+        )
+        return dict(cur.fetchone())
 
 
 # -- build path ------------------------------------------------------------
@@ -208,14 +268,18 @@ def build_data_room_from_session(
         # we materialise the explicit list here so the session is
         # reproducible.
         if preset_ids:
+            # Defaults are always allowed; customs must be active and
+            # owned by the requesting user (mirrors the visibility model
+            # in the picker -- you can only build with your own customs
+            # or shared defaults).
             cur.execute(
                 """
                 SELECT id FROM dealcloud.data_room_preset_question
                  WHERE id = ANY(%s)
                    AND is_active = TRUE
-                   AND grouping = 'default'
+                   AND (grouping = 'default' OR originator = %s)
                 """,
-                (preset_ids,),
+                (preset_ids, user.email),
             )
             valid_ids = {r["id"] for r in cur.fetchall()}
             ordered = [qid for qid in preset_ids if qid in valid_ids]

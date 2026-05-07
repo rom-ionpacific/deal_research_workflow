@@ -135,6 +135,10 @@ export interface PresetQuestion {
   question_text: string;
   sort_order: number | null;
   grouping: string | null;
+  // Email of the user who authored this row. NULL on the seed
+  // 'default'-grouping rows. Used to gate edit/delete in the UI --
+  // you can only edit your own customs.
+  originator?: string | null;
 }
 
 export interface BuildDataRoomResp {
@@ -254,6 +258,24 @@ export const api = {
   // ---- phase 3: data-rooms ----
   getPresetQuestions: () =>
     request<PresetQuestion[]>("/api/v1/data-rooms/preset-questions"),
+
+  // Hydrate question rows by id (used to render custom questions
+  // already in the session's preset_question_ids -- the defaults
+  // endpoint won't include them).
+  getPresetQuestionsByIds: (ids: number[]) =>
+    request<PresetQuestion[]>(
+      `/api/v1/data-rooms/preset-questions/by-ids?ids=${ids.join(",")}`,
+    ),
+
+  // Create a custom question. Used by both add (label+text new) and
+  // edit (label+text replacing an existing row) flows -- in the edit
+  // case the caller is then expected to swap the new id into
+  // preset_question_ids in a session_version append.
+  createPresetQuestion: (label: string, question_text: string) =>
+    request<PresetQuestion>("/api/v1/data-rooms/preset-questions", {
+      method: "POST",
+      body: JSON.stringify({ label, question_text }),
+    }),
 
   buildDataRoom: (sessionId: string) =>
     request<BuildDataRoomResp>(

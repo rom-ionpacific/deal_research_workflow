@@ -746,6 +746,8 @@ def _read_current_state(ctx: dict) -> dict:
 from ..dataroom_setup import (
     BuildError as _BuildError,
     build_data_room_from_session as _build_data_room_from_session,
+    create_preset_question as _create_preset_question,
+    get_preset_questions_by_ids as _get_preset_questions_by_ids,
     list_preset_questions as _list_preset_questions,
 )
 
@@ -829,6 +831,166 @@ def _patch_preset_questions(
     new_state = dict(state)
     new_state["preset_question_ids"] = new
     return new_state, summary
+
+
+class CreateCustomQuestionInput(BaseModel):
+    label: str = Field(
+        ...,
+        description=(
+            "Short label / title for the question (<= 200 chars). Shown "
+            "to the user in the question list."
+        ),
+        min_length=1,
+        max_length=200,
+    )
+    question_text: str = Field(
+        ...,
+        description=(
+            "Full question text (<= 2000 chars). This is what the LLM "
+            "will be asked to answer for each entity."
+        ),
+        min_length=1,
+        max_length=2000,
+    )
+
+
+class EditCustomQuestionInput(CreateCustomQuestionInput):
+    old_preset_question_id: int = Field(
+        ...,
+        description=(
+            "id of the existing custom row to replace. The old row "
+            "stays in dealcloud.data_room_preset_question (so any "
+            "previously-built data rooms keep their wording); a new "
+            "row is inserted and the session's plan is updated to "
+            "swap old_id -> new_id atomically."
+        ),
+    )
+
+
+@phase3_registry.tool(
+    "create_custom_question",
+    (
+        "Author a brand-new custom question and add it to the user's "
+        "question plan. Use this when the user describes a question "
+        "that doesn't match an existing preset. Mutates state."
+    ),
+    CreateCustomQuestionInput,
+    mutates_state=True,
+)
+def create_custom_question(
+    inp: CreateCustomQuestionInput, ctx: dict
+) -> ToolResult:
+    user = ctx["user"]
+    try:
+        row = _create_preset_question(inp.label, inp.question_text, user.email)
+    except _BuildError as e:
+        return ToolResult(output=str(e))
+    new_id = int(row["id"])
+
+    def mutate(state: dict) -> tuple[dict, str | None]:
+        cur = list(state.get("preset_question_ids") or [])
+        if new_id in cur:
+            return state, None
+        new_state = dict(state)
+        new_state["preset_question_ids"] = cur + [new_id]
+        return new_state, f"Add custom question {new_id} ({row['label']!r})"
+
+    result = _append_version_if_changed(
+        ctx,
+        mutate,
+        no_op_message=(
+            f"Custom question {new_id} created but somehow already in "
+            "the plan."
+        ),
+    )
+    # Surface the new row so the model can refer to it next turn
+    # without a separate lookup.
+    if isinstance(result.output, dict):
+        result.output["created_question"] = row
+    return result
+
+
+@phase3_registry.tool(
+    "edit_custom_question",
+    (
+        "Replace an existing custom question with new label / text. "
+        "Implementation note: the old row is preserved in the database "
+        "(so previously-built data rooms keep their original wording) "
+        "and a new row is inserted; the session's plan is updated to "
+        "swap old_id -> new_id. Only works on the user's own custom "
+        "questions; default-grouping rows can't be edited. Mutates state."
+    ),
+    EditCustomQuestionInput,
+    mutates_state=True,
+)
+def edit_custom_question(
+    inp: EditCustomQuestionInput, ctx: dict
+) -> ToolResult:
+    user = ctx["user"]
+    # Verify the old id exists, is active, and belongs to this user.
+    existing = _get_preset_questions_by_ids([inp.old_preset_question_id])
+    if not existing:
+        return ToolResult(
+            output=(
+                f"Question {inp.old_preset_question_id} not found or "
+                "no longer active."
+            )
+        )
+    old = existing[0]
+    if old.get("grouping") == "default":
+        return ToolResult(
+            output=(
+                "Default-grouping questions can't be edited. Add a new "
+                "custom question instead via create_custom_question."
+            )
+        )
+    if old.get("originator") and old["originator"] != user.email:
+        return ToolResult(
+            output=(
+                "You can only edit your own custom questions "
+                f"(this one belongs to {old['originator']})."
+            )
+        )
+
+    try:
+        new_row = _create_preset_question(
+            inp.label, inp.question_text, user.email
+        )
+    except _BuildError as e:
+        return ToolResult(output=str(e))
+    new_id = int(new_row["id"])
+
+    def mutate(state: dict) -> tuple[dict, str | None]:
+        cur_ids = list(state.get("preset_question_ids") or [])
+        if inp.old_preset_question_id not in cur_ids:
+            # Old id wasn't in the plan; just append the new one.
+            if new_id in cur_ids:
+                return state, None
+            new_state = dict(state)
+            new_state["preset_question_ids"] = cur_ids + [new_id]
+            return new_state, f"Add custom question {new_id}"
+        swapped = [
+            new_id if x == inp.old_preset_question_id else x for x in cur_ids
+        ]
+        new_state = dict(state)
+        new_state["preset_question_ids"] = swapped
+        return new_state, (
+            f"Edit custom question {inp.old_preset_question_id} "
+            f"-> {new_id}"
+        )
+
+    result = _append_version_if_changed(
+        ctx,
+        mutate,
+        no_op_message=(
+            f"Edited question {inp.old_preset_question_id} but the "
+            "session plan didn't change."
+        ),
+    )
+    if isinstance(result.output, dict):
+        result.output["new_question"] = new_row
+        result.output["replaces_id"] = inp.old_preset_question_id
+    return result
 
 
 @phase3_registry.tool(
