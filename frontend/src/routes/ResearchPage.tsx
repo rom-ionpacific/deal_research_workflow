@@ -41,7 +41,10 @@ export default function ResearchPage() {
 
   return (
     <div className="h-full grid grid-cols-[1fr_400px]">
-      <div className="overflow-y-auto">
+      {/* min-h-0 on each grid cell -- items default to
+          min-height: auto, which lets them expand to fit content
+          and breaks the columns' inner scrolling. */}
+      <div className="min-h-0 overflow-y-auto">
         <div className="max-w-3xl mx-auto p-6">
           <PhaseStepper currentPhase={current_version.phase} />
           {current_version.phase === "org_select" && (

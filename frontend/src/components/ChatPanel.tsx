@@ -173,8 +173,12 @@ export default function ChatPanel({
     }
   };
 
+  // min-h-0 on the flex root lets the flex-1 messages list below
+  // shrink to its cell height instead of expanding to fit content
+  // (the default in flex/grid is min-height: auto, which defeats
+  // overflow-y on children).
   return (
-    <div className="flex flex-col h-full border-l border-slate-200 bg-slate-50">
+    <div className="flex flex-col h-full min-h-0 border-l border-slate-200 bg-slate-50">
       <header className="px-4 py-2 border-b border-slate-200 bg-white">
         <h3 className="text-sm font-semibold text-slate-700">AI assistant</h3>
         <p className="text-xs text-slate-500">
@@ -182,7 +186,7 @@ export default function ChatPanel({
         </p>
       </header>
 
-      <div className="flex-1 overflow-y-auto p-3 space-y-3">
+      <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
         {messages.isLoading && (
           <div className="text-xs text-slate-500">Loading conversation...</div>
         )}
