@@ -391,10 +391,361 @@ def _append_version_with_phase(
     )
 
 
+# ---- Phase 2 (entity_select) ----------------------------------------------
+
+from datetime import datetime as _datetime
+from typing import Literal as _Literal
+
+from ..entity_browser import (
+    ENTITY_TYPES,
+    EntityFilter as _EntityFilter,
+    count_entities as _count_entities,
+    list_entities as _list_entities,
+)
+
+
+_EntityTypeStr = _Literal[
+    "document", "email_thread", "calendar_event", "slack_message_group"
+]
+
+
+class _FilterFields(BaseModel):
+    """Common filter fields used by Phase 2 read + select-all tools."""
+    date_from: _datetime | None = Field(
+        None,
+        description=(
+            "ISO 8601 timestamp; entities with the relevant date column "
+            "(modified_at for documents, last_message_at for threads, "
+            "start_time for events, last_ts for slack groups) earlier "
+            "than this are excluded."
+        ),
+    )
+    date_to: _datetime | None = Field(
+        None,
+        description="ISO 8601 timestamp; entities later than this are excluded.",
+    )
+    contains: str | None = Field(
+        None,
+        max_length=200,
+        description=(
+            "Free-text keyword. ILIKE'd against each type's text columns "
+            "(name/path/summary for documents, subject/summary for threads, "
+            "subject/organizer/summary for events, summary/raw_text for slack)."
+        ),
+    )
+
+
+class CountEntitiesInput(_FilterFields):
+    entity_type: _EntityTypeStr
+
+
+class PreviewEntitiesInput(_FilterFields):
+    entity_type: _EntityTypeStr
+    limit: int = Field(5, ge=1, le=20)
+
+
+class SelectAllMatchingInput(_FilterFields):
+    entity_type: _EntityTypeStr
+    cap: int = Field(
+        500, ge=1, le=2000,
+        description=(
+            "Maximum number of entity IDs to add to the selection in this "
+            "call. Hard-capped at 2000 to avoid runaway selections; if "
+            "the count is higher the user should narrow the filter first."
+        ),
+    )
+
+
+class EntityRefInput(BaseModel):
+    entity_type: _EntityTypeStr
+    entity_id: int
+
+
+def _selected_org_ids_from_state(state: dict) -> list[int]:
+    ids = state.get("selected_org_ids") or []
+    return [int(x) for x in ids]
+
+
+def _entity_filter_from(inp: _FilterFields) -> _EntityFilter:
+    return _EntityFilter(
+        date_from=inp.date_from,
+        date_to=inp.date_to,
+        contains=(inp.contains.strip() if inp.contains else None) or None,
+    )
+
+
+phase2_registry = ToolRegistry()
+
+
+@phase2_registry.tool(
+    "count_entities_matching",
+    (
+        "Count entities of one type matching the filter, scoped to the "
+        "session's selected_org_ids. Read-only. Use this to size up a "
+        "filter before calling select_all_matching."
+    ),
+    CountEntitiesInput,
+)
+def count_entities_matching(inp: CountEntitiesInput, ctx: dict) -> ToolResult:
+    state = _read_current_state(ctx)
+    org_ids = _selected_org_ids_from_state(state)
+    if not org_ids:
+        return ToolResult(output="No selected_org_ids on this session.")
+    n = _count_entities(org_ids, inp.entity_type, _entity_filter_from(inp))
+    return ToolResult(output={"entity_type": inp.entity_type, "count": n})
+
+
+@phase2_registry.tool(
+    "preview_entities",
+    (
+        "Return up to `limit` (default 5) of the most recent entities "
+        "matching the filter, scoped to the session's selected orgs. "
+        "Read-only. Use to show the user a sample before selecting."
+    ),
+    PreviewEntitiesInput,
+)
+def preview_entities(inp: PreviewEntitiesInput, ctx: dict) -> ToolResult:
+    state = _read_current_state(ctx)
+    org_ids = _selected_org_ids_from_state(state)
+    if not org_ids:
+        return ToolResult(output="No selected_org_ids on this session.")
+    rows = _list_entities(
+        org_ids, inp.entity_type, _entity_filter_from(inp),
+        limit=inp.limit, offset=0,
+    )
+    return ToolResult(
+        output={
+            "entity_type": inp.entity_type,
+            "count_returned": len(rows),
+            "rows": rows,
+        }
+    )
+
+
+@phase2_registry.tool(
+    "select_all_matching",
+    (
+        "Add every entity of `entity_type` matching the filter to the "
+        "user's selection. Hard-capped at `cap` IDs (default 500, max "
+        "2000) -- if the underlying count is higher, narrow the filter "
+        "first. Idempotent: already-selected entities are not duplicated. "
+        "Mutates state."
+    ),
+    SelectAllMatchingInput,
+    mutates_state=True,
+)
+def select_all_matching(inp: SelectAllMatchingInput, ctx: dict) -> ToolResult:
+    matched_ids: list[int] = []
+
+    def mutate_with_phase(
+        cur, conn, session_row, current_version_row
+    ) -> tuple[str, dict, str | None]:
+        nonlocal matched_ids
+        cur_state = current_version_row["state"]
+        if isinstance(cur_state, str):
+            cur_state = json.loads(cur_state)
+        org_ids = _selected_org_ids_from_state(cur_state)
+        if not org_ids:
+            return current_version_row["phase"], cur_state, None
+
+        rows = _list_entities(
+            org_ids, inp.entity_type, _entity_filter_from(inp),
+            limit=inp.cap, offset=0,
+        )
+        matched_ids = [int(r["id"]) for r in rows]
+        if not matched_ids:
+            return current_version_row["phase"], cur_state, None
+
+        sel_map = dict(cur_state.get("selected_entity_ids") or {})
+        existing = list(sel_map.get(inp.entity_type) or [])
+        existing_set = set(existing)
+        added = [i for i in matched_ids if i not in existing_set]
+        if not added:
+            return current_version_row["phase"], cur_state, None
+
+        sel_map[inp.entity_type] = existing + added
+        new_state = dict(cur_state)
+        new_state["selected_entity_ids"] = sel_map
+        summary = (
+            f"Add {len(added)} {inp.entity_type} via filter"
+        )
+        return current_version_row["phase"], new_state, summary
+
+    return _append_version_with_phase(
+        ctx,
+        mutate_with_phase,
+        no_op_message=(
+            f"No new {inp.entity_type} matched -- either the filter is "
+            "empty or all matches were already selected."
+        ),
+        extra_payload={"matched_count": len(matched_ids)},
+    )
+
+
+@phase2_registry.tool(
+    "select_entity",
+    (
+        "Add ONE entity to the user's selection by id. No-op if it's "
+        "already selected. Mutates state."
+    ),
+    EntityRefInput,
+    mutates_state=True,
+)
+def select_entity(inp: EntityRefInput, ctx: dict) -> ToolResult:
+    return _append_version_if_changed(
+        ctx,
+        lambda state: _patch_entity_selection(state, inp.entity_type, inp.entity_id, add=True),
+        no_op_message=f"{inp.entity_type} {inp.entity_id} was already selected.",
+    )
+
+
+@phase2_registry.tool(
+    "deselect_entity",
+    "Remove ONE entity from the user's selection by id. No-op if it's not selected. Mutates state.",
+    EntityRefInput,
+    mutates_state=True,
+)
+def deselect_entity(inp: EntityRefInput, ctx: dict) -> ToolResult:
+    return _append_version_if_changed(
+        ctx,
+        lambda state: _patch_entity_selection(state, inp.entity_type, inp.entity_id, add=False),
+        no_op_message=f"{inp.entity_type} {inp.entity_id} was not selected.",
+    )
+
+
+def _patch_entity_selection(
+    state: dict, entity_type: str, entity_id: int, *, add: bool
+) -> tuple[dict, str | None]:
+    sel_map = dict(state.get("selected_entity_ids") or {})
+    cur = list(sel_map.get(entity_type) or [])
+    if add:
+        if entity_id in cur:
+            return state, None
+        sel_map[entity_type] = cur + [entity_id]
+        summary = f"Add {entity_type} {entity_id}"
+    else:
+        if entity_id not in cur:
+            return state, None
+        sel_map[entity_type] = [x for x in cur if x != entity_id]
+        summary = f"Remove {entity_type} {entity_id}"
+    new_state = dict(state)
+    new_state["selected_entity_ids"] = sel_map
+    return new_state, summary
+
+
+@phase2_registry.tool(
+    "back_to_org_select",
+    (
+        "Return to Phase 1 (org_select). The current entity selection is "
+        "preserved on the version chain so the user can come back to it. "
+        "Mutates state."
+    ),
+    NoArgs,
+    mutates_state=True,
+)
+def back_to_org_select(inp: NoArgs, ctx: dict) -> ToolResult:
+    def mutate_with_phase(
+        cur, conn, session_row, current_version_row
+    ) -> tuple[str, dict, str | None]:
+        cur_state = current_version_row["state"]
+        if isinstance(cur_state, str):
+            cur_state = json.loads(cur_state)
+        # Phase 1 expects org_select shape; the entity_select state is
+        # preserved on the prior version (parent_id chains back), so
+        # advancing forward again starts from a fresh entity_select
+        # block above the original. For V0 that's the simplest model;
+        # we can add "resume from previous entity_select" later.
+        new_state = {
+            "user_query": "",
+            "ai_candidates": [],
+            "selected_org_ids": cur_state.get("selected_org_ids") or [],
+        }
+        return "org_select", new_state, "Back to org_select"
+
+    return _append_version_with_phase(
+        ctx,
+        mutate_with_phase,
+        no_op_message="Already on org_select.",
+        success_payload_key="next_phase",
+        success_payload_value="org_select",
+    )
+
+
+@phase2_registry.tool(
+    "advance_to_data_room_setup",
+    (
+        "Move to Phase 3 (data_room_setup). Refuses if no entities are "
+        "selected. The selection carries forward. Mutates state."
+    ),
+    NoArgs,
+    mutates_state=True,
+)
+def advance_to_data_room_setup(inp: NoArgs, ctx: dict) -> ToolResult:
+    selected_total_for_log = 0
+
+    def mutate_with_phase(
+        cur, conn, session_row, current_version_row
+    ) -> tuple[str, dict, str | None]:
+        nonlocal selected_total_for_log
+        cur_state = current_version_row["state"]
+        if isinstance(cur_state, str):
+            cur_state = json.loads(cur_state)
+        sel_map = cur_state.get("selected_entity_ids") or {}
+        total = sum(len(v or []) for v in sel_map.values())
+        if total == 0:
+            return current_version_row["phase"], cur_state, None
+        selected_total_for_log = total
+        new_state = {
+            "inherits_from_version": str(current_version_row["id"]),
+            "selected_org_ids": cur_state.get("selected_org_ids") or [],
+            "selected_entity_ids": sel_map,
+            "preset_question_ids": [],
+            "custom_questions": [],
+            "data_room_id": None,
+        }
+        return "data_room_setup", new_state, "Advance to data_room_setup"
+
+    return _append_version_with_phase(
+        ctx,
+        mutate_with_phase,
+        no_op_message=(
+            "Cannot advance to data_room_setup with zero entities selected."
+        ),
+        success_payload_key="next_phase",
+        success_payload_value="data_room_setup",
+        extra_payload={"selected_entity_total": selected_total_for_log},
+    )
+
+
+def _read_current_state(ctx: dict) -> dict:
+    """Read the current session_version's state. Used by Phase 2 read
+    tools (count, preview) which need the org bundle but don't mutate."""
+    session_id = ctx["session_id"]
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT v.state
+              FROM research.session s
+              JOIN research.session_version v ON v.id = s.current_version_id
+             WHERE s.id = %s
+            """,
+            (str(session_id),),
+        )
+        row = cur.fetchone()
+    if not row:
+        return {}
+    state = row["state"]
+    if isinstance(state, str):
+        state = json.loads(state)
+    return state or {}
+
+
 # ---- Public registry lookup ------------------------------------------------
 
 REGISTRIES = {
     "org_select": phase1_registry,
+    "entity_select": phase2_registry,
 }
 
 
