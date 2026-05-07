@@ -533,8 +533,20 @@ function OrgSelectPhase({
       {/* Selected section + search results in one scroll flow. Selected
           orgs are visually grouped at the top via the header, but they
           scroll with everything else so a long selection doesn't
-          fill the viewport and hide search results. */}
+          fill the viewport and hide search results. The select-all
+          toggle for the current search lives above the Selected
+          section so it's the first action the user sees after typing
+          a query. */}
       <div className="space-y-2 mt-2">
+        {(search.data?.length ?? 0) > 0 && (
+          <SelectAllMatchesHeader
+            matchIds={(search.data ?? []).map((r) => r.org_id)}
+            selectedIds={selected}
+            disabled={bulkPending}
+            onToggle={onToggleAllMatches}
+          />
+        )}
+
         {selected.length > 0 && (
           <div className="pt-1 pb-3 border-b border-slate-200 mb-2">
             <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">
@@ -571,15 +583,6 @@ function OrgSelectPhase({
           (search.data?.length ?? 0) === 0 && (
             <div className="text-slate-500 text-sm pt-1">No matches.</div>
           )}
-
-        {(search.data?.length ?? 0) > 0 && (
-          <SelectAllMatchesHeader
-            matchIds={(search.data ?? []).map((r) => r.org_id)}
-            selectedIds={selected}
-            disabled={bulkPending}
-            onToggle={onToggleAllMatches}
-          />
-        )}
 
         {searchVisible.length === 0 && (search.data?.length ?? 0) > 0 && (
           <div className="text-xs text-slate-500 pt-1 px-3">
