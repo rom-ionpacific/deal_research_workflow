@@ -3,7 +3,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
-from .routes import chat, entities, health, orgs, sessions, slack, versions
+from .routes import (
+    chat,
+    data_rooms,
+    entities,
+    health,
+    orgs,
+    sessions,
+    slack,
+    versions,
+)
 
 app = FastAPI(
     title="deal_research_workflow API",
@@ -26,6 +35,7 @@ app.include_router(versions.router, prefix="/api/v1")
 app.include_router(orgs.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")
 app.include_router(entities.router, prefix="/api/v1")
+app.include_router(data_rooms.router, prefix="/api/v1")
 # Slack endpoints (Todd the Walrus). Mounted at /slack -- signature
 # verification is per-route, NOT global, so the /api/v1 routes still
 # use X-User-Email auth.
