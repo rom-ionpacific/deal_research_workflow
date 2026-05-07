@@ -1,33 +1,30 @@
-"""Todd conversation engine -- Phase 2.
+"""Todd conversation engine.
 
-Single turn flow (slash / @mention / DM all funnel here):
+Two flavours, dispatched on the `trigger` argument:
 
-  1. Search the org name via existing services.org_search
-  2. Bundle hits via dealcloud.bundle_via_supersede(): collapse aliases
-     and superseded orgs to canonical heads
-  3. If 0 canonicals -> "no match" reply
-  4. If 1 canonical -> auto-bundle, fetch dossier, post answers
-  5. If >=2 canonicals -> Block Kit disambiguation buttons; user click
-     resumes via handle_picked
+  1. **Slash command** (`trigger='slash'`): the original Phase 2
+     canned-dossier path. Search -> bundle -> 5 fixed answers (or
+     Block Kit disambiguation if multiple canonical matches). Posts
+     via `response_url` because the bot may not be in the channel
+     where /todd was issued.
 
-Two posting backends, picked per entry point:
-  - **response_url** (slash commands): works even when the bot isn't a
-    member of the channel where /todd was issued (a common case --
-    Slack only invites the bot to channels it's explicitly added to).
-    Each response_url permits 5 follow-up messages within 30 minutes.
-  - **chat.postMessage** (events: app_mention, DM): the bot is in the
-    channel, so direct posting works AND we get a `ts` back to thread
-    subsequent messages under.
+  2. **DM + @mention** (any other trigger, e.g. 'event'): Phase 3
+     conversational path. Routes to `chat_slack.run_slack_chat_turn`,
+     which runs an Anthropic tool loop with the Slack-side tool
+     registry, persists message history per-thread, and posts the
+     assistant's prose plus tool-call breadcrumbs via
+     `chat.postMessage`.
 
-Threading rules:
-  - app_mention (chat.postMessage path): intro + 5 answers all in
-    user's existing thread
-  - DM (chat.postMessage path): intro top-level, 5 answers thread
-    under intro (DMs hide threads behind a "View thread" expander
-    only when there's just ONE reply -- 5 replies show inline)
-  - slash command (response_url path): no threading available
-    (response_url posts don't return a ts); user sees 5 messages in
-    sequence after the slash's initial JSON placeholder
+The entry-point split lives in `handle_turn`; the slash flow stays in
+this file (`_do_turn` + `post_dossier`), the conversational flow lives
+in the `chat_slack/` module.
+
+Threading rules unchanged:
+  - app_mention: replies thread under the user's mention ts
+  - DM: replies stay top-level (DMs collapse single-reply threads
+    behind an awkward expander)
+  - slash command: response_url has no thread_ts; messages render as a
+    sequence after the in-channel placeholder
 """
 import json
 import logging
@@ -65,13 +62,48 @@ def handle_turn(
     response_url: Optional[str],
 ) -> None:
     """Single conversation turn. Runs in a BackgroundTask, so blocking
-    Slack + DB calls are fine."""
+    Slack + DB calls are fine.
+
+    `trigger='slash'` keeps the canned 5-answer dossier flow. Any other
+    trigger (DM, @mention) goes through the Phase 3 conversational
+    engine in `chat_slack/`."""
     if client is None and not response_url:
         print("[todd/handle_turn] no Slack client AND no response_url; dropping",
               flush=True)
         return
 
     query = (text or "").strip()
+
+    # Phase 3: DM/@mention -> conversational tool loop
+    if trigger != "slash":
+        from ..chat_slack import run_slack_chat_turn
+        try:
+            run_slack_chat_turn(
+                team_id=team_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                user_id=user_id,
+                user_email=user_email,
+                text=query,
+            )
+        except Exception as e:
+            # Surface a friendly error so the user doesn't stare at
+            # silence. Re-raise so Render logs capture the trace.
+            print(f"[todd/handle_turn] CONV EXCEPTION query={query!r}: "
+                  f"{type(e).__name__}: {e}", flush=True)
+            try:
+                _post(channel_id, thread_ts,
+                      "Todd hit an error",
+                      [section(
+                          f":warning: *Sorry, Todd hit an error.*\n"
+                          f"_(`{type(e).__name__}: {str(e)[:160]}`)_"
+                      )],
+                      response_url=None)
+            except Exception:
+                pass
+            raise
+        return
+
     try:
         _do_turn(
             channel_id=channel_id,
