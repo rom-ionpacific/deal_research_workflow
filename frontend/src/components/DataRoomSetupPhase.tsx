@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   api,
@@ -168,6 +168,36 @@ export default function DataRoomSetupPhase({
       });
 
     return queueRef.current;
+  };
+
+  // Bulk select / deselect all preset (default-grouping) questions.
+  // Operates only on defaults; customs are managed individually since
+  // they're typically small in number and per-row edit/remove is more
+  // useful than a master toggle.
+  const [bulkPending, setBulkPending] = useState(false);
+  const onToggleAllPresets = () => {
+    const presetIds = (presets.data ?? []).map((q) => q.id);
+    if (presetIds.length === 0) return;
+    const cached = qc.getQueryData<SessionWithCurrent>(["session", sessionId]);
+    if (!cached) return;
+    const cur = cached.current_version.state as PhaseState;
+    const curIds = cur.preset_question_ids ?? [];
+    const presetSet = new Set(presetIds);
+    const allSelected = presetIds.every((id) => curIds.includes(id));
+    let nextIds: number[];
+    let summary: string;
+    if (allSelected) {
+      nextIds = curIds.filter((id) => !presetSet.has(id));
+      summary = `Deselect all ${presetIds.length} preset questions`;
+    } else {
+      const toAdd = presetIds.filter((id) => !curIds.includes(id));
+      nextIds = [...curIds, ...toAdd];
+      summary = `Select all ${presetIds.length} preset questions`;
+    }
+    setBulkPending(true);
+    void queueQuestionMutation(nextIds, summary).finally(() =>
+      setBulkPending(false),
+    );
   };
 
   const toggle = (questionId: number) => {
@@ -384,6 +414,14 @@ export default function DataRoomSetupPhase({
       )}
 
       {/* Defaults section */}
+      {(presets.data?.length ?? 0) > 0 && (
+        <SelectAllPresetsHeader
+          presetIds={(presets.data ?? []).map((q) => q.id)}
+          selectedIds={selectedQuestions}
+          disabled={bulkPending}
+          onToggle={onToggleAllPresets}
+        />
+      )}
       <div className="space-y-2">
         {(presets.data ?? []).map((q: PresetQuestion) => (
           <PresetQuestionRow
@@ -499,6 +537,55 @@ export default function DataRoomSetupPhase({
           {building ? "Building..." : "Build data room →"}
         </button>
       </div>
+    </div>
+  );
+}
+
+function SelectAllPresetsHeader({
+  presetIds,
+  selectedIds,
+  disabled,
+  onToggle,
+}: {
+  presetIds: number[];
+  selectedIds: number[];
+  disabled?: boolean;
+  onToggle: () => void;
+}) {
+  const ref = useRef<HTMLInputElement | null>(null);
+  const selectedSet = new Set(selectedIds);
+  const onCount = presetIds.filter((id) => selectedSet.has(id)).length;
+  const allChecked = onCount === presetIds.length && presetIds.length > 0;
+  const someChecked = onCount > 0 && !allChecked;
+
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = someChecked;
+  }, [someChecked]);
+
+  const label = allChecked
+    ? `Deselect all ${presetIds.length} preset questions`
+    : someChecked
+    ? `Select remaining ${presetIds.length - onCount} preset questions`
+    : `Select all ${presetIds.length} preset questions`;
+
+  return (
+    <div className="flex items-center gap-2 px-3 py-2 mb-2 bg-slate-50 border border-slate-200 rounded-md">
+      <input
+        ref={ref}
+        type="checkbox"
+        checked={allChecked}
+        onChange={onToggle}
+        disabled={disabled}
+        className="cursor-pointer disabled:opacity-50"
+      />
+      <button
+        type="button"
+        onClick={onToggle}
+        disabled={disabled}
+        className="text-xs text-slate-700 hover:underline disabled:opacity-50 disabled:no-underline"
+      >
+        {label}
+      </button>
     </div>
   );
 }

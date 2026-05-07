@@ -641,13 +641,38 @@ async function navPhase(
   state: Record<string, unknown>,
   newPhase: "org_select" | "data_room_setup",
 ) {
+  // When advancing into data_room_setup, pre-populate preset_question_ids
+  // with all default question ids so the user lands with everything
+  // already checked. Mirrors the AI tool path
+  // (advance_to_data_room_setup), which also seeds defaults.
+  let nextState: Record<string, unknown> = { ...state };
+  if (newPhase === "data_room_setup") {
+    try {
+      const defaults = await api.getPresetQuestions();
+      nextState = {
+        ...nextState,
+        preset_question_ids: defaults.map((q) => q.id),
+        custom_questions: [],
+        data_room_id: null,
+      };
+    } catch (err) {
+      console.warn(
+        "failed to seed default preset_question_ids; advancing without them",
+        err,
+      );
+      // Fall through with the prior state. The backend cron's "empty
+      // list = all defaults" fallback still kicks in if the user
+      // builds without picking any questions.
+    }
+  }
+
   // Direct version append; no optimistic UI since the phase change
   // is rare and the resulting layout shift would be misleading.
   try {
     const data = await api.appendVersion(sessionId, {
       parent_id: parentVersionId,
       phase: newPhase,
-      state: { ...state },
+      state: nextState,
       summary:
         newPhase === "org_select"
           ? "Back to org_select"

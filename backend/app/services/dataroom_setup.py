@@ -97,6 +97,14 @@ def list_preset_questions() -> list[dict]:
         return [dict(r) for r in cur.fetchall()]
 
 
+def default_preset_question_ids() -> list[int]:
+    """Just the ids, in display order. Used by phase-entry paths
+    (`advance_to_data_room_setup` tool, frontend direct nav) to pre-
+    populate the question plan so "all defaults selected" is the
+    out-of-the-box experience."""
+    return [r["id"] for r in list_preset_questions()]
+
+
 def get_preset_questions_by_ids(ids: list[int]) -> list[dict]:
     """Fetch active rows by id. Returns rows in the order requested
     (preserving the user's intended question order); silently drops

@@ -695,11 +695,15 @@ def advance_to_data_room_setup(inp: NoArgs, ctx: dict) -> ToolResult:
         if total == 0:
             return current_version_row["phase"], cur_state, None
         selected_total_for_log = total
+        # Pre-populate with all default question ids so the user
+        # lands on Phase 3 with everything already selected. Customs
+        # start empty (none authored yet for this session).
+        default_ids = _default_preset_question_ids()
         new_state = {
             "inherits_from_version": str(current_version_row["id"]),
             "selected_org_ids": cur_state.get("selected_org_ids") or [],
             "selected_entity_ids": sel_map,
-            "preset_question_ids": [],
+            "preset_question_ids": default_ids,
             "custom_questions": [],
             "data_room_id": None,
         }
@@ -747,6 +751,7 @@ from ..dataroom_setup import (
     BuildError as _BuildError,
     build_data_room_from_session as _build_data_room_from_session,
     create_preset_question as _create_preset_question,
+    default_preset_question_ids as _default_preset_question_ids,
     get_preset_questions_by_ids as _get_preset_questions_by_ids,
     list_preset_questions as _list_preset_questions,
 )

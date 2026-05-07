@@ -123,6 +123,55 @@ function DataRoomViewPlaceholder({
   );
 }
 
+function SelectAllMatchesHeader({
+  matchIds,
+  selectedIds,
+  disabled,
+  onToggle,
+}: {
+  matchIds: number[];
+  selectedIds: number[];
+  disabled?: boolean;
+  onToggle: () => void;
+}) {
+  const ref = useRef<HTMLInputElement | null>(null);
+  const selectedSet = new Set(selectedIds);
+  const onPage = matchIds.filter((id) => selectedSet.has(id)).length;
+  const allChecked = onPage === matchIds.length && matchIds.length > 0;
+  const someChecked = onPage > 0 && !allChecked;
+
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = someChecked;
+  }, [someChecked]);
+
+  const label = allChecked
+    ? `Deselect all ${matchIds.length} matching results`
+    : someChecked
+    ? `Select remaining ${matchIds.length - onPage} matching results`
+    : `Select all ${matchIds.length} matching results`;
+
+  return (
+    <div className="flex items-center gap-2 px-3 py-2 mb-1 bg-slate-50 border border-slate-200 rounded-md">
+      <input
+        ref={ref}
+        type="checkbox"
+        checked={allChecked}
+        onChange={onToggle}
+        disabled={disabled}
+        className="cursor-pointer disabled:opacity-50"
+      />
+      <button
+        type="button"
+        onClick={onToggle}
+        disabled={disabled}
+        className="text-xs text-slate-700 hover:underline disabled:opacity-50 disabled:no-underline"
+      >
+        {label}
+      </button>
+    </div>
+  );
+}
+
 function PhaseStepper({ currentPhase }: { currentPhase: Phase }) {
   const idx = PHASES.indexOf(currentPhase);
   return (
@@ -323,6 +372,99 @@ function OrgSelectPhase({
     (r) => !selected.includes(r.org_id),
   );
 
+  // Bulk select / deselect all current search matches. Operates on
+  // search.data (the full match set), not searchVisible (which hides
+  // already-selected). Lets the user one-click select every match for
+  // a query, or undo that. Single bulk version-append so undo unwinds
+  // it as one unit; mirrors the entity_select page-checkbox pattern.
+  const [bulkPending, setBulkPending] = useState(false);
+  const onToggleAllMatches = () => {
+    const matchIds = (search.data ?? []).map((r) => r.org_id);
+    if (matchIds.length === 0) return;
+    const cached = qc.getQueryData<SessionWithCurrent>(["session", sessionId]);
+    if (!cached) return;
+    const cur =
+      (cached.current_version.state.selected_org_ids as
+        | number[]
+        | undefined) ?? [];
+    const matchSet = new Set(matchIds);
+    const allSelected = matchIds.every((id) => cur.includes(id));
+    let nextIds: number[];
+    let summary: string;
+    if (allSelected) {
+      nextIds = cur.filter((id) => !matchSet.has(id));
+      summary = `Deselect ${matchIds.length} matching orgs`;
+    } else {
+      const toAdd = matchIds.filter((id) => !cur.includes(id));
+      nextIds = [...cur, ...toAdd];
+      summary = `Select ${toAdd.length} matching orgs`;
+    }
+
+    // Optimistic patch.
+    qc.setQueryData<SessionWithCurrent>(["session", sessionId], {
+      ...cached,
+      current_version: {
+        ...cached.current_version,
+        state: {
+          ...cached.current_version.state,
+          selected_org_ids: nextIds,
+          user_query: q,
+        },
+      },
+    });
+
+    setBulkPending(true);
+    queueRef.current = queueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const latest = qc.getQueryData<SessionWithCurrent>([
+          "session",
+          sessionId,
+        ]);
+        const parentId = latest?.current_version.id ?? parentVersionId;
+        try {
+          const data = await api.appendVersion(sessionId, {
+            parent_id: parentId,
+            phase: "org_select",
+            state: { ...state, selected_org_ids: nextIds, user_query: q },
+            summary,
+          });
+          qc.setQueryData<SessionWithCurrent | undefined>(
+            ["session", sessionId],
+            (old) => {
+              if (!old) {
+                return { session: data.session, current_version: data.version };
+              }
+              const serverIds =
+                (data.version.state.selected_org_ids as
+                  | number[]
+                  | undefined) ?? [];
+              const cacheIds =
+                (old.current_version.state.selected_org_ids as
+                  | number[]
+                  | undefined) ?? [];
+              const hasLater =
+                JSON.stringify(serverIds) !== JSON.stringify(cacheIds);
+              return hasLater
+                ? {
+                    session: data.session,
+                    current_version: {
+                      ...data.version,
+                      state: old.current_version.state,
+                    },
+                  }
+                : { session: data.session, current_version: data.version };
+            },
+          );
+        } catch (err) {
+          console.error("bulk org toggle failed", err);
+          qc.invalidateQueries({ queryKey: ["session", sessionId] });
+        } finally {
+          setBulkPending(false);
+        }
+      });
+  };
+
   // Publish a per-turn UI snapshot to the chat store so the orchestrator
   // can answer "out of these, pick the financial institutions"-style
   // questions without re-running search. The displayed list mirrors what
@@ -429,6 +571,23 @@ function OrgSelectPhase({
           (search.data?.length ?? 0) === 0 && (
             <div className="text-slate-500 text-sm pt-1">No matches.</div>
           )}
+
+        {(search.data?.length ?? 0) > 0 && (
+          <SelectAllMatchesHeader
+            matchIds={(search.data ?? []).map((r) => r.org_id)}
+            selectedIds={selected}
+            disabled={bulkPending}
+            onToggle={onToggleAllMatches}
+          />
+        )}
+
+        {searchVisible.length === 0 && (search.data?.length ?? 0) > 0 && (
+          <div className="text-xs text-slate-500 pt-1 px-3">
+            All {search.data!.length} matching{" "}
+            {search.data!.length === 1 ? "result is" : "results are"} in your
+            selection above.
+          </div>
+        )}
 
         {searchVisible.map((r: OrgSearchResult) => (
           <OrgCard
