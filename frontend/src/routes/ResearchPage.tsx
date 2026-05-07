@@ -162,57 +162,67 @@ function OrgSelectPhase({
       <h2 className="text-lg font-semibold mb-1">
         Phase 1 — Select organizations
       </h2>
-      <p className="text-sm text-slate-500 mb-4">
+      <p className="text-sm text-slate-500 mb-3">
         Search by name and click candidates to add or remove. Selected orgs
-        stay pinned at the top regardless of search query. Each click is
-        a new session version (deep-link friendly, undoable).
+        stay pinned at the top of the list. Each click is a new session
+        version (deep-link friendly, undoable).
       </p>
 
-      {selected.length > 0 && (
-        <div className="mb-6">
-          <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">
-            Selected ({selected.length})
+      {/* Search box stays sticky at the top of the scrolling parent
+          (overflow-y-auto in ResearchPage) so it's always reachable. */}
+      <div className="sticky top-0 bg-white pb-2 z-20 -mx-1 px-1">
+        <input
+          type="text"
+          autoFocus
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Type a company name..."
+          className="w-full border border-slate-300 rounded-md px-3 py-2"
+        />
+      </div>
+
+      {/* Unified list: selected section pinned at top via sticky, then
+          search results below. The selected wrapper sticks just under
+          the search box so as the user scrolls through long results
+          the selection stays in view. */}
+      <div className="space-y-2 mt-2">
+        {selected.length > 0 && (
+          <div className="sticky top-[3.25rem] bg-white z-10 pt-1 pb-1 border-b border-slate-200">
+            <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">
+              Selected ({selected.length})
+            </div>
+            {selectedQuery.isLoading && (
+              <div className="text-xs text-slate-500">Loading details...</div>
+            )}
+            <div className="space-y-1.5">
+              {(selectedQuery.data ?? []).map((r: OrgSearchResult) => (
+                <OrgCard
+                  key={r.org_id}
+                  org={r}
+                  selected={true}
+                  onToggle={() => toggle(r.org_id)}
+                  disabled={append.isPending}
+                />
+              ))}
+            </div>
           </div>
-          {selectedQuery.isLoading && (
-            <div className="text-xs text-slate-500">Loading details...</div>
+        )}
+
+        {search.isLoading && (
+          <div className="text-slate-500 text-sm pt-1">Searching...</div>
+        )}
+        {search.error && (
+          <div className="text-red-600 text-sm pt-1">
+            {(search.error as Error).message}
+          </div>
+        )}
+        {debouncedQ.length > 0 &&
+          !search.isLoading &&
+          searchVisible.length === 0 &&
+          (search.data?.length ?? 0) === 0 && (
+            <div className="text-slate-500 text-sm pt-1">No matches.</div>
           )}
-          <div className="space-y-2">
-            {(selectedQuery.data ?? []).map((r: OrgSearchResult) => (
-              <OrgCard
-                key={r.org_id}
-                org={r}
-                selected={true}
-                onToggle={() => toggle(r.org_id)}
-                disabled={append.isPending}
-              />
-            ))}
-          </div>
-        </div>
-      )}
 
-      <input
-        type="text"
-        autoFocus
-        value={q}
-        onChange={(e) => setQ(e.target.value)}
-        placeholder="Type a company name..."
-        className="w-full border border-slate-300 rounded-md px-3 py-2 mb-4"
-      />
-
-      {search.isLoading && (
-        <div className="text-slate-500 text-sm">Searching...</div>
-      )}
-      {search.error && (
-        <div className="text-red-600 text-sm">
-          {(search.error as Error).message}
-        </div>
-      )}
-      {debouncedQ.length > 0 && !search.isLoading &&
-        searchVisible.length === 0 && (search.data?.length ?? 0) === 0 && (
-        <div className="text-slate-500 text-sm">No matches.</div>
-      )}
-
-      <div className="space-y-2">
         {searchVisible.map((r: OrgSearchResult) => (
           <OrgCard
             key={r.org_id}
