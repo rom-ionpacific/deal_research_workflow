@@ -46,6 +46,7 @@ import psycopg2.extras
 from pydantic import BaseModel, Field
 
 from ..chat_lib import ToolRegistry, ToolResult
+from ..org_dossier import get_org_dossier as _get_org_dossier
 from ..org_search import search_organizations
 from ...db import get_conn
 
@@ -130,6 +131,30 @@ def get_organization_detail(
     if row is None:
         return ToolResult(output=f"Organization {inp.org_id} not found.")
     return ToolResult(output=dict(row))
+
+
+@phase1_registry.tool(
+    "get_org_dossier",
+    (
+        "Fetch a richer dossier for one organization: identity, total counts "
+        "by entity type, main contacts, the 5 most recent documents, the 5 "
+        "most recent email threads, the 3 most recent calendar events, the "
+        "3 most recent slack groups, and aggregate deal stats (counterparty "
+        "count, underlying count, status breakdown). Use this when the user "
+        "is comparing similarly-named candidates and needs concrete recent-"
+        "activity evidence to pick the right one (\"which Ion Pacific is "
+        "the holding company?\", \"what's the most recent thing on org "
+        "#5996?\"). Roughly 2-3 KB of JSON per call. Read-only."
+    ),
+    GetOrganizationDetailInput,
+)
+def get_org_dossier(
+    inp: GetOrganizationDetailInput, ctx: dict
+) -> ToolResult:
+    try:
+        return ToolResult(output=_get_org_dossier(inp.org_id))
+    except ValueError as e:
+        return ToolResult(output=str(e))
 
 
 @phase1_registry.tool(
