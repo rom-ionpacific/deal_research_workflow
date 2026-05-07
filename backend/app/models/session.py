@@ -40,6 +40,10 @@ class SessionResp(BaseModel):
     forked_from_version_id: UUID | None
     created_at: datetime
     updated_at: datetime
+    is_starred: bool = False
+    # TRUE means the title should not be auto-renamed (set on manual
+    # edit AND after the first-org-selection auto-rename).
+    title_is_locked: bool = False
 
 
 class SessionWithCurrentResp(BaseModel):
@@ -50,6 +54,14 @@ class SessionWithCurrentResp(BaseModel):
 class CreateSessionReq(BaseModel):
     forked_from_version_id: UUID | None = None
     title: str | None = None
+
+
+class UpdateSessionReq(BaseModel):
+    """PATCH body. All fields optional; supply only what changes.
+    Setting `title` also locks it from auto-rename. Setting
+    `is_starred` does NOT touch the title or its lock state."""
+    title: str | None = None
+    is_starred: bool | None = None
 
 
 class CreateVersionReq(BaseModel):

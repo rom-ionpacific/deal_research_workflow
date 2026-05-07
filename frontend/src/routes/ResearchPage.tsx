@@ -10,6 +10,7 @@ import {
   api,
   type OrgSearchResult,
   type Phase,
+  type Session,
   type SessionWithCurrent,
 } from "../lib/api";
 import { useChat } from "../stores/chat";
@@ -49,6 +50,7 @@ export default function ResearchPage() {
           and breaks the columns' inner scrolling. */}
       <div className="min-h-0 overflow-y-auto">
         <div className="max-w-3xl mx-auto p-6">
+          <SessionTitleBar session={session.data.session} />
           <PhaseStepper currentPhase={current_version.phase} />
           {current_version.phase === "org_select" && (
             <OrgSelectPhase
@@ -120,6 +122,155 @@ function DataRoomViewPlaceholder({
         and surface in the org-history-viewer's "AI Overview" tab.
       </p>
     </div>
+  );
+}
+
+function SessionTitleBar({ session }: { session: Session }) {
+  const qc = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(session.title ?? "");
+  const [saving, setSaving] = useState(false);
+
+  // When the session title changes server-side (auto-rename on first
+  // org selection, or another tab edited it), keep the un-editing
+  // input in sync.
+  useEffect(() => {
+    if (!editing) setDraft(session.title ?? "");
+  }, [session.title, editing]);
+
+  const patchAndCache = (
+    patch: { title?: string; is_starred?: boolean },
+    optimistic: Partial<Session>,
+  ) => {
+    // Optimistic update on both the canonical session-with-version
+    // cache (drives this page) and the sessions list cache (drives
+    // the home page).
+    qc.setQueryData<SessionWithCurrent>(["session", session.id], (old) =>
+      old
+        ? { ...old, session: { ...old.session, ...optimistic } }
+        : old,
+    );
+    qc.setQueryData<Session[]>(["sessions"], (old) =>
+      old?.map((s) =>
+        s.id === session.id ? { ...s, ...optimistic } : s,
+      ),
+    );
+    return api.updateSession(session.id, patch).then((updated) => {
+      qc.setQueryData<SessionWithCurrent>(["session", session.id], (old) =>
+        old ? { ...old, session: updated } : old,
+      );
+      qc.setQueryData<Session[]>(["sessions"], (old) =>
+        old?.map((s) => (s.id === session.id ? updated : s)),
+      );
+    });
+  };
+
+  const onToggleStar = () => {
+    const next = !session.is_starred;
+    void patchAndCache({ is_starred: next }, { is_starred: next });
+  };
+
+  const onSaveTitle = async () => {
+    const trimmed = draft.trim();
+    if (!trimmed || trimmed === (session.title ?? "")) {
+      setEditing(false);
+      setDraft(session.title ?? "");
+      return;
+    }
+    setSaving(true);
+    try {
+      await patchAndCache(
+        { title: trimmed },
+        { title: trimmed, title_is_locked: true },
+      );
+      setEditing(false);
+    } catch (err) {
+      console.error("rename failed", err);
+      // Roll back the input to the canonical title; the cache rollback
+      // happens via invalidate below.
+      qc.invalidateQueries({ queryKey: ["session", session.id] });
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+      setDraft(session.title ?? "");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-2 mb-3">
+      <StarButton
+        starred={session.is_starred}
+        onClick={onToggleStar}
+        ariaLabel={session.is_starred ? "Unstar session" : "Star session"}
+      />
+      {editing ? (
+        <input
+          type="text"
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void onSaveTitle();
+            if (e.key === "Escape") {
+              setEditing(false);
+              setDraft(session.title ?? "");
+            }
+          }}
+          onBlur={() => void onSaveTitle()}
+          disabled={saving}
+          maxLength={200}
+          className="flex-1 text-lg font-semibold border border-slate-300 rounded-md px-2 py-1"
+        />
+      ) : (
+        <h1 className="flex-1 text-lg font-semibold truncate">
+          {session.title ?? "Untitled session"}
+        </h1>
+      )}
+      {!editing && (
+        <button
+          type="button"
+          onClick={() => setEditing(true)}
+          className="text-xs px-2 py-1 border border-slate-300 rounded-md text-slate-600 hover:bg-slate-50"
+          aria-label="Rename session"
+        >
+          Edit
+        </button>
+      )}
+    </div>
+  );
+}
+
+function StarButton({
+  starred,
+  onClick,
+  ariaLabel,
+}: {
+  starred: boolean;
+  onClick: () => void;
+  ariaLabel: string;
+}) {
+  // Inline SVG so we don't pull in an icon dep. Two states:
+  //  - starred=false: outline grey star
+  //  - starred=true:  filled gold star
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={ariaLabel}
+      className="p-1 rounded hover:bg-slate-100 transition-colors"
+    >
+      <svg
+        width="20"
+        height="20"
+        viewBox="0 0 24 24"
+        fill={starred ? "#facc15" : "none"}
+        stroke={starred ? "#ca8a04" : "#94a3b8"}
+        strokeWidth="2"
+        strokeLinejoin="round"
+      >
+        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+      </svg>
+    </button>
   );
 }
 

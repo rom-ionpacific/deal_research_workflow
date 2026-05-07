@@ -32,6 +32,12 @@ export interface Session {
   forked_from_version_id: string | null;
   created_at: string;
   updated_at: string;
+  is_starred: boolean;
+  // TRUE means the title should not be auto-renamed (set on manual
+  // edit AND after the first-org-selection auto-rename). The header
+  // doesn't surface this directly but the SessionsListPage uses it
+  // along with is_starred to render appropriate badges.
+  title_is_locked: boolean;
 }
 
 export interface Version {
@@ -206,6 +212,14 @@ export const api = {
     }),
   getSession: (id: string) =>
     request<SessionWithCurrent>(`/api/v1/sessions/${id}`),
+  updateSession: (
+    id: string,
+    body: { title?: string; is_starred?: boolean },
+  ) =>
+    request<Session>(`/api/v1/sessions/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
 
   appendVersion: (
     sessionId: string,

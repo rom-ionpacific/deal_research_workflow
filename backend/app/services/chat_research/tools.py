@@ -48,6 +48,7 @@ from pydantic import BaseModel, Field
 from ..chat_lib import ToolRegistry, ToolResult
 from ..org_dossier import get_org_dossier as _get_org_dossier
 from ..org_search import search_organizations
+from ..session_title import maybe_auto_rename_after_version as _maybe_auto_rename
 from ...db import get_conn
 
 
@@ -366,6 +367,22 @@ def _append_version_with_phase(
             "UPDATE research.session SET current_version_id = %s, redo_version_id = NULL, "
             "updated_at = NOW() WHERE id = %s",
             (str(new_version_id), str(session_id)),
+        )
+
+        # Auto-rename on first-org selection. Mirrors the route-side
+        # logic in routes/versions.py so AI-driven selection (e.g.
+        # add_to_selection tool) triggers it too.
+        parent_state_for_rename = current_version_row["state"]
+        if isinstance(parent_state_for_rename, str):
+            parent_state_for_rename = json.loads(parent_state_for_rename)
+        _maybe_auto_rename(
+            cur,
+            session_id=session_id,
+            user_email=session_row["originator_email"],
+            title_is_locked=bool(session_row.get("title_is_locked", False)),
+            new_phase=new_phase,
+            new_state=new_state,
+            parent_state=parent_state_for_rename,
         )
 
     payload: dict = {

@@ -10,7 +10,12 @@ from ..models.session import (
     CreateSessionReq,
     SessionResp,
     SessionWithCurrentResp,
+    UpdateSessionReq,
     VersionResp,
+)
+from ..services.session_title import (
+    default_title_for_user,
+    make_unique_title,
 )
 
 router = APIRouter()
@@ -26,6 +31,8 @@ def _row_to_session(row) -> SessionResp:
         forked_from_version_id=row["forked_from_version_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        is_starred=bool(row.get("is_starred", False)),
+        title_is_locked=bool(row.get("title_is_locked", False)),
     )
 
 
@@ -85,14 +92,34 @@ def create_session(
             initial_state = forked["state"]
             summary = "Forked from shared link"
 
+        # Title resolution. If the caller passed an explicit title (e.g.
+        # from a future "Rename on create" UI), keep it verbatim and
+        # lock it. Otherwise generate the default-shape title and apply
+        # the uniqueness suffix; the lock stays FALSE so first-org
+        # auto-rename can still kick in.
+        if req.title is not None and req.title.strip():
+            title = req.title.strip()
+            title_is_locked = True
+        else:
+            base = default_title_for_user(user.email)
+            title = make_unique_title(cur, user_email=user.email, base=base)
+            title_is_locked = False
+
         cur.execute(
             """
             INSERT INTO research.session
-                (id, originator_email, title, current_version_id, forked_from_version_id)
-            VALUES (%s, %s, %s, NULL, %s)
+                (id, originator_email, title, current_version_id,
+                 forked_from_version_id, title_is_locked)
+            VALUES (%s, %s, %s, NULL, %s, %s)
             RETURNING *
             """,
-            (str(session_id), user.email, req.title, str(req.forked_from_version_id) if req.forked_from_version_id else None),
+            (
+                str(session_id),
+                user.email,
+                title,
+                str(req.forked_from_version_id) if req.forked_from_version_id else None,
+                title_is_locked,
+            ),
         )
         session_row = cur.fetchone()
 
@@ -156,15 +183,79 @@ def get_session(
 
 
 @router.get("/sessions")
-def list_sessions(user: UserCtx = Depends(require_user), limit: int = 20) -> list[SessionResp]:
+def list_sessions(user: UserCtx = Depends(require_user), limit: int = 50) -> list[SessionResp]:
+    """List sessions owned by the requesting user. Sort: starred first
+    (DESC TRUE > FALSE), then most-recently-updated. The frontend
+    splits this into a starred panel + recent / history sections; the
+    server returns one ordered list to keep paging predictable."""
     import psycopg2.extras
 
-    limit = max(1, min(limit, 100))
+    limit = max(1, min(limit, 200))
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
-            "SELECT * FROM research.session WHERE originator_email = %s "
-            "ORDER BY updated_at DESC LIMIT %s",
+            """
+            SELECT * FROM research.session
+             WHERE originator_email = %s
+             ORDER BY is_starred DESC, updated_at DESC
+             LIMIT %s
+            """,
             (user.email, limit),
         )
         return [_row_to_session(r) for r in cur.fetchall()]
+
+
+@router.patch("/sessions/{session_id}", response_model=SessionResp)
+def patch_session(
+    session_id: UUID, req: UpdateSessionReq, user: UserCtx = Depends(require_user)
+) -> SessionResp:
+    """Mutate session-level metadata: title (locks against auto-rename
+    once set) and is_starred (the gold-star toggle on the page header).
+    No-op fields are left untouched."""
+    import psycopg2.extras
+
+    if req.title is None and req.is_starred is None:
+        raise HTTPException(
+            status_code=400, detail="Nothing to update; supply title or is_starred."
+        )
+
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            "SELECT * FROM research.session WHERE id = %s FOR UPDATE",
+            (str(session_id),),
+        )
+        session_row = cur.fetchone()
+        if not session_row:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if session_row["originator_email"] != user.email:
+            raise HTTPException(status_code=403, detail="Not your session")
+
+        sets: list[str] = []
+        params: list = []
+        if req.title is not None:
+            new_title = req.title.strip()
+            if not new_title:
+                raise HTTPException(status_code=400, detail="title cannot be empty")
+            sets.append("title = %s")
+            params.append(new_title)
+            # User-edited titles always lock so subsequent org selections
+            # don't surprise-rename them.
+            sets.append("title_is_locked = TRUE")
+        if req.is_starred is not None:
+            sets.append("is_starred = %s")
+            params.append(bool(req.is_starred))
+
+        # Always bump updated_at so the sort order reflects the change
+        # (esp. for star toggles -- otherwise the row doesn't move).
+        sets.append("updated_at = NOW()")
+        params.append(str(session_id))
+
+        cur.execute(
+            f"UPDATE research.session SET {', '.join(sets)} "
+            "WHERE id = %s RETURNING *",
+            tuple(params),
+        )
+        updated = cur.fetchone()
+
+    return _row_to_session(updated)

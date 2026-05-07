@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from ..auth import UserCtx, require_user
 from ..db import get_conn
 from ..models.session import CreateVersionReq, CreateVersionResp
+from ..services.session_title import maybe_auto_rename_after_version
 from .sessions import _row_to_session, _row_to_version
 
 router = APIRouter()
@@ -59,6 +60,17 @@ def append_version(
                 },
             )
 
+        # Fetch the parent version's state so the auto-rename helper
+        # can detect a 0->1 selection transition. Cheap (PK lookup).
+        cur.execute(
+            "SELECT state FROM research.session_version WHERE id = %s",
+            (str(req.parent_id),),
+        )
+        parent_row = cur.fetchone()
+        parent_state = parent_row["state"] if parent_row else None
+        if isinstance(parent_state, str):
+            parent_state = json.loads(parent_state)
+
         cur.execute(
             """
             INSERT INTO research.session_version
@@ -84,6 +96,26 @@ def append_version(
             (str(new_version_id), str(session_id)),
         )
         session_row = cur.fetchone()
+
+        # Auto-rename the session on the user's first org selection
+        # (parent had 0 selected, new state has >= 1). Re-fetch the
+        # session row if the helper updated it so the response carries
+        # the new title.
+        renamed = maybe_auto_rename_after_version(
+            cur,
+            session_id=session_id,
+            user_email=user.email,
+            title_is_locked=bool(session_row["title_is_locked"]),
+            new_phase=req.phase,
+            new_state=req.state,
+            parent_state=parent_state,
+        )
+        if renamed is not None:
+            cur.execute(
+                "SELECT * FROM research.session WHERE id = %s",
+                (str(session_id),),
+            )
+            session_row = cur.fetchone()
 
     return CreateVersionResp(
         version=_row_to_version(version_row),
