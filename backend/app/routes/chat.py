@@ -115,7 +115,7 @@ def list_messages(
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
-            "SELECT originator_email FROM session WHERE id = %s",
+            "SELECT originator_email FROM research.session WHERE id = %s",
             (str(session_id),),
         )
         owner = cur.fetchone()
@@ -130,7 +130,7 @@ def list_messages(
                    pre_version_id, post_version_id, parent_message_id,
                    model_id, tokens_in, tokens_out, latency_ms,
                    error, created_at
-            FROM session_chat_message
+            FROM research.session_chat_message
             WHERE session_id = %s
             ORDER BY created_at ASC, id ASC
             LIMIT %s

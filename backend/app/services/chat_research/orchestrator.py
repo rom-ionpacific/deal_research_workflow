@@ -285,7 +285,7 @@ def _setup_turn(
 
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT * FROM session WHERE id = %s", (str(session_id),))
+        cur.execute("SELECT * FROM research.session WHERE id = %s", (str(session_id),))
         session_row = cur.fetchone()
         if not session_row:
             return _SetupError(f"Session {session_id} not found.")
@@ -298,7 +298,7 @@ def _setup_turn(
         cur.execute(
             """
             SELECT id, role, content, created_at
-            FROM session_chat_message
+            FROM research.session_chat_message
             WHERE session_id = %s
             ORDER BY created_at ASC, id ASC
             LIMIT %s
@@ -309,7 +309,7 @@ def _setup_turn(
 
         cur.execute(
             """
-            INSERT INTO session_chat_message
+            INSERT INTO research.session_chat_message
                 (id, session_id, phase, role, content, pre_version_id)
             VALUES (%s, %s, %s, 'user', %s::jsonb, %s)
             """,
@@ -424,7 +424,7 @@ def _persist_assistant_message(
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO session_chat_message
+            INSERT INTO research.session_chat_message
                 (id, session_id, phase, role, content, pre_version_id,
                  model_id, tokens_in, tokens_out)
             VALUES (%s, %s, %s, 'assistant', %s::jsonb, %s, %s, %s, %s)
@@ -460,7 +460,7 @@ def _persist_tool_message(
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO session_chat_message
+            INSERT INTO research.session_chat_message
                 (id, session_id, phase, role, content, parent_message_id, error)
             VALUES (%s, %s, %s, 'tool', %s::jsonb, %s, %s)
             """,
@@ -494,18 +494,18 @@ def _finalise_turn(
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
-            "SELECT current_version_id FROM session WHERE id = %s",
+            "SELECT current_version_id FROM research.session WHERE id = %s",
             (str(session_id),),
         )
         row = cur.fetchone()
         final_version_id = row["current_version_id"]
         cur.execute(
-            "UPDATE session_chat_message SET post_version_id = %s WHERE id = %s",
+            "UPDATE research.session_chat_message SET post_version_id = %s WHERE id = %s",
             (str(final_version_id), str(user_message_id)),
         )
         if assistant_message_id:
             cur.execute(
-                "UPDATE session_chat_message SET post_version_id = %s WHERE id = %s",
+                "UPDATE research.session_chat_message SET post_version_id = %s WHERE id = %s",
                 (str(final_version_id), str(assistant_message_id)),
             )
     return final_version_id

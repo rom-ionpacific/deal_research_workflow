@@ -7,11 +7,11 @@ discipline that `routes/versions.py` does for direct user-action
 mutations:
 
     BEGIN
-    SELECT * FROM session WHERE id = %s FOR UPDATE
-    SELECT state FROM session_version WHERE id = current_version_id
+    SELECT * FROM research.session WHERE id = %s FOR UPDATE
+    SELECT state FROM research.session_version WHERE id = current_version_id
     <compute new_state>
-    INSERT session_version (...) VALUES (...) RETURNING id
-    UPDATE session SET current_version_id = ..., updated_at = NOW()
+    INSERT research.session_version (...) VALUES (...) RETURNING id
+    UPDATE research.session SET current_version_id = ..., updated_at = NOW()
     COMMIT
 
 Concurrency: parallel tool calls in one assistant turn each open their
@@ -323,14 +323,14 @@ def _append_version_with_phase(
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
-            "SELECT * FROM session WHERE id = %s FOR UPDATE",
+            "SELECT * FROM research.session WHERE id = %s FOR UPDATE",
             (str(session_id),),
         )
         session_row = cur.fetchone()
         if not session_row:
             return ToolResult(output=f"Session {session_id} not found.")
         cur.execute(
-            "SELECT * FROM session_version WHERE id = %s",
+            "SELECT * FROM research.session_version WHERE id = %s",
             (str(session_row["current_version_id"]),),
         )
         current_version_row = cur.fetchone()
@@ -345,7 +345,7 @@ def _append_version_with_phase(
 
         cur.execute(
             """
-            INSERT INTO session_version
+            INSERT INTO research.session_version
                 (id, session_id, parent_id, undo_unit_id, phase, state,
                  source, ai_message_id, summary)
             VALUES (%s, %s, %s, %s, %s, %s::jsonb, 'ai_tool_call', %s, %s)
@@ -363,7 +363,7 @@ def _append_version_with_phase(
             ),
         )
         cur.execute(
-            "UPDATE session SET current_version_id = %s, redo_version_id = NULL, "
+            "UPDATE research.session SET current_version_id = %s, redo_version_id = NULL, "
             "updated_at = NOW() WHERE id = %s",
             (str(new_version_id), str(session_id)),
         )

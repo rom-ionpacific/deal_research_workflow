@@ -39,7 +39,7 @@ def append_version(
         # a short-lived lock and the routes are user-driven, so contention is
         # rare and waiting is fine.
         cur.execute(
-            "SELECT * FROM session WHERE id = %s FOR UPDATE",
+            "SELECT * FROM research.session WHERE id = %s FOR UPDATE",
             (str(session_id),),
         )
         session_row = cur.fetchone()
@@ -61,7 +61,7 @@ def append_version(
 
         cur.execute(
             """
-            INSERT INTO session_version
+            INSERT INTO research.session_version
                 (id, session_id, parent_id, undo_unit_id, phase, state, source, summary)
             VALUES (%s, %s, %s, %s, %s, %s::jsonb, 'user_action', %s)
             RETURNING *
@@ -79,7 +79,7 @@ def append_version(
         version_row = cur.fetchone()
 
         cur.execute(
-            "UPDATE session SET current_version_id = %s, redo_version_id = NULL, "
+            "UPDATE research.session SET current_version_id = %s, redo_version_id = NULL, "
             "updated_at = NOW() WHERE id = %s RETURNING *",
             (str(new_version_id), str(session_id)),
         )

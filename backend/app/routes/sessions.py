@@ -72,7 +72,7 @@ def create_session(
 
         if req.forked_from_version_id:
             cur.execute(
-                "SELECT phase, state FROM session_version WHERE id = %s",
+                "SELECT phase, state FROM research.session_version WHERE id = %s",
                 (str(req.forked_from_version_id),),
             )
             forked = cur.fetchone()
@@ -87,7 +87,7 @@ def create_session(
 
         cur.execute(
             """
-            INSERT INTO session
+            INSERT INTO research.session
                 (id, originator_email, title, current_version_id, forked_from_version_id)
             VALUES (%s, %s, %s, NULL, %s)
             RETURNING *
@@ -98,7 +98,7 @@ def create_session(
 
         cur.execute(
             """
-            INSERT INTO session_version
+            INSERT INTO research.session_version
                 (id, session_id, parent_id, undo_unit_id, phase, state, source, summary)
             VALUES (%s, %s, NULL, %s, %s, %s::jsonb, %s, %s)
             RETURNING *
@@ -116,7 +116,7 @@ def create_session(
         version_row = cur.fetchone()
 
         cur.execute(
-            "UPDATE session SET current_version_id = %s WHERE id = %s RETURNING *",
+            "UPDATE research.session SET current_version_id = %s WHERE id = %s RETURNING *",
             (str(version_id), str(session_id)),
         )
         session_row = cur.fetchone()
@@ -135,7 +135,7 @@ def get_session(
 
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT * FROM session WHERE id = %s", (str(session_id),))
+        cur.execute("SELECT * FROM research.session WHERE id = %s", (str(session_id),))
         session_row = cur.fetchone()
         if not session_row:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -144,7 +144,7 @@ def get_session(
             raise HTTPException(status_code=403, detail="Not your session")
 
         cur.execute(
-            "SELECT * FROM session_version WHERE id = %s",
+            "SELECT * FROM research.session_version WHERE id = %s",
             (str(session_row["current_version_id"]),),
         )
         version_row = cur.fetchone()
@@ -163,7 +163,7 @@ def list_sessions(user: UserCtx = Depends(require_user), limit: int = 20) -> lis
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
-            "SELECT * FROM session WHERE originator_email = %s "
+            "SELECT * FROM research.session WHERE originator_email = %s "
             "ORDER BY updated_at DESC LIMIT %s",
             (user.email, limit),
         )
