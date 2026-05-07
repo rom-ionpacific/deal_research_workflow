@@ -48,6 +48,7 @@ export default function ChatPanel({
   const setDraft = useChat((s) => s.setDraft);
   const inFlight = useChat((s) => s.inFlight[sessionId] ?? null);
   const streaming = useChat((s) => s.streaming[sessionId] ?? false);
+  const uiContext = useChat((s) => s.uiContexts[sessionId] ?? null);
   const startTurn = useChat((s) => s.startTurn);
   const endTurn = useChat((s) => s.endTurn);
   const resetTurn = useChat((s) => s.resetTurn);
@@ -71,11 +72,20 @@ export default function ChatPanel({
     startTurn(sessionId);
 
     try {
+      // Phase guard: only forward the UI context if its phase tag
+       // matches the active phase. A stale snapshot from the prior
+       // phase (e.g. org_select after the user advanced) would
+       // otherwise leak into the entity_select prompt.
+      const ctxToSend =
+        uiContext && (uiContext.phase as string | undefined) === phase
+          ? uiContext
+          : null;
       await streamChat({
         sessionId,
         phase,
         message: text,
         parentId: parentVersionId,
+        uiContext: ctxToSend,
         onEvent: (ev) => {
           switch (ev.type) {
             case "turn_start":

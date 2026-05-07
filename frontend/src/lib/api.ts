@@ -310,6 +310,11 @@ export interface ChatStreamRequest {
   message: string;
   parentId?: string;
   signal?: AbortSignal;
+  // Per-turn snapshot of what the user is currently looking at (e.g.
+  // for org_select: search query + displayed candidates). Forwarded
+  // to the orchestrator and rendered as a system block. Skip for
+  // phases that don't have a useful snapshot.
+  uiContext?: Record<string, unknown> | null;
   onEvent: (ev: ChatEvent) => void;
 }
 
@@ -327,6 +332,7 @@ export async function streamChat(req: ChatStreamRequest): Promise<void> {
       phase: req.phase,
       message: req.message,
       parent_id: req.parentId,
+      ui_context: req.uiContext ?? null,
     }),
     signal: req.signal,
   });

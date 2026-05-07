@@ -12,6 +12,7 @@ import {
   type Phase,
   type SessionWithCurrent,
 } from "../lib/api";
+import { useChat } from "../stores/chat";
 
 const PHASES: Phase[] = [
   "org_select",
@@ -321,6 +322,47 @@ function OrgSelectPhase({
   const searchVisible = (search.data ?? []).filter(
     (r) => !selected.includes(r.org_id),
   );
+
+  // Publish a per-turn UI snapshot to the chat store so the orchestrator
+  // can answer "out of these, pick the financial institutions"-style
+  // questions without re-running search. The displayed list mirrors what
+  // the user actually sees: selected first (sticky panel), then the
+  // un-selected search results in display order. Trim to compact rows so
+  // we don't blow the prompt up.
+  const setUIContext = useChat((s) => s.setUIContext);
+  useEffect(() => {
+    const compact = (r: OrgSearchResult) => ({
+      org_id: r.org_id,
+      name: r.name,
+      why_match: r.why_match,
+      score: r.score,
+      document_count: r.document_count,
+      communication_count: r.communication_count,
+    });
+    const selectedDisplay = (selectedQuery.data ?? []).map(compact);
+    const candidatesDisplay = [
+      ...selectedDisplay,
+      ...searchVisible.map(compact),
+    ];
+    setUIContext(sessionId, {
+      phase: "org_select",
+      search_query: debouncedQ,
+      displayed_candidates: candidatesDisplay,
+      selected_orgs: selectedDisplay,
+    });
+    // We intentionally don't clear on unmount -- when the page navigates
+    // to entity_select the next phase will overwrite (or null) it.
+  }, [
+    sessionId,
+    setUIContext,
+    debouncedQ,
+    selectedQuery.data,
+    // search.data is referenced via searchVisible but we depend on it
+    // directly so the effect re-runs when the underlying query updates.
+    search.data,
+    // selected list change -> searchVisible recomputes -> we need a dep.
+    selected.length,
+  ]);
 
   return (
     <div>

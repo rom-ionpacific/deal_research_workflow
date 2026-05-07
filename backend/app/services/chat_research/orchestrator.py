@@ -147,6 +147,13 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "database, and help them confirm which ones to take into Phase 2 "
         "(entity_select).\n\n"
         "Rules:\n"
+        "- A `## Current UI state (org_select)` block may appear in the "
+        "  system messages with the user's current search query, the "
+        "  candidates currently shown to them, and the orgs they've "
+        "  already selected. When the user says \"these\", \"the ones "
+        "  above\", \"out of these\", they're referring to that list -- "
+        "  use the org_ids directly without calling find_organizations "
+        "  again. (If the block isn't present, fall back to searching.)\n"
         "- Always call `find_organizations` first when the user mentions a "
         "  company name or describes one. Don't guess from prior knowledge.\n"
         "- Surface the top candidates to the user in your reply with "
@@ -183,9 +190,74 @@ class TurnRequest:
     user_message: str
     user: UserCtx
     parent_id: UUID | None = None  # client-claimed current_version_id
+    # Per-turn snapshot of what the user is looking at (search query,
+    # currently displayed candidates, etc). Rendered as an ephemeral
+    # system block so the model can answer questions like "out of these,
+    # which look like financial institutions?" without us inventing a
+    # tool for it. Not persisted to chat history.
+    ui_context: dict | None = None
 
 
 # ---- SSE event helpers -----------------------------------------------------
+
+
+def _format_ui_context(phase: str, ctx: dict | None) -> str | None:
+    """Render the FE-supplied UI snapshot as a human-readable block for
+    the system prompt. Returns None if there's nothing useful to show
+    (so we don't emit an empty header). Each phase has its own shape;
+    if the phase isn't handled the raw JSON is dumped as a fallback so
+    the model still gets *something*."""
+    if not ctx:
+        return None
+
+    if phase == "org_select":
+        parts: list[str] = ["## Current UI state (org_select)"]
+        q = (ctx.get("search_query") or "").strip()
+        parts.append(f"Search query: {q!r}" if q else "Search query: (empty)")
+
+        displayed = ctx.get("displayed_candidates") or []
+        if displayed:
+            parts.append(
+                f"Displayed candidates ({len(displayed)}, in display order):"
+            )
+            for r in displayed[:30]:  # hard cap to bound prompt size
+                org_id = r.get("org_id")
+                name = r.get("name") or "?"
+                why = r.get("why_match") or ""
+                why_s = f" -- {why}" if why else ""
+                parts.append(f"  - #{org_id} {name}{why_s}")
+            if len(displayed) > 30:
+                parts.append(
+                    f"  ... ({len(displayed) - 30} more truncated; widen by "
+                    "narrowing the search)"
+                )
+        else:
+            parts.append("Displayed candidates: (none)")
+
+        selected = ctx.get("selected_orgs") or []
+        if selected:
+            parts.append(f"Currently selected ({len(selected)}):")
+            for r in selected[:30]:
+                parts.append(f"  - #{r.get('org_id')} {r.get('name') or '?'}")
+            if len(selected) > 30:
+                parts.append(f"  ... ({len(selected) - 30} more truncated)")
+        else:
+            parts.append("Currently selected: (none)")
+
+        parts.append(
+            "When the user refers to \"these\" / \"the ones above\" / "
+            "\"these results\", they mean the displayed candidates list. "
+            "You already have the org_ids -- you don't need to call "
+            "find_organizations again to act on them."
+        )
+        return "\n".join(parts)
+
+    # Fallback for any phase we haven't tailored: render the dict as
+    # JSON. Keeps the door open without breaking older clients.
+    try:
+        return f"## Current UI state ({phase})\n{json.dumps(ctx, default=str)[:2000]}"
+    except Exception:
+        return None
 
 
 def _sse_format(event_type: str, payload: dict) -> str:
@@ -274,13 +346,20 @@ async def stream_chat_turn(req: TurnRequest) -> AsyncIterator[str]:
     # is 2048 tokens) -- but the placement is right for when tool
     # schemas + system grow past the threshold, and it costs nothing
     # to leave the breakpoint in place.
-    system_blocks = [
+    system_blocks: list[dict] = [
         {
             "type": "text",
             "text": system,
             "cache_control": {"type": "ephemeral"},
         }
     ]
+
+    # Per-turn UI context block. Goes AFTER the cached phase prompt so
+    # the cache breakpoint above stays warm; this block changes every
+    # turn and isn't worth caching.
+    ui_text = _format_ui_context(req.phase, req.ui_context)
+    if ui_text:
+        system_blocks.append({"type": "text", "text": ui_text})
 
     client = AsyncAnthropic(api_key=settings.anthropic_api_key)
 

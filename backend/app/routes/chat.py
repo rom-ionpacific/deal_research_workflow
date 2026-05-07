@@ -50,6 +50,16 @@ class ChatRequest(BaseModel):
             "V0 records but does not yet enforce -- planned for V1."
         ),
     )
+    ui_context: dict | None = Field(
+        default=None,
+        description=(
+            "Optional snapshot of what the user is currently looking at in "
+            "the UI (e.g. for org_select: search query + displayed candidate "
+            "list). Rendered as an ephemeral system-prompt block so the "
+            "model can reason about \"these candidates\" / \"the ones I see\" "
+            "without us inventing a tool for it. Not persisted."
+        ),
+    )
 
 
 @router.post("/sessions/{session_id}/chat")
@@ -67,6 +77,7 @@ async def chat(
         user_message=req.message,
         user=user,
         parent_id=req.parent_id,
+        ui_context=req.ui_context,
     )
     return StreamingResponse(
         stream_chat_turn(turn),

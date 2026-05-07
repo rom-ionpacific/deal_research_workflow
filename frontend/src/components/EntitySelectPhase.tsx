@@ -127,17 +127,19 @@ export default function EntitySelectPhase({
   const [pendingKeys, setPendingKeys] = useState<Set<string>>(new Set());
   const queueRef = useRef<Promise<void>>(Promise.resolve());
 
-  const toggle = (entityType: EntityType, entityId: number) => {
+  // Generic helper used by both single-row toggle and the page-level
+   // "select / deselect all visible" affordance. Takes the next id list
+   // for one entity_type and posts one append-version. Pending-keys
+   // are managed by the caller so per-row vs bulk visuals can differ.
+  const setSelectionForType = (
+    entityType: EntityType,
+    nextIds: number[],
+    summary: string,
+  ): Promise<void> => {
     const cached = qc.getQueryData<SessionWithCurrent>(["session", sessionId]);
-    if (!cached) return;
+    if (!cached) return Promise.resolve();
     const cur = cached.current_version.state as PhaseState;
-    const curIds = cur.selected_entity_ids?.[entityType] ?? [];
-    const isSelected = curIds.includes(entityId);
-    const nextIds = isSelected
-      ? curIds.filter((x) => x !== entityId)
-      : [...curIds, entityId];
 
-    // Optimistic session patch.
     qc.setQueryData<SessionWithCurrent>(["session", sessionId], {
       ...cached,
       current_version: {
@@ -152,13 +154,6 @@ export default function EntitySelectPhase({
       },
     });
 
-    const key = `${entityType}:${entityId}`;
-    setPendingKeys((prev) => {
-      const n = new Set(prev);
-      n.add(key);
-      return n;
-    });
-
     queueRef.current = queueRef.current
       .catch(() => undefined)
       .then(async () => {
@@ -167,20 +162,20 @@ export default function EntitySelectPhase({
           sessionId,
         ]);
         const parentId = latest?.current_version.id ?? parentVersionId;
+        const baseState =
+          (latest?.current_version.state as PhaseState | undefined) ?? cur;
         try {
           const data = await api.appendVersion(sessionId, {
             parent_id: parentId,
             phase: "entity_select",
             state: {
-              ...(cur as Record<string, unknown>),
+              ...(baseState as Record<string, unknown>),
               selected_entity_ids: {
-                ...(cur.selected_entity_ids ?? {}),
+                ...(baseState.selected_entity_ids ?? {}),
                 [entityType]: nextIds,
               },
             },
-            summary: isSelected
-              ? `Removed ${entityType}`
-              : `Added ${entityType}`,
+            summary,
           });
           qc.setQueryData<SessionWithCurrent | undefined>(
             ["session", sessionId],
@@ -209,16 +204,83 @@ export default function EntitySelectPhase({
             },
           );
         } catch (err) {
-          console.error("toggle failed", err);
+          console.error("entity selection update failed", err);
           qc.invalidateQueries({ queryKey: ["session", sessionId] });
-        } finally {
-          setPendingKeys((prev) => {
-            const n = new Set(prev);
-            n.delete(key);
-            return n;
-          });
         }
       });
+    return queueRef.current;
+  };
+
+  const toggle = (entityType: EntityType, entityId: number) => {
+    const cached = qc.getQueryData<SessionWithCurrent>(["session", sessionId]);
+    if (!cached) return;
+    const cur = cached.current_version.state as PhaseState;
+    const curIds = cur.selected_entity_ids?.[entityType] ?? [];
+    const isSelected = curIds.includes(entityId);
+    const nextIds = isSelected
+      ? curIds.filter((x) => x !== entityId)
+      : [...curIds, entityId];
+
+    const key = `${entityType}:${entityId}`;
+    setPendingKeys((prev) => {
+      const n = new Set(prev);
+      n.add(key);
+      return n;
+    });
+
+    void setSelectionForType(
+      entityType,
+      nextIds,
+      isSelected ? `Removed ${entityType}` : `Added ${entityType}`,
+    ).finally(() => {
+      setPendingKeys((prev) => {
+        const n = new Set(prev);
+        n.delete(key);
+        return n;
+      });
+    });
+  };
+
+  // "Select / deselect all visible" -- operates on the current page's
+   // rows only. Behavior:
+   //   * 0 of N selected on page -> click selects all on page
+   //   * partial / all selected   -> click deselects all on page
+   // Single bulk version-append rather than per-row, both for speed
+   // and so undo unwinds the bulk action as one unit.
+  const onToggleAllVisible = () => {
+    const visibleIds = (list.data?.rows ?? []).map((r) => r.id as number);
+    if (visibleIds.length === 0) return;
+    const cached = qc.getQueryData<SessionWithCurrent>(["session", sessionId]);
+    if (!cached) return;
+    const cur = cached.current_version.state as PhaseState;
+    const curIds = cur.selected_entity_ids?.[activeTab] ?? [];
+    const visibleSet = new Set(visibleIds);
+    const allSelected = visibleIds.every((id) => curIds.includes(id));
+
+    let nextIds: number[];
+    let summary: string;
+    if (allSelected) {
+      nextIds = curIds.filter((id) => !visibleSet.has(id));
+      summary = `Deselect ${visibleIds.length} ${activeTab} on page`;
+    } else {
+      const toAdd = visibleIds.filter((id) => !curIds.includes(id));
+      nextIds = [...curIds, ...toAdd];
+      summary = `Select ${toAdd.length} ${activeTab} on page`;
+    }
+
+    const bulkKey = `__bulk:${activeTab}`;
+    setPendingKeys((prev) => {
+      const n = new Set(prev);
+      n.add(bulkKey);
+      return n;
+    });
+    void setSelectionForType(activeTab, nextIds, summary).finally(() => {
+      setPendingKeys((prev) => {
+        const n = new Set(prev);
+        n.delete(bulkKey);
+        return n;
+      });
+    });
   };
 
   const totalPages = Math.max(1, Math.ceil((list.data?.count ?? 0) / PAGE_SIZE));
@@ -303,6 +365,25 @@ export default function EntitySelectPhase({
           {(list.error as Error).message}
         </div>
       )}
+
+      {/* "Select all on page" header. Only shown when there are rows
+          to act on. Indeterminate when some-but-not-all are selected
+          (browser checkbox doesn't have an :indeterminate attribute,
+          so we set it via a ref). For a more sweeping selection
+          (cross-page, cross-filter) the AI chat's select_all_matching
+          tool handles that. */}
+      {(list.data?.rows.length ?? 0) > 0 && (
+        <SelectAllVisibleHeader
+          visibleIds={(list.data?.rows ?? []).map((r) => r.id as number)}
+          selectedIds={selected[activeTab]}
+          totalCount={list.data?.count ?? 0}
+          pageOffset={offset}
+          pageSize={PAGE_SIZE}
+          disabled={pendingKeys.has(`__bulk:${activeTab}`)}
+          onToggle={onToggleAllVisible}
+        />
+      )}
+
       <div className="space-y-1">
         {(list.data?.rows ?? []).map((row) => (
           <EntityRow
@@ -370,6 +451,69 @@ export default function EntitySelectPhase({
           }
         />
       </div>
+    </div>
+  );
+}
+
+function SelectAllVisibleHeader({
+  visibleIds,
+  selectedIds,
+  totalCount,
+  pageOffset,
+  pageSize,
+  disabled,
+  onToggle,
+}: {
+  visibleIds: number[];
+  selectedIds: number[];
+  totalCount: number;
+  pageOffset: number;
+  pageSize: number;
+  disabled?: boolean;
+  onToggle: () => void;
+}) {
+  const ref = useRef<HTMLInputElement | null>(null);
+  const selectedSet = new Set(selectedIds);
+  const onPage = visibleIds.filter((id) => selectedSet.has(id)).length;
+  const allChecked = onPage === visibleIds.length && visibleIds.length > 0;
+  const someChecked = onPage > 0 && !allChecked;
+
+  // Indeterminate is a property, not an HTML attribute; sync via ref
+  // whenever the selection on the page changes.
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = someChecked;
+  }, [someChecked]);
+
+  const pageStart = pageOffset + 1;
+  const pageEnd = Math.min(pageOffset + pageSize, totalCount);
+  const label = allChecked
+    ? `Deselect all ${visibleIds.length} on page`
+    : someChecked
+    ? `Select remaining ${visibleIds.length - onPage} on page`
+    : `Select all ${visibleIds.length} on page`;
+
+  return (
+    <div className="flex items-center gap-2 px-3 py-2 mb-1 bg-slate-50 border border-slate-200 rounded-md">
+      <input
+        ref={ref}
+        type="checkbox"
+        checked={allChecked}
+        onChange={onToggle}
+        disabled={disabled}
+        className="cursor-pointer disabled:opacity-50"
+      />
+      <button
+        type="button"
+        onClick={onToggle}
+        disabled={disabled}
+        className="text-xs text-slate-700 hover:underline disabled:opacity-50 disabled:no-underline"
+      >
+        {label}
+      </button>
+      <span className="ml-auto text-xs text-slate-400 tabular-nums">
+        {pageStart.toLocaleString()}–{pageEnd.toLocaleString()} of{" "}
+        {totalCount.toLocaleString()}
+      </span>
     </div>
   );
 }

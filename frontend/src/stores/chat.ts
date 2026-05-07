@@ -51,6 +51,11 @@ interface ChatState {
   drafts: Record<string, string>; // sessionId -> input draft
   inFlight: Record<string, InFlightTurn | null>;
   streaming: Record<string, boolean>;
+  // Latest UI-context snapshot per session. Phase components publish to
+  // this when their view state changes; ChatPanel reads it on submit
+  // and forwards to the orchestrator. Keyed by sessionId so multiple
+  // tabs with different sessions don't trample each other.
+  uiContexts: Record<string, Record<string, unknown> | null>;
 
   setDraft: (sessionId: string, value: string) => void;
   startTurn: (sessionId: string) => void;
@@ -59,6 +64,10 @@ interface ChatState {
   patchInFlight: (
     sessionId: string,
     fn: (prev: InFlightTurn) => InFlightTurn
+  ) => void;
+  setUIContext: (
+    sessionId: string,
+    ctx: Record<string, unknown> | null,
   ) => void;
 }
 
@@ -72,6 +81,7 @@ export const useChat = create<ChatState>((set, get) => ({
   drafts: {},
   inFlight: {},
   streaming: {},
+  uiContexts: {},
 
   setDraft: (sessionId, value) =>
     set((s) => ({ drafts: { ...s.drafts, [sessionId]: value } })),
@@ -106,4 +116,9 @@ export const useChat = create<ChatState>((set, get) => ({
       inFlight: { ...s.inFlight, [sessionId]: fn(prev) },
     }));
   },
+
+  setUIContext: (sessionId, ctx) =>
+    set((s) => ({
+      uiContexts: { ...s.uiContexts, [sessionId]: ctx },
+    })),
 }));
