@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 
 import ChatPanel from "../components/ChatPanel";
+import EntitySelectPhase from "../components/EntitySelectPhase";
 import OrgCard from "../components/OrgCard";
 import {
   api,
@@ -54,12 +55,20 @@ export default function ResearchPage() {
               state={current_version.state}
             />
           )}
-          {current_version.phase !== "org_select" && (
-            <div className="mt-8 text-slate-500 text-sm">
-              Phase <code>{current_version.phase}</code> not built yet — coming
-              next.
-            </div>
+          {current_version.phase === "entity_select" && (
+            <EntitySelectPhase
+              sessionId={sessionId!}
+              parentVersionId={current_version.id}
+              state={current_version.state}
+            />
           )}
+          {current_version.phase !== "org_select" &&
+            current_version.phase !== "entity_select" && (
+              <div className="mt-8 text-slate-500 text-sm">
+                Phase <code>{current_version.phase}</code> not built yet —
+                coming next.
+              </div>
+            )}
         </div>
       </div>
       <ChatPanel

@@ -75,6 +75,58 @@ export interface OrgSearchResult {
   main_ion_contact: OrgContact | null;
 }
 
+// ----- entities (phase 2) -----
+
+export type EntityType =
+  | "document"
+  | "email_thread"
+  | "calendar_event"
+  | "slack_message_group";
+
+export const ENTITY_TYPES: EntityType[] = [
+  "document",
+  "email_thread",
+  "calendar_event",
+  "slack_message_group",
+];
+
+export interface EntityFilter {
+  // ISO timestamps. Empty string / null = no constraint.
+  date_from?: string | null;
+  date_to?: string | null;
+  contains?: string | null;
+}
+
+export interface EntityCountResp {
+  entity_type: EntityType;
+  count: number;
+}
+
+export interface EntityListResp {
+  entity_type: EntityType;
+  count: number;
+  rows: Array<Record<string, unknown>>;
+  limit: number;
+  offset: number;
+}
+
+function entityFilterToQuery(
+  filter: EntityFilter,
+  extra: Record<string, string | number> = {},
+): string {
+  const params = new URLSearchParams();
+  if (filter.date_from) params.set("date_from", filter.date_from);
+  if (filter.date_to) params.set("date_to", filter.date_to);
+  if (filter.contains && filter.contains.trim()) {
+    params.set("contains", filter.contains.trim());
+  }
+  for (const [k, v] of Object.entries(extra)) {
+    params.set(k, String(v));
+  }
+  const s = params.toString();
+  return s ? `?${s}` : "";
+}
+
 // ----- chat -----
 
 export interface ChatMessage {
@@ -155,6 +207,30 @@ export const api = {
     request<OrgSearchResult[]>(
       `/api/v1/orgs/by-ids?ids=${ids.join(",")}`
     ),
+
+  countEntities: (
+    sessionId: string,
+    entityType: EntityType,
+    filter: EntityFilter,
+  ) => {
+    const qs = entityFilterToQuery(filter);
+    return request<EntityCountResp>(
+      `/api/v1/sessions/${sessionId}/entities/${entityType}/count${qs}`,
+    );
+  },
+
+  listEntities: (
+    sessionId: string,
+    entityType: EntityType,
+    filter: EntityFilter,
+    limit: number,
+    offset: number,
+  ) => {
+    const qs = entityFilterToQuery(filter, { limit, offset });
+    return request<EntityListResp>(
+      `/api/v1/sessions/${sessionId}/entities/${entityType}/list${qs}`,
+    );
+  },
 
   listMessages: (sessionId: string, limit = 200) =>
     request<ChatMessage[]>(
