@@ -16,12 +16,15 @@ SET search_path TO research, dealcloud, public;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- =====================================================================
--- Helper: alias IDs for a bundle of orgs
+-- Helper: alias IDs for a bundle of orgs (LEGACY -- no longer used)
 -- =====================================================================
--- Most question functions need to walk through `organization_alias` to
--- reach entity-junction tables (email_thread_organization etc.).
--- This helper centralises that lookup. STABLE so callers can compose it
--- in WHERE/JOIN without re-evaluation per row.
+-- Q1/Q3/Q4/Q5 used to walk through `organization_alias` to reach
+-- entity-junction tables (email_thread_organization etc.). They now
+-- read the denormalised `dealcloud.organization_entity` table directly,
+-- which collapses the alias hop into a single join. The function is
+-- kept around because (a) it's STABLE / read-only / harmless and
+-- (b) any external caller using it should keep working until the
+-- caller's own migration lands.
 CREATE OR REPLACE FUNCTION dealcloud.todd_alias_ids(org_ids INTEGER[])
 RETURNS TABLE(alias_id INTEGER) LANGUAGE sql STABLE AS $$
     SELECT id
@@ -89,11 +92,15 @@ underlying_top AS (
               date DESC NULLS LAST, deal_id DESC
      LIMIT 5
 ),
+-- Documents linked to the bundle, via organization_entity. The denorm
+-- table replaces the prior alias->document_organization_alias hop.
+-- DISTINCT because organization_entity is keyed on (org, type, id, alias)
+-- so a doc matching multiple aliases for the same org appears N times.
 target_doc_ids AS (
-    SELECT DISTINCT doa.document_id AS doc_id
-      FROM dealcloud.document_organization_alias doa
-     WHERE doa.organization_alias_id IN (
-           SELECT alias_id FROM dealcloud.todd_alias_ids(org_ids))
+    SELECT DISTINCT entity_id AS doc_id
+      FROM dealcloud.organization_entity
+     WHERE organization_id = ANY(org_ids)
+       AND entity_type = 'document'
 ),
 -- Cap: skip docs that mention >10 distinct orgs. Those are firm-level
 -- overview decks / fund summaries, not deal-specific evidence.
@@ -101,10 +108,10 @@ target_doc_ids_filtered AS (
     SELECT td.doc_id
       FROM target_doc_ids td
      WHERE (
-        SELECT COUNT(DISTINCT oa.organization_id)
-          FROM dealcloud.document_organization_alias doa2
-          JOIN dealcloud.organization_alias oa ON oa.id = doa2.organization_alias_id
-         WHERE doa2.document_id = td.doc_id
+        SELECT COUNT(DISTINCT organization_id)
+          FROM dealcloud.organization_entity
+         WHERE entity_type = 'document'
+           AND entity_id = td.doc_id
      ) <= 10
 ),
 dc_counterparty_orgs AS (
@@ -113,20 +120,20 @@ dc_counterparty_orgs AS (
      WHERE organization_id IS NOT NULL
 ),
 hint_pairs AS (
-    -- (document, co-mentioned DC counterparty) pairs, post-cap
-    SELECT td.doc_id,
-           oa_other.organization_id AS co_org_id,
+    -- (document, co-mentioned DC counterparty) pairs, post-cap. We
+    -- DISTINCT on (doc, other_org) because the same other_org may match
+    -- the doc through multiple aliases.
+    SELECT DISTINCT td.doc_id,
+           oe_other.organization_id AS co_org_id,
            o_other.name             AS co_org_name
       FROM target_doc_ids_filtered td
-      JOIN dealcloud.document_organization_alias doa_other
-           ON doa_other.document_id = td.doc_id
-      JOIN dealcloud.organization_alias oa_other
-           ON oa_other.id = doa_other.organization_alias_id
+      JOIN dealcloud.organization_entity oe_other
+           ON oe_other.entity_type = 'document'
+          AND oe_other.entity_id   = td.doc_id
       JOIN dealcloud.organization o_other
-           ON o_other.id = oa_other.organization_id
-     WHERE oa_other.organization_id IN (SELECT organization_id FROM dc_counterparty_orgs)
-       AND NOT (oa_other.organization_id = ANY(org_ids))
-     GROUP BY 1, 2, 3
+           ON o_other.id = oe_other.organization_id
+     WHERE oe_other.organization_id IN (SELECT organization_id FROM dc_counterparty_orgs)
+       AND NOT (oe_other.organization_id = ANY(org_ids))
 ),
 hint_top AS (
     SELECT hp.doc_id        AS document_id,
@@ -247,7 +254,28 @@ $$;
 CREATE OR REPLACE FUNCTION dealcloud.org_ion_contacts(org_ids INTEGER[])
 RETURNS jsonb LANGUAGE sql STABLE AS $$
 WITH
-alias_ids AS (SELECT alias_id FROM dealcloud.todd_alias_ids(org_ids)),
+-- Distinct entity-id sets for the bundle. Reading from
+-- organization_entity directly with DISTINCT collapses the alias hop
+-- and avoids N-fold over-counting when an entity matches multiple
+-- aliases of the same org.
+org_threads AS (
+    SELECT DISTINCT entity_id AS thread_id
+      FROM dealcloud.organization_entity
+     WHERE organization_id = ANY(org_ids)
+       AND entity_type = 'email_thread'
+),
+org_events AS (
+    SELECT DISTINCT entity_id AS event_id
+      FROM dealcloud.organization_entity
+     WHERE organization_id = ANY(org_ids)
+       AND entity_type = 'calendar_event'
+),
+org_slack AS (
+    SELECT DISTINCT entity_id AS message_group_id
+      FROM dealcloud.organization_entity
+     WHERE organization_id = ANY(org_ids)
+       AND entity_type = 'slack_message_group'
+),
 -- Email touches per Ion email
 email_touches AS (
     SELECT etp.email AS ion_email,
@@ -256,11 +284,10 @@ email_touches AS (
            SUM(CASE WHEN etp.message_count = 0 THEN 1 ELSE 0 END)::INT  AS passive,
            MIN(et.first_message_at) AS first_touch,
            MAX(et.last_message_at)  AS last_touch
-      FROM dealcloud.email_thread_organization eto
-      JOIN dealcloud.email_thread et ON et.id = eto.thread_id
+      FROM org_threads t
+      JOIN dealcloud.email_thread et ON et.id = t.thread_id
       JOIN dealcloud.email_thread_participant etp ON etp.thread_id = et.id
-     WHERE eto.organization_alias_id IN (SELECT alias_id FROM alias_ids)
-       AND etp.is_internal = TRUE
+     WHERE etp.is_internal = TRUE
      GROUP BY etp.email
 ),
 -- Calendar touches per Ion email
@@ -275,11 +302,10 @@ calendar_touches AS (
                     THEN 1 ELSE 0 END)::INT AS passive,
            MIN(ce.start_time) AS first_touch,
            MAX(ce.start_time) AS last_touch
-      FROM dealcloud.calendar_event_organization ceo
-      JOIN dealcloud.calendar_event ce ON ce.id = ceo.event_id
+      FROM org_events e
+      JOIN dealcloud.calendar_event ce ON ce.id = e.event_id
       JOIN dealcloud.calendar_event_participant cep ON cep.event_id = ce.id
-     WHERE ceo.organization_alias_id IN (SELECT alias_id FROM alias_ids)
-       AND cep.is_internal = TRUE
+     WHERE cep.is_internal = TRUE
      GROUP BY cep.email
 ),
 -- DC communications per Ion email (all active by definition)
@@ -347,27 +373,24 @@ top_contacts_json AS (
 last_email AS (
     SELECT et.last_message_at AS date,
            et.subject          AS subject_or_summary
-      FROM dealcloud.email_thread_organization eto
-      JOIN dealcloud.email_thread et ON et.id = eto.thread_id
-     WHERE eto.organization_alias_id IN (SELECT alias_id FROM alias_ids)
+      FROM org_threads t
+      JOIN dealcloud.email_thread et ON et.id = t.thread_id
      ORDER BY et.last_message_at DESC NULLS LAST LIMIT 1
 ),
 last_calendar AS (
     SELECT ce.start_time AS date, ce.subject AS subject
-      FROM dealcloud.calendar_event_organization ceo
-      JOIN dealcloud.calendar_event ce ON ce.id = ceo.event_id
-     WHERE ceo.organization_alias_id IN (SELECT alias_id FROM alias_ids)
+      FROM org_events e
+      JOIN dealcloud.calendar_event ce ON ce.id = e.event_id
      ORDER BY ce.start_time DESC NULLS LAST LIMIT 1
 ),
 last_slack AS (
     SELECT TO_TIMESTAMP(CAST(SPLIT_PART(smg.last_ts, '.', 1) AS BIGINT)) AS date,
            sc.name AS channel,
            LEFT(COALESCE(smg.summary, ''), 200) AS summary
-      FROM dealcloud.slack_message_group_organization smgo
-      JOIN dealcloud.slack_message_group smg ON smg.id = smgo.message_group_id
+      FROM org_slack s
+      JOIN dealcloud.slack_message_group smg ON smg.id = s.message_group_id
       JOIN dealcloud.slack_channel sc ON sc.id = smg.channel_id
-     WHERE smgo.organization_alias_id IN (SELECT alias_id FROM alias_ids)
-       AND smg.last_ts ~ '^[0-9]+(\.[0-9]+)?$'
+     WHERE smg.last_ts ~ '^[0-9]+(\.[0-9]+)?$'
      ORDER BY smg.last_ts DESC LIMIT 1
 ),
 last_comm AS (
@@ -403,7 +426,20 @@ $$;
 CREATE OR REPLACE FUNCTION dealcloud.org_their_contacts(org_ids INTEGER[])
 RETURNS jsonb LANGUAGE sql STABLE AS $$
 WITH
-alias_ids AS (SELECT alias_id FROM dealcloud.todd_alias_ids(org_ids)),
+-- Distinct entity-id sets via organization_entity (denorm). DISTINCT
+-- prevents alias-fold over-counting -- see org_ion_contacts comment.
+org_threads AS (
+    SELECT DISTINCT entity_id AS thread_id
+      FROM dealcloud.organization_entity
+     WHERE organization_id = ANY(org_ids)
+       AND entity_type = 'email_thread'
+),
+org_events AS (
+    SELECT DISTINCT entity_id AS event_id
+      FROM dealcloud.organization_entity
+     WHERE organization_id = ANY(org_ids)
+       AND entity_type = 'calendar_event'
+),
 their_domains AS (
     SELECT DISTINCT domain
       FROM dealcloud.domain_organization
@@ -417,11 +453,10 @@ email_external AS (
            SUM(CASE WHEN etp.message_count = 0 THEN 1 ELSE 0 END)::INT AS passive,
            MIN(et.first_message_at) AS first_touch,
            MAX(et.last_message_at)  AS last_touch
-      FROM dealcloud.email_thread_organization eto
-      JOIN dealcloud.email_thread et ON et.id = eto.thread_id
+      FROM org_threads t
+      JOIN dealcloud.email_thread et ON et.id = t.thread_id
       JOIN dealcloud.email_thread_participant etp ON etp.thread_id = et.id
-     WHERE eto.organization_alias_id IN (SELECT alias_id FROM alias_ids)
-       AND etp.is_internal = FALSE
+     WHERE etp.is_internal = FALSE
        AND etp.email IS NOT NULL
      GROUP BY etp.email
 ),
@@ -437,11 +472,10 @@ calendar_external AS (
                     THEN 1 ELSE 0 END)::INT AS passive,
            MIN(ce.start_time) AS first_touch,
            MAX(ce.start_time) AS last_touch
-      FROM dealcloud.calendar_event_organization ceo
-      JOIN dealcloud.calendar_event ce ON ce.id = ceo.event_id
+      FROM org_events e
+      JOIN dealcloud.calendar_event ce ON ce.id = e.event_id
       JOIN dealcloud.calendar_event_participant cep ON cep.event_id = ce.id
-     WHERE ceo.organization_alias_id IN (SELECT alias_id FROM alias_ids)
-       AND cep.is_internal = FALSE
+     WHERE cep.is_internal = FALSE
        AND cep.email IS NOT NULL
      GROUP BY cep.email
 ),
@@ -568,25 +602,42 @@ $$;
 CREATE OR REPLACE FUNCTION dealcloud.org_communication_timeline(org_ids INTEGER[])
 RETURNS jsonb LANGUAGE sql STABLE AS $$
 WITH
-alias_ids AS (SELECT alias_id FROM dealcloud.todd_alias_ids(org_ids)),
+-- Distinct entity-id sets via organization_entity (denorm). DISTINCT
+-- collapses alias-fold duplicates so each thread/event/group/doc
+-- counts once even if it matched the org through multiple aliases.
+org_threads AS (
+    SELECT DISTINCT entity_id AS thread_id
+      FROM dealcloud.organization_entity
+     WHERE organization_id = ANY(org_ids)
+       AND entity_type = 'email_thread'
+),
+org_events AS (
+    SELECT DISTINCT entity_id AS event_id
+      FROM dealcloud.organization_entity
+     WHERE organization_id = ANY(org_ids)
+       AND entity_type = 'calendar_event'
+),
+org_slack AS (
+    SELECT DISTINCT entity_id AS message_group_id
+      FROM dealcloud.organization_entity
+     WHERE organization_id = ANY(org_ids)
+       AND entity_type = 'slack_message_group'
+),
 email_dates AS (
     SELECT et.last_message_at AS ts
-      FROM dealcloud.email_thread_organization eto
-      JOIN dealcloud.email_thread et ON et.id = eto.thread_id
-     WHERE eto.organization_alias_id IN (SELECT alias_id FROM alias_ids)
+      FROM org_threads t
+      JOIN dealcloud.email_thread et ON et.id = t.thread_id
 ),
 calendar_dates AS (
     SELECT ce.start_time AS ts
-      FROM dealcloud.calendar_event_organization ceo
-      JOIN dealcloud.calendar_event ce ON ce.id = ceo.event_id
-     WHERE ceo.organization_alias_id IN (SELECT alias_id FROM alias_ids)
+      FROM org_events e
+      JOIN dealcloud.calendar_event ce ON ce.id = e.event_id
 ),
 slack_dates AS (
     SELECT TO_TIMESTAMP(CAST(SPLIT_PART(smg.last_ts, '.', 1) AS BIGINT)) AS ts
-      FROM dealcloud.slack_message_group_organization smgo
-      JOIN dealcloud.slack_message_group smg ON smg.id = smgo.message_group_id
-     WHERE smgo.organization_alias_id IN (SELECT alias_id FROM alias_ids)
-       AND smg.last_ts ~ '^[0-9]+(\.[0-9]+)?$'
+      FROM org_slack s
+      JOIN dealcloud.slack_message_group smg ON smg.id = s.message_group_id
+     WHERE smg.last_ts ~ '^[0-9]+(\.[0-9]+)?$'
 ),
 comm_dates AS (
     SELECT c.date AS ts
@@ -595,9 +646,10 @@ comm_dates AS (
      WHERE co.organization_id = ANY(org_ids)
 ),
 doc_rows AS (
-    SELECT DISTINCT doa.document_id AS doc_id
-      FROM dealcloud.document_organization_alias doa
-     WHERE doa.organization_alias_id IN (SELECT alias_id FROM alias_ids)
+    SELECT DISTINCT entity_id AS doc_id
+      FROM dealcloud.organization_entity
+     WHERE organization_id = ANY(org_ids)
+       AND entity_type = 'document'
 ),
 doc_dates AS (
     -- "deal_related" = path lives under a deal-files folder or a Project
