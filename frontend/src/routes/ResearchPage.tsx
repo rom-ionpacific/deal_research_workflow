@@ -287,8 +287,8 @@ function OrgSelectPhase({
       </h2>
       <p className="text-sm text-slate-500 mb-3">
         Search by name and click candidates to add or remove. Selected orgs
-        stay pinned at the top of the list. Each click is a new session
-        version (deep-link friendly, undoable).
+        sit at the top of the list and scroll with it. Each click is a new
+        session version (deep-link friendly, undoable).
       </p>
 
       {/* Search box stays sticky at the top of the scrolling parent
@@ -304,13 +304,13 @@ function OrgSelectPhase({
         />
       </div>
 
-      {/* Unified list: selected section pinned at top via sticky, then
-          search results below. The selected wrapper sticks just under
-          the search box so as the user scrolls through long results
-          the selection stays in view. */}
+      {/* Selected section + search results in one scroll flow. Selected
+          orgs are visually grouped at the top via the header, but they
+          scroll with everything else so a long selection doesn't
+          fill the viewport and hide search results. */}
       <div className="space-y-2 mt-2">
         {selected.length > 0 && (
-          <div className="sticky top-[3.25rem] bg-white z-10 pt-1 pb-1 border-b border-slate-200">
+          <div className="pt-1 pb-3 border-b border-slate-200 mb-2">
             <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">
               Selected ({selected.length})
             </div>
@@ -355,6 +355,52 @@ function OrgSelectPhase({
             disabled={pendingIds.has(r.org_id)}
           />
         ))}
+      </div>
+
+      {/* Phase nav. Advance disabled until at least one org selected;
+          backend's advance_to_entity_select tool also refuses an empty
+          selection, so this matches. No "back" button -- Phase 1 is
+          the first phase. */}
+      <div className="flex items-center justify-end mt-6 pt-4 border-t border-slate-200">
+        <button
+          type="button"
+          disabled={selected.length === 0}
+          onClick={async () => {
+            try {
+              const cached = qc.getQueryData<SessionWithCurrent>([
+                "session",
+                sessionId,
+              ]);
+              const parentId =
+                cached?.current_version.id ?? parentVersionId;
+              const data = await api.appendVersion(sessionId, {
+                parent_id: parentId,
+                phase: "entity_select",
+                state: {
+                  inherits_from_version: parentId,
+                  selected_org_ids: selected,
+                  selected_entity_ids: {
+                    document: [],
+                    email_thread: [],
+                    calendar_event: [],
+                    slack_message_group: [],
+                  },
+                },
+                summary: "Advance to entity_select",
+              });
+              qc.setQueryData(["session", sessionId], {
+                session: data.session,
+                current_version: data.version,
+              });
+            } catch (err) {
+              console.error("advance failed", err);
+              qc.invalidateQueries({ queryKey: ["session", sessionId] });
+            }
+          }}
+          className="px-3 py-2 bg-slate-900 text-white text-sm rounded-md disabled:opacity-40"
+        >
+          Advance to entity_select →
+        </button>
       </div>
     </div>
   );
