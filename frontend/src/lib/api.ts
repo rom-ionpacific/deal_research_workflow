@@ -127,6 +127,25 @@ function entityFilterToQuery(
   return s ? `?${s}` : "";
 }
 
+// ----- data rooms (phase 3) -----
+
+export interface PresetQuestion {
+  id: number;
+  label: string;
+  question_text: string;
+  sort_order: number | null;
+  grouping: string | null;
+}
+
+export interface BuildDataRoomResp {
+  data_room_id: number;
+  name: string;
+  entity_count: number;
+  question_count: number;
+  new_version_id: string;
+  created_at: string;
+}
+
 // ----- chat -----
 
 export interface ChatMessage {
@@ -231,6 +250,16 @@ export const api = {
       `/api/v1/sessions/${sessionId}/entities/${entityType}/list${qs}`,
     );
   },
+
+  // ---- phase 3: data-rooms ----
+  getPresetQuestions: () =>
+    request<PresetQuestion[]>("/api/v1/data-rooms/preset-questions"),
+
+  buildDataRoom: (sessionId: string) =>
+    request<BuildDataRoomResp>(
+      `/api/v1/sessions/${sessionId}/data-rooms`,
+      { method: "POST" },
+    ),
 
   listMessages: (sessionId: string, limit = 200) =>
     request<ChatMessage[]>(

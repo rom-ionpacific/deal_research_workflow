@@ -741,11 +741,185 @@ def _read_current_state(ctx: dict) -> dict:
     return state or {}
 
 
+# ---- Phase 3 (data_room_setup) --------------------------------------------
+
+from ..dataroom_setup import (
+    BuildError as _BuildError,
+    build_data_room_from_session as _build_data_room_from_session,
+    list_preset_questions as _list_preset_questions,
+)
+
+
+class PresetQuestionIdInput(BaseModel):
+    preset_question_id: int = Field(
+        ...,
+        description=(
+            "dealcloud.data_room_preset_question.id. Get the list via "
+            "list_preset_questions."
+        ),
+    )
+
+
+phase3_registry = ToolRegistry()
+
+
+@phase3_registry.tool(
+    "list_preset_questions",
+    (
+        "Return all active default-grouping preset questions the user "
+        "can pick for this data room. Read-only. Returns one row per "
+        "question with id, label, question_text, and sort_order."
+    ),
+    NoArgs,
+)
+def list_preset_questions_tool(inp: NoArgs, ctx: dict) -> ToolResult:
+    return ToolResult(output={"questions": _list_preset_questions()})
+
+
+@phase3_registry.tool(
+    "add_preset_question",
+    (
+        "Add a preset question to the data room's question plan by id. "
+        "No-op if it's already in the plan. Mutates state."
+    ),
+    PresetQuestionIdInput,
+    mutates_state=True,
+)
+def add_preset_question(inp: PresetQuestionIdInput, ctx: dict) -> ToolResult:
+    return _append_version_if_changed(
+        ctx,
+        lambda state: _patch_preset_questions(state, inp.preset_question_id, add=True),
+        no_op_message=(
+            f"Preset question {inp.preset_question_id} was already in the plan."
+        ),
+    )
+
+
+@phase3_registry.tool(
+    "remove_preset_question",
+    (
+        "Remove a preset question from the plan by id. No-op if not in "
+        "the plan. Mutates state."
+    ),
+    PresetQuestionIdInput,
+    mutates_state=True,
+)
+def remove_preset_question(inp: PresetQuestionIdInput, ctx: dict) -> ToolResult:
+    return _append_version_if_changed(
+        ctx,
+        lambda state: _patch_preset_questions(state, inp.preset_question_id, add=False),
+        no_op_message=f"Preset question {inp.preset_question_id} was not in the plan.",
+    )
+
+
+def _patch_preset_questions(
+    state: dict, question_id: int, *, add: bool
+) -> tuple[dict, str | None]:
+    cur = list(state.get("preset_question_ids") or [])
+    if add:
+        if question_id in cur:
+            return state, None
+        new = cur + [question_id]
+        summary = f"Add preset question {question_id}"
+    else:
+        if question_id not in cur:
+            return state, None
+        new = [x for x in cur if x != question_id]
+        summary = f"Remove preset question {question_id}"
+    new_state = dict(state)
+    new_state["preset_question_ids"] = new
+    return new_state, summary
+
+
+@phase3_registry.tool(
+    "build_data_room",
+    (
+        "Materialise the session's selection into a dealcloud data "
+        "room (status='pending') and transition this session to "
+        "data_room_view. The data-room-builder cron will pick the "
+        "room up within ~2 min, upload entities to ToltIQ, run the "
+        "question playlist, and save answers. Refuses if no entities "
+        "are selected. Mutates state."
+    ),
+    NoArgs,
+    mutates_state=True,
+)
+def build_data_room_tool(inp: NoArgs, ctx: dict) -> ToolResult:
+    # Unlike the other Phase 3 mutating tools, this one does its own
+    # transaction (build_data_room_from_session locks the session row,
+    # inserts dealcloud rows, and appends the new version). We can't
+    # run inside _append_version_with_phase because that helper reads
+    # state pre-mutation; the build needs the FULL transactional path.
+    session_id = ctx["session_id"]
+    user = ctx["user"]
+    try:
+        built = _build_data_room_from_session(session_id, user)
+    except _BuildError as e:
+        return ToolResult(output=str(e))
+
+    return ToolResult(
+        output={
+            "data_room_id": built.data_room_id,
+            "name": built.name,
+            "entity_count": built.entity_count,
+            "question_count": built.question_count,
+            "phase": "data_room_view",
+            "next_step": (
+                "The cron will start building the room within ~2 min. "
+                "Answers land in dealcloud.historical_data_room_answer "
+                "and surface in the org-history-viewer's AI Overview "
+                "tab once the playlist completes (~10-15 min total)."
+            ),
+        },
+        side_events=[
+            {
+                "type": "version_created",
+                "version_id": str(built.new_version_id),
+                "phase": "data_room_view",
+                "summary": f"Build data room (id={built.data_room_id})",
+            }
+        ],
+    )
+
+
+@phase3_registry.tool(
+    "back_to_entity_select",
+    (
+        "Return to Phase 2 (entity_select). The current entity "
+        "selection is preserved on the version chain. Mutates state."
+    ),
+    NoArgs,
+    mutates_state=True,
+)
+def back_to_entity_select(inp: NoArgs, ctx: dict) -> ToolResult:
+    def mutate_with_phase(
+        cur, conn, session_row, current_version_row
+    ) -> tuple[str, dict, str | None]:
+        cur_state = current_version_row["state"]
+        if isinstance(cur_state, str):
+            cur_state = json.loads(cur_state)
+        new_state = {
+            "inherits_from_version": str(current_version_row["id"]),
+            "selected_org_ids": cur_state.get("selected_org_ids") or [],
+            "selected_entity_ids": cur_state.get("selected_entity_ids") or {},
+        }
+        return "entity_select", new_state, "Back to entity_select"
+
+    return _append_version_with_phase(
+        ctx,
+        mutate_with_phase,
+        no_op_message="Already on entity_select.",
+        success_payload_key="next_phase",
+        success_payload_value="entity_select",
+    )
+
+
 # ---- Public registry lookup ------------------------------------------------
 
 REGISTRIES = {
     "org_select": phase1_registry,
     "entity_select": phase2_registry,
+    "data_room_setup": phase3_registry,
 }
 
 
