@@ -1,10 +1,15 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 
 import ChatPanel from "../components/ChatPanel";
 import OrgCard from "../components/OrgCard";
-import { api, type OrgSearchResult, type Phase } from "../lib/api";
+import {
+  api,
+  type OrgSearchResult,
+  type Phase,
+  type SessionWithCurrent,
+} from "../lib/api";
 
 const PHASES: Phase[] = [
   "org_select",
@@ -15,7 +20,6 @@ const PHASES: Phase[] = [
 
 export default function ResearchPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
-  const qc = useQueryClient();
 
   const session = useQuery({
     queryKey: ["session", sessionId],
@@ -45,9 +49,6 @@ export default function ResearchPage() {
               sessionId={sessionId!}
               parentVersionId={current_version.id}
               state={current_version.state}
-              onSaved={() =>
-                qc.invalidateQueries({ queryKey: ["session", sessionId] })
-              }
             />
           )}
           {current_version.phase !== "org_select" && (
@@ -94,13 +95,13 @@ function OrgSelectPhase({
   sessionId,
   parentVersionId,
   state,
-  onSaved,
 }: {
   sessionId: string;
   parentVersionId: string;
   state: Record<string, unknown>;
-  onSaved: () => void;
 }) {
+  const qc = useQueryClient();
+
   const [q, setQ] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
   useEffect(() => {
@@ -110,10 +111,6 @@ function OrgSelectPhase({
 
   const selected = (state.selected_org_ids as number[] | undefined) ?? [];
 
-  // Search + selected-by-ids are independent queries. Search is debounced
-  // and only fires when the user types; selected-by-ids fires whenever
-  // the selection changes (incl. via AI tool calls -> version_created
-  // -> ['session', sessionId] invalidates -> selected[] updates here).
   const search = useQuery({
     queryKey: ["orgs", "search", debouncedQ],
     queryFn: () => api.searchOrgs(debouncedQ, 15),
@@ -124,37 +121,151 @@ function OrgSelectPhase({
     queryKey: ["orgs", "by-ids", [...selected].sort((a, b) => a - b)],
     queryFn: () => api.getOrgsByIds(selected),
     enabled: selected.length > 0,
-    // Selection's enriched data is stable -- the underlying
-    // organization_summary table refreshes nightly, so a 5min stale
-    // window is plenty.
     staleTime: 5 * 60_000,
   });
 
-  const append = useMutation({
-    mutationFn: (newSelected: number[]) =>
-      api.appendVersion(sessionId, {
-        parent_id: parentVersionId,
-        phase: "org_select",
-        state: { ...state, selected_org_ids: newSelected, user_query: q },
-        summary:
-          newSelected.length > selected.length
-            ? `Added org`
-            : `Removed org`,
-      }),
-    onSuccess: onSaved,
-  });
+  // Per-card pending visual: only the org_id currently being toggled
+  // shows the disabled state, so other cards stay clickable.
+  const [pendingIds, setPendingIds] = useState<Set<number>>(new Set());
+
+  // Promise chain: serialise POSTs so each one's parent_id references
+  // the version_id committed by the previous one. Without this, two
+  // quick clicks both send parent_id = original version, and the
+  // second 409s on the server's optimistic-concurrency check.
+  const queueRef = useRef<Promise<void>>(Promise.resolve());
 
   const toggle = (org_id: number) => {
-    const next = selected.includes(org_id)
-      ? selected.filter((x) => x !== org_id)
-      : [...selected, org_id];
-    append.mutate(next);
+    const cached = qc.getQueryData<SessionWithCurrent>(["session", sessionId]);
+    if (!cached) return;
+
+    const cur =
+      (cached.current_version.state.selected_org_ids as
+        | number[]
+        | undefined) ?? [];
+    const isSelected = cur.includes(org_id);
+    const next = isSelected
+      ? cur.filter((x) => x !== org_id)
+      : [...cur, org_id];
+
+    // (1) Optimistic session patch -- UI updates this frame, no wait.
+    qc.setQueryData<SessionWithCurrent>(["session", sessionId], {
+      ...cached,
+      current_version: {
+        ...cached.current_version,
+        state: {
+          ...cached.current_version.state,
+          selected_org_ids: next,
+          user_query: q,
+        },
+      },
+    });
+
+    // (3) Pre-warm the by-ids cache for the new selected key so the
+    // sticky panel doesn't fetch when `selected` changes. We have the
+    // toggled org's enriched data either in the search results (when
+    // adding) or already in the selected query data (when removing).
+    if (next.length > 0) {
+      const sortedNext = [...next].sort((a, b) => a - b);
+      const sortedCur = [...cur].sort((a, b) => a - b);
+      const curData =
+        qc.getQueryData<OrgSearchResult[]>([
+          "orgs",
+          "by-ids",
+          sortedCur,
+        ]) ?? [];
+      let nextData: OrgSearchResult[];
+      if (isSelected) {
+        nextData = curData.filter((r) => r.org_id !== org_id);
+      } else {
+        const fromSearch = search.data?.find((r) => r.org_id === org_id);
+        nextData = fromSearch ? [...curData, fromSearch] : curData;
+      }
+      qc.setQueryData(["orgs", "by-ids", sortedNext], nextData);
+    }
+
+    // (4) Per-card visual pending.
+    setPendingIds((prev) => {
+      const n = new Set(prev);
+      n.add(org_id);
+      return n;
+    });
+
+    // Serialised POST: chain behind any prior in-flight click. The
+    // .catch swallows prior errors so one bad POST doesn't sink the
+    // entire queue for the session.
+    queueRef.current = queueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        // Read the LATEST committed version_id from cache. If a prior
+        // POST in the queue just landed, this picks up its new id and
+        // chains correctly.
+        const latest = qc.getQueryData<SessionWithCurrent>([
+          "session",
+          sessionId,
+        ]);
+        const parentId = latest?.current_version.id ?? parentVersionId;
+
+        try {
+          // (2) Use the POST response directly to update cache. We
+          // preserve the cache's `state` if it differs from the server's
+          // (i.e. additional optimistic patches landed while this POST
+          // was in flight) -- the next chained POST will commit them.
+          const data = await api.appendVersion(sessionId, {
+            parent_id: parentId,
+            phase: "org_select",
+            state: { ...state, selected_org_ids: next, user_query: q },
+            summary: isSelected ? "Removed org" : "Added org",
+          });
+          qc.setQueryData<SessionWithCurrent | undefined>(
+            ["session", sessionId],
+            (old) => {
+              if (!old) {
+                return { session: data.session, current_version: data.version };
+              }
+              const serverIds =
+                (data.version.state.selected_org_ids as
+                  | number[]
+                  | undefined) ?? [];
+              const cacheIds =
+                (old.current_version.state.selected_org_ids as
+                  | number[]
+                  | undefined) ?? [];
+              const hasLaterPatches =
+                JSON.stringify(serverIds) !== JSON.stringify(cacheIds);
+              if (hasLaterPatches) {
+                // Keep optimistic state; only update the version_id so
+                // the next chained POST has the right parent_id.
+                return {
+                  session: data.session,
+                  current_version: {
+                    ...data.version,
+                    state: old.current_version.state,
+                  },
+                };
+              }
+              return { session: data.session, current_version: data.version };
+            },
+          );
+        } catch (err) {
+          console.error("toggle org_id=" + org_id + " failed:", err);
+          // Recover by refetching authoritative state. Optimistic
+          // patches that hadn't been committed yet are discarded;
+          // user can retry.
+          qc.invalidateQueries({ queryKey: ["session", sessionId] });
+        } finally {
+          setPendingIds((prev) => {
+            const n = new Set(prev);
+            n.delete(org_id);
+            return n;
+          });
+        }
+      });
   };
 
   // Hide already-selected orgs from search results so the list isn't
   // duplicated -- they're already shown above in the sticky panel.
   const searchVisible = (search.data ?? []).filter(
-    (r) => !selected.includes(r.org_id)
+    (r) => !selected.includes(r.org_id),
   );
 
   return (
@@ -201,7 +312,7 @@ function OrgSelectPhase({
                   org={r}
                   selected={true}
                   onToggle={() => toggle(r.org_id)}
-                  disabled={append.isPending}
+                  disabled={pendingIds.has(r.org_id)}
                 />
               ))}
             </div>
@@ -229,7 +340,7 @@ function OrgSelectPhase({
             org={r}
             selected={false}
             onToggle={() => toggle(r.org_id)}
-            disabled={append.isPending}
+            disabled={pendingIds.has(r.org_id)}
           />
         ))}
       </div>
