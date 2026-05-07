@@ -137,7 +137,10 @@ def make_unique_title(
             str(exclude_session_id) if exclude_session_id else None,
         ),
     )
-    existing = {r[0] for r in cur.fetchall()}
+    # Caller may pass a tuple cursor or a RealDictCursor; tolerate both.
+    existing: set[str] = set()
+    for r in cur.fetchall():
+        existing.add(r["title"] if isinstance(r, dict) else r[0])
     if base not in existing:
         return base
     i = 1
