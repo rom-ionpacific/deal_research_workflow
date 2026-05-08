@@ -68,14 +68,26 @@ def _client_config() -> tuple[str, str, str]:
 
 def _request(method: str, path: str, *, body: dict | None = None) -> Any:
     """Tiny urllib wrapper. Returns the parsed JSON response. Raises
-    ToltIQError on non-2xx."""
+    ToltIQError on non-2xx.
+
+    Two non-obvious gotchas matched against the cron's `requests`-based
+    client:
+      * Paths must be under the `/api/v0` prefix (the bare base URL hits
+        Cloudflare's 1010 'access denied' page).
+      * Default urllib User-Agent ('Python-urllib/3.x') trips the same
+        Cloudflare bot filter on some endpoints. Use a normal-looking
+        UA to match what requests sends out of the box.
+    """
     base, key, org = _client_config()
-    url = f"{base}{path}"
+    if not path.startswith("/"):
+        path = "/" + path
+    url = f"{base}/api/v0{path}"
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib_request.Request(url, data=data, method=method)
     req.add_header("Authorization", f"Bearer {key}")
-    req.add_header("X-Organization-Id", org)
+    req.add_header("X-Organization-ID", org)
     req.add_header("Accept", "application/json")
+    req.add_header("User-Agent", "deal_research_workflow/1.0 python-urllib")
     if data is not None:
         req.add_header("Content-Type", "application/json")
     try:
