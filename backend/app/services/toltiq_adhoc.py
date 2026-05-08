@@ -94,14 +94,10 @@ def _request(method: str, path: str, *, body: dict | None = None) -> Any:
         raise ToltIQError(f"{method} {path} -> network error: {e.reason}") from e
 
 
-def ask_room_question(
-    room_id: int, question: str, user: UserCtx
-) -> dict:
-    """Send `question` to the room's ToltIQ deal, wait for the answer,
-    persist it, return the answer text + attachments. Inserts the
-    `historical_data_room_answer` row in 'running' state up front so
-    the FE polling endpoint sees the in-flight question; updates the
-    same row on completion."""
+def _check_room_for_ask(room_id: int, user: UserCtx) -> str:
+    """Auth + readiness gate. Returns the toltiq_deal_id on success.
+    Raises RoomError if the room isn't ours, isn't built, or has no
+    deal id yet."""
     detail = get_room_detail(room_id, user)  # auth + existence check
     if detail["status"] != "complete":
         raise RoomError(
@@ -114,19 +110,94 @@ def ask_room_question(
         raise RoomError(
             "Data room has no toltiq_deal_id; cannot run ad-hoc query."
         )
+    return deal_id
 
-    # 1. Insert the answer row up front in 'running' state. The FE
-    # polling /data-rooms/{id} will see it appear immediately so the
-    # user knows the request is in flight.
+
+def start_room_question(
+    room_id: int, question: str, user: UserCtx
+) -> int:
+    """Auth-check the room, validate ToltIQ config, insert the running
+    answer row, and return the answer_id immediately. Caller is
+    responsible for actually executing the workflow (typically via
+    `run_toltiq_workflow_safe` in a background task)."""
+    _check_room_for_ask(room_id, user)
+    _client_config()  # raises ToltIQNotConfigured early before we insert a row
+    return _insert_running_answer(room_id, question)
+
+
+def ask_room_question(
+    room_id: int, question: str, user: UserCtx
+) -> dict:
+    """Synchronous variant: insert the row, run the workflow inline,
+    return the persisted answer. Used by the chat tool which needs
+    the answer text in its tool result so the orchestrator can quote
+    it."""
+    deal_id = _check_room_for_ask(room_id, user)
     answer_id = _insert_running_answer(room_id, question)
+    return _run_toltiq_workflow(
+        answer_id=answer_id,
+        room_id=room_id,
+        question=question,
+        deal_id=deal_id,
+    )
 
+
+def run_toltiq_workflow_safe(
+    answer_id: int, room_id: int, question: str
+) -> None:
+    """Background-task entry point. Looks up the deal_id and runs the
+    workflow; never raises (any failure is already persisted on the
+    answer row). Used by the FastAPI BackgroundTasks path so the HTTP
+    request can return immediately."""
     try:
-        # 2. Look up the room's uploaded entity ids so the chat is
-        # scoped correctly. The chat is keyed against the deal's docs.
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT toltiq_deal_id FROM dealcloud.historical_data_room "
+                "WHERE id = %s",
+                (room_id,),
+            )
+            row = cur.fetchone()
+        if not row or not row[0]:
+            _mark_answer_failed(answer_id, "Room has no toltiq_deal_id.")
+            return
+        _run_toltiq_workflow(
+            answer_id=answer_id,
+            room_id=room_id,
+            question=question,
+            deal_id=row[0],
+        )
+    except (ToltIQError, ToltIQNotConfigured) as e:
+        # Already persisted to the row in most cases, but make sure.
+        try:
+            _mark_answer_failed(answer_id, str(e))
+        except Exception:
+            logger.exception("failed to mark answer %s failed", answer_id)
+    except Exception as e:
+        logger.exception("background toltiq workflow crashed")
+        try:
+            _mark_answer_failed(answer_id, f"Unexpected error: {e!r}")
+        except Exception:
+            pass
+
+
+def _run_toltiq_workflow(
+    *,
+    answer_id: int,
+    room_id: int,
+    question: str,
+    deal_id: str,
+) -> dict:
+    """The actual ToltIQ work. Assumes the running answer row already
+    exists (caller inserted it). On success, marks the row complete
+    and returns the persisted answer. On failure, marks the row
+    failed and raises."""
+    try:
+        # 1. Doc ids the room has uploaded -- chat is scoped to these.
         document_ids = _toltiq_document_ids(room_id)
 
-        # 3. Create a chat (one chat per ad-hoc question is simplest;
-        # avoids cross-contamination with other ad-hocs).
+        # 2. One chat per ad-hoc question (avoids cross-contamination
+        #    with other ad-hocs).
         chat = _request(
             "POST",
             "/external/chats",
@@ -139,7 +210,7 @@ def ask_room_question(
         )
         chat_id = chat["id"]
 
-        # 4. Run a single-message playlist.
+        # 3. Single-message playlist.
         wf = _request(
             "POST",
             "/external/chats/run-playlist",
@@ -150,7 +221,7 @@ def ask_room_question(
         )
         workflow_id = wf["workflow_id"]
 
-        # 5. Poll until terminal or timeout.
+        # 4. Poll until terminal or timeout.
         started = time.monotonic()
         while True:
             elapsed = time.monotonic() - started
@@ -161,8 +232,7 @@ def ask_room_question(
                 )
                 raise ToltIQError(
                     f"ToltIQ workflow {workflow_id} did not complete after "
-                    f"{int(elapsed)}s. The answer is marked failed; the user "
-                    "can ask again later."
+                    f"{int(elapsed)}s. The answer is marked failed; ask again."
                 )
             status_body = _request("GET", f"/external/chats/status/{workflow_id}")
             wf_status = status_body.get("status", "")
@@ -174,11 +244,10 @@ def ask_room_question(
                 raise ToltIQError(f"ToltIQ workflow failed: {err}")
             time.sleep(POLL_INTERVAL_S)
 
-        # 6. Fetch the assistant message.
+        # 5. Fetch the assistant reply.
         messages = _request("GET", f"/external/chats/{chat_id}/messages")
         if not isinstance(messages, list):
             messages = messages.get("messages", [])
-        # The assistant reply is the last role='assistant' message.
         assistant = next(
             (
                 m for m in reversed(messages)

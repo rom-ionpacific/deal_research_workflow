@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
 import {
@@ -43,12 +43,21 @@ export default function DataRoomViewPhase({
     queryKey: ["data-room", dataRoomId],
     queryFn: () => api.getDataRoom(dataRoomId!),
     enabled: dataRoomId != null,
-    // Poll every 15s while non-terminal so the user sees the build
-    // advance live. Once status flips to complete / failed, stop the
-    // polling -- the answers won't change.
+    // Poll cadence:
+    //   * Build still in flight: 15s (entity progress changes slowly).
+    //   * Build done but a follow-up is running: 5s (ToltIQ workflows
+    //     finish in 30-90s; we want the new answer to land soon).
+    //   * Otherwise: stop polling -- nothing will change.
     refetchInterval: (q) => {
-      const status = (q.state.data as DataRoomDetail | undefined)?.status;
-      return status && TERMINAL_STATUSES.has(status) ? false : 15_000;
+      const data = q.state.data as DataRoomDetail | undefined;
+      if (!data) return false;
+      const status = data.status;
+      if (!TERMINAL_STATUSES.has(status)) return 15_000;
+      const hasRunningFollowup = data.followup_questions.some(
+        (f) => f.status === "running" || f.status === "pending",
+      );
+      if (hasRunningFollowup) return 5_000;
+      return false;
     },
   });
 
@@ -109,22 +118,127 @@ export default function DataRoomViewPhase({
       ) : isFailed ? (
         <BuildFailedNotice room={room.data} />
       ) : (
-        <PresetAnswersSection
-          presets={room.data.preset_questions}
-          followups={room.data.followup_questions}
-        />
+        <>
+          <PresetAnswersSection
+            presets={room.data.preset_questions}
+            followups={room.data.followup_questions}
+          />
+          {/* Direct ToltIQ chat: posts straight to the deal, the
+              answer lands in the followups list above when ready. */}
+          <DirectToltIQChat roomId={room.data.id} />
+        </>
       )}
 
-      {/* Chat is rendered by ResearchPage's <ChatPanel> sibling -- not
-          here. The user always has a chat available; it just gains
-          ToltIQ powers once the room is built. */}
+      {/* The AI Assistant on the right is also useful: it can search
+          the org dossier, read full document summaries, and (post-
+          build) decide whether a question needs ToltIQ at all. */}
       <div className="mt-6 pt-4 border-t border-slate-200 text-xs text-slate-500">
-        Use the assistant on the right to ask follow-up questions.
+        Tip: the assistant on the right
         {isBuilding
-          ? " It can answer from local document summaries and the org dossier while the room finishes building."
-          : " It can now also query the built data room via ToltIQ."}
+          ? " can answer from local document summaries and the org dossier while the room finishes building."
+          : " can also reason over the local dossier and decide when ToltIQ is the right call."}
       </div>
     </div>
+  );
+}
+
+function DirectToltIQChat({ roomId }: { roomId: number }) {
+  const qc = useQueryClient();
+  const [draft, setDraft] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    const text = draft.trim();
+    if (!text || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const resp = await api.askDataRoom(roomId, text);
+      // Optimistically add a 'running' follow-up so the user sees the
+      // question immediately instead of waiting for the next poll
+      // tick. The polling refetch will overwrite this with canonical
+      // data shortly.
+      qc.setQueryData<DataRoomDetail | undefined>(
+        ["data-room", roomId],
+        (old) => {
+          if (!old) return old;
+          return {
+            ...old,
+            followup_questions: [
+              ...old.followup_questions,
+              {
+                answer_id: resp.answer_id,
+                question_text: text,
+                status: "running",
+                answer_text: null,
+                attachments: null,
+                error_message: null,
+                created_at: new Date().toISOString(),
+                completed_at: null,
+              },
+            ],
+          };
+        },
+      );
+      setDraft("");
+      // Trigger a near-immediate refetch so the running -> complete
+      // transition is picked up promptly.
+      void qc.invalidateQueries({ queryKey: ["data-room", roomId] });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <section className="mt-4 border border-slate-200 rounded-md">
+      <div className="px-4 py-2 bg-slate-50 border-b border-slate-200 text-sm font-semibold text-slate-700">
+        Ask the data room (ToltIQ)
+      </div>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit();
+        }}
+        className="p-3"
+      >
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              void submit();
+            }
+          }}
+          placeholder="Ask anything about this room — the answer is generated by ToltIQ over the uploaded entities. Cmd/Ctrl+Enter to send."
+          maxLength={2000}
+          rows={3}
+          disabled={submitting}
+          className="w-full text-sm border border-slate-300 rounded-md px-3 py-2 focus:outline-none focus:border-slate-500"
+        />
+        <div className="flex items-center justify-between mt-2">
+          <div className="text-xs text-slate-500">
+            ToltIQ workflows take 30-90s. The answer will appear above
+            once it's ready.
+          </div>
+          <button
+            type="submit"
+            disabled={submitting || !draft.trim()}
+            className="px-3 py-1.5 bg-slate-900 text-white text-sm rounded-md disabled:opacity-50"
+          >
+            {submitting ? "Sending..." : "Ask ToltIQ"}
+          </button>
+        </div>
+        {error && (
+          <div className="mt-2 text-xs text-red-600">
+            Failed to send: {error}
+          </div>
+        )}
+      </form>
+    </section>
   );
 }
 

@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from ..auth import UserCtx, require_user
@@ -29,6 +29,11 @@ from ..services.dataroom_setup import (
     create_preset_question,
     get_preset_questions_by_ids,
     list_preset_questions,
+)
+from ..services.toltiq_adhoc import (
+    ToltIQNotConfigured,
+    run_toltiq_workflow_safe,
+    start_room_question,
 )
 
 router = APIRouter()
@@ -202,3 +207,45 @@ def get_data_room(
         code = 404 if "not found" in msg.lower() else 403
         raise HTTPException(status_code=code, detail=msg)
     return DataRoomDetailResp(**detail)
+
+
+class AskDataRoomReq(BaseModel):
+    question: str = Field(..., min_length=4, max_length=2000)
+
+
+class AskDataRoomResp(BaseModel):
+    answer_id: int
+    status: str  # always 'running' when this returns
+
+
+@router.post(
+    "/data-rooms/{room_id}/ask",
+    response_model=AskDataRoomResp,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def ask_data_room(
+    room_id: int,
+    req: AskDataRoomReq,
+    background: BackgroundTasks,
+    user: UserCtx = Depends(require_user),
+) -> AskDataRoomResp:
+    """Direct ToltIQ passthrough for the user. Returns 202 immediately
+    after persisting the running answer row; the actual workflow runs
+    in a background task and updates the row when done. The frontend
+    polls /data-rooms/{id} which surfaces the new row in
+    `followup_questions[]`, transitioning running -> complete / failed."""
+    try:
+        answer_id = start_room_question(room_id, req.question, user)
+    except RoomError as e:
+        msg = str(e)
+        code = 404 if "not found" in msg.lower() else 403
+        if "still building" in msg.lower() or "no toltiq_deal_id" in msg.lower():
+            code = 409
+        raise HTTPException(status_code=code, detail=msg)
+    except ToltIQNotConfigured as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"ToltIQ is not configured on this server: {e}",
+        )
+    background.add_task(run_toltiq_workflow_safe, answer_id, room_id, req.question)
+    return AskDataRoomResp(answer_id=answer_id, status="running")

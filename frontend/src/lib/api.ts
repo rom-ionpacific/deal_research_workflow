@@ -344,6 +344,16 @@ export const api = {
   getDataRoom: (roomId: number) =>
     request<DataRoomDetail>(`/api/v1/data-rooms/${roomId}`),
 
+  // Direct ToltIQ passthrough. Returns 202 immediately with the new
+  // answer_id; the actual ToltIQ workflow runs in a background task.
+  // Caller should refetch getDataRoom shortly after to see the row
+  // transition running -> complete.
+  askDataRoom: (roomId: number, question: string) =>
+    request<{ answer_id: number; status: string }>(
+      `/api/v1/data-rooms/${roomId}/ask`,
+      { method: "POST", body: JSON.stringify({ question }) },
+    ),
+
   listMessages: (sessionId: string, limit = 200) =>
     request<ChatMessage[]>(
       `/api/v1/sessions/${sessionId}/messages?limit=${limit}`
