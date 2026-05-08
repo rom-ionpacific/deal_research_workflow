@@ -119,13 +119,15 @@ export default function DataRoomViewPhase({
         <BuildFailedNotice room={room.data} />
       ) : (
         <>
-          <PresetAnswersSection
-            presets={room.data.preset_questions}
+          <PresetAnswersSection presets={room.data.preset_questions} />
+          {/* Direct ToltIQ chat: posts straight to the deal. The
+              followups list (the "chat history") is rendered inside
+              this section so it reads like a conversation rather than
+              getting mixed in with the preset Q&A above. */}
+          <DirectToltIQChat
+            roomId={room.data.id}
             followups={room.data.followup_questions}
           />
-          {/* Direct ToltIQ chat: posts straight to the deal, the
-              answer lands in the followups list above when ready. */}
-          <DirectToltIQChat roomId={room.data.id} />
         </>
       )}
 
@@ -142,7 +144,13 @@ export default function DataRoomViewPhase({
   );
 }
 
-function DirectToltIQChat({ roomId }: { roomId: number }) {
+function DirectToltIQChat({
+  roomId,
+  followups,
+}: {
+  roomId: number;
+  followups: FollowupQA[];
+}) {
   const qc = useQueryClient();
   const [draft, setDraft] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -196,13 +204,32 @@ function DirectToltIQChat({ roomId }: { roomId: number }) {
     <section className="mt-4 border border-slate-200 rounded-md">
       <div className="px-4 py-2 bg-slate-50 border-b border-slate-200 text-sm font-semibold text-slate-700">
         Ask the data room (ToltIQ)
+        {followups.length > 0 && (
+          <span className="ml-2 text-xs font-normal text-slate-500">
+            ({followups.length} question{followups.length === 1 ? "" : "s"})
+          </span>
+        )}
       </div>
+
+      {/* Conversation history -- past ad-hoc questions and their
+          answers. Empty on a fresh room; grows as the user asks. */}
+      {followups.length > 0 && (
+        <div className="divide-y divide-slate-200">
+          {followups.map((f) => (
+            <FollowupRow key={f.answer_id} f={f} />
+          ))}
+        </div>
+      )}
+
       <form
         onSubmit={(e) => {
           e.preventDefault();
           void submit();
         }}
-        className="p-3"
+        className={
+          "p-3 " +
+          (followups.length > 0 ? "border-t border-slate-200" : "")
+        }
       >
         <textarea
           value={draft}
@@ -320,13 +347,7 @@ function BuildFailedNotice({ room }: { room: DataRoomDetail }) {
   );
 }
 
-function PresetAnswersSection({
-  presets,
-  followups,
-}: {
-  presets: PresetQA[];
-  followups: FollowupQA[];
-}) {
+function PresetAnswersSection({ presets }: { presets: PresetQA[] }) {
   const [collapsed, setCollapsed] = useState(false);
 
   return (
@@ -338,12 +359,6 @@ function PresetAnswersSection({
       >
         <div className="text-sm font-semibold text-slate-700">
           Preset questions ({presets.length})
-          {followups.length > 0 && (
-            <span className="ml-2 text-xs font-normal text-slate-500">
-              + {followups.length} follow-up
-              {followups.length === 1 ? "" : "s"}
-            </span>
-          )}
         </div>
         <Chevron open={!collapsed} />
       </button>
@@ -351,9 +366,6 @@ function PresetAnswersSection({
         <div className="divide-y divide-slate-200">
           {presets.map((q) => (
             <PresetRow key={q.preset_question_id} q={q} />
-          ))}
-          {followups.map((f) => (
-            <FollowupRow key={f.answer_id} f={f} />
           ))}
         </div>
       )}
