@@ -423,7 +423,15 @@ function PresetRow({ q }: { q: PresetQA }) {
 }
 
 function FollowupRow({ f }: { f: FollowupQA }) {
+  // Initial: complete means open, anything else means collapsed.
+  // BUT: the row first appears as 'running' (just-asked question) and
+  // later transitions to 'complete' on the next poll. useState only
+  // captures the initial value, so without the effect below the row
+  // stays collapsed and the user thinks the answer never arrived.
   const [open, setOpen] = useState(f.status === "complete");
+  useEffect(() => {
+    if (f.status === "complete") setOpen(true);
+  }, [f.status]);
   return (
     <div>
       <button

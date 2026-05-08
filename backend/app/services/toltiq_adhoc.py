@@ -295,8 +295,16 @@ def _run_toltiq_workflow(
             "status": "complete",
         }
 
-    except (ToltIQError, ToltIQNotConfigured):
-        # Already marked failed in the specific paths; safe to re-raise.
+    except (ToltIQError, ToltIQNotConfigured) as e:
+        # Most paths above call _mark_answer_failed inline before
+        # raising, but the early POST /external/chats raise happens
+        # before any inline mark. Always mark here as a backstop --
+        # the marker is idempotent (it just overwrites the same row),
+        # so double-marks are harmless.
+        try:
+            _mark_answer_failed(answer_id, str(e))
+        except Exception:
+            logger.exception("backstop mark_answer_failed failed for %s", answer_id)
         raise
     except Exception as e:
         # Unexpected -- mark failed so the row doesn't sit in 'running'
