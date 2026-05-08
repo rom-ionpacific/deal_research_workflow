@@ -21,6 +21,15 @@ class Settings(BaseSettings):
 
     allowed_origins: str = ""
 
+    # ToltIQ -- Phase 4 ad-hoc query against built data rooms. Read at
+    # runtime by services/toltiq_adhoc.py via os.environ; declared here
+    # only so pydantic-settings doesn't whine on the .env load. Blank
+    # values cause the chat tool to surface a friendly "not configured"
+    # message.
+    toltiq_base_url: str = ""
+    toltiq_api_key: str = ""
+    toltiq_org_id: str = ""
+
     @property
     def origin_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]

@@ -4,6 +4,7 @@ import { useParams } from "react-router-dom";
 
 import ChatPanel from "../components/ChatPanel";
 import DataRoomSetupPhase from "../components/DataRoomSetupPhase";
+import DataRoomViewPhase from "../components/DataRoomViewPhase";
 import EntitySelectPhase from "../components/EntitySelectPhase";
 import OrgCard from "../components/OrgCard";
 import {
@@ -74,11 +75,9 @@ export default function ResearchPage() {
             />
           )}
           {current_version.phase === "data_room_view" && (
-            <DataRoomViewPlaceholder
-              dataRoomId={
-                (current_version.state as { data_room_id?: number })
-                  .data_room_id ?? null
-              }
+            <DataRoomViewPhase
+              sessionId={sessionId!}
+              state={current_version.state}
             />
           )}
         </div>
@@ -88,39 +87,6 @@ export default function ResearchPage() {
         phase={current_version.phase}
         parentVersionId={current_version.id}
       />
-    </div>
-  );
-}
-
-function DataRoomViewPlaceholder({
-  dataRoomId,
-}: {
-  dataRoomId: number | null;
-}) {
-  // Phase 4 (data_room_view) UI isn't built yet. The build is async --
-  // the data-room-builder cron in deal_cloud_enhancer picks it up
-  // every ~2min, uploads entities to ToltIQ, runs the playlist, saves
-  // answers. For now we just confirm the room is queued + give the
-  // org-history-viewer link where the answers will appear once ready.
-  return (
-    <div className="mt-8 max-w-prose">
-      <h2 className="text-lg font-semibold mb-2">
-        Phase 4 — Data room view (placeholder)
-      </h2>
-      <p className="text-sm text-slate-600 mb-3">
-        Data room {dataRoomId !== null ? `#${dataRoomId} ` : ""}is queued.
-        The builder cron will upload your selected entities to ToltIQ,
-        run the question playlist, and save answers — typically 10–15
-        minutes end to end.
-      </p>
-      <p className="text-sm text-slate-600">
-        Phase 4 (in-app Q&A view with citations back to entities) isn't
-        built yet. In the meantime answers land in
-        <code className="text-xs bg-slate-100 px-1 mx-1 rounded">
-          dealcloud.historical_data_room_answer
-        </code>
-        and surface in the org-history-viewer's "AI Overview" tab.
-      </p>
     </div>
   );
 }

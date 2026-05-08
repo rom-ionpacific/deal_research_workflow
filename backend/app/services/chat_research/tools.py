@@ -1098,12 +1098,259 @@ def back_to_entity_select(inp: NoArgs, ctx: dict) -> ToolResult:
     )
 
 
+# ---- Phase 4 (data_room_view) ----------------------------------------------
+
+from ..data_room_view import (
+    RoomError as _RoomError,
+    get_room_detail as _get_room_detail,
+)
+from ..toltiq_adhoc import (
+    ToltIQNotConfigured as _ToltIQNotConfigured,
+    ask_room_question as _ask_room_question,
+)
+
+
+phase4_registry = ToolRegistry()
+
+
+class DataRoomIdInput(BaseModel):
+    data_room_id: int = Field(
+        ..., description=(
+            "dealcloud.historical_data_room.id of the room to inspect / "
+            "query. Pulled from the session's state.data_room_id; "
+            "available in the Current UI state block."
+        ),
+    )
+
+
+class DocumentIdInput(BaseModel):
+    document_id: int = Field(
+        ..., description="dealcloud.document.id of the document to read."
+    )
+
+
+class AskToltIQInput(BaseModel):
+    data_room_id: int = Field(
+        ..., description="dealcloud.historical_data_room.id of the room."
+    )
+    question: str = Field(
+        ...,
+        description=(
+            "Question to ask of the built data room. Phrased like the "
+            "preset questions are -- specific, scoped to the org, "
+            "answerable from the uploaded entities."
+        ),
+        min_length=4,
+        max_length=2000,
+    )
+
+
+# Reuse existing read-only tools for the local-data path (these are
+# already registered to phase1; we register them on phase4 too so the
+# Phase 4 chat doesn't need a separate copy of the implementation).
+phase4_registry._tools["find_organizations"] = phase1_registry._tools[
+    "find_organizations"
+]
+phase4_registry._tools["get_organization_detail"] = phase1_registry._tools[
+    "get_organization_detail"
+]
+phase4_registry._tools["get_org_dossier"] = phase1_registry._tools[
+    "get_org_dossier"
+]
+
+
+@phase4_registry.tool(
+    "read_document_summary",
+    (
+        "Read the full summary of a single document by id. Use this "
+        "when the dossier mentions a document that looks like it could "
+        "answer the user's question -- the dossier truncates summaries "
+        "to 200 chars; this tool returns the full text. Read-only."
+    ),
+    DocumentIdInput,
+)
+def read_document_summary_phase4(inp: DocumentIdInput, ctx: dict) -> ToolResult:
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT id, name, path, modified_at, web_url, summary
+              FROM dealcloud.document
+             WHERE id = %s
+            """,
+            (inp.document_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return ToolResult(output=f"Document {inp.document_id} not found.")
+    return ToolResult(output=dict(row))
+
+
+@phase4_registry.tool(
+    "get_data_room_state",
+    (
+        "Fetch the current state of the data room: status (pending / "
+        "uploading / extracting / querying / complete / failed), "
+        "entity-upload progress, and the full preset Q&A list with "
+        "each answer's text once available. Use this whenever the user "
+        "asks about something that might already be answered by the "
+        "preset playlist before searching local sources. Read-only."
+    ),
+    DataRoomIdInput,
+)
+def get_data_room_state(inp: DataRoomIdInput, ctx: dict) -> ToolResult:
+    user = ctx["user"]
+    try:
+        detail = _get_room_detail(inp.data_room_id, user)
+    except _RoomError as e:
+        return ToolResult(output=str(e))
+    # Trim attachments + truncate long answer text so a routine call
+    # doesn't blow the prompt up. Full answer can be fetched via
+    # get_preset_answer if the model wants it verbatim.
+    compact_presets = []
+    for q in detail["preset_questions"]:
+        ans = q["answer_text"]
+        compact_presets.append({
+            "preset_question_id": q["preset_question_id"],
+            "label": q["label"],
+            "question_text": q["question_text"],
+            "answer_status": q["answer_status"],
+            "answer_preview": (ans[:400] + "..." if ans and len(ans) > 400 else ans),
+        })
+    compact_followups = [
+        {
+            "answer_id": f["answer_id"],
+            "question_text": f["question_text"],
+            "status": f["status"],
+            "answer_preview": (
+                (f["answer_text"] or "")[:400]
+                + ("..." if f["answer_text"] and len(f["answer_text"]) > 400 else "")
+            ) if f["answer_text"] else None,
+        }
+        for f in detail["followup_questions"]
+    ]
+    return ToolResult(output={
+        "id": detail["id"],
+        "name": detail["name"],
+        "status": detail["status"],
+        "main_organization_id": detail["main_organization_id"],
+        "entity_progress": detail["entity_progress"],
+        "preset_questions": compact_presets,
+        "followup_questions": compact_followups,
+        "error_message": detail["error_message"],
+    })
+
+
+class GetPresetAnswerInput(BaseModel):
+    data_room_id: int = Field(..., description="historical_data_room.id")
+    preset_question_id: int = Field(
+        ..., description="data_room_preset_question.id of the question."
+    )
+
+
+@phase4_registry.tool(
+    "get_preset_answer",
+    (
+        "Read one preset Q&A in full (no truncation). Use after "
+        "get_data_room_state when you want the full text of a specific "
+        "preset answer to cite or quote. Read-only."
+    ),
+    GetPresetAnswerInput,
+)
+def get_preset_answer(inp: GetPresetAnswerInput, ctx: dict) -> ToolResult:
+    user = ctx["user"]
+    try:
+        detail = _get_room_detail(inp.data_room_id, user)
+    except _RoomError as e:
+        return ToolResult(output=str(e))
+    for q in detail["preset_questions"]:
+        if q["preset_question_id"] == inp.preset_question_id:
+            return ToolResult(output={
+                "preset_question_id": q["preset_question_id"],
+                "label": q["label"],
+                "question_text": q["question_text"],
+                "answer_status": q["answer_status"],
+                "answer_text": q["answer_text"],
+                "attachments": q["attachments"],
+                "error_message": q["answer_error"],
+            })
+    return ToolResult(
+        output=f"preset_question_id {inp.preset_question_id} not on this room."
+    )
+
+
+@phase4_registry.tool(
+    "ask_toltiq",
+    (
+        "Send an ad-hoc question to the data room's ToltIQ deal and "
+        "wait for the answer (synchronous; ~30-90s). Only call this "
+        "when get_data_room_state shows status == 'complete' AND no "
+        "existing preset/followup answer already covers what the user "
+        "is asking. The answer is persisted to "
+        "historical_data_room_answer (preset_question_id=NULL) so it "
+        "appears under follow-ups in the UI. Returns the full answer "
+        "text + attachment list. Mutates state (writes the answer row) "
+        "but doesn't bump the session_version chain."
+    ),
+    AskToltIQInput,
+    mutates_state=False,  # writes a DB row but not a session_version
+)
+def ask_toltiq(inp: AskToltIQInput, ctx: dict) -> ToolResult:
+    user = ctx["user"]
+    try:
+        result = _ask_room_question(inp.data_room_id, inp.question, user)
+    except _ToltIQNotConfigured as e:
+        return ToolResult(output=f"ToltIQ is not configured on this server: {e}")
+    except _RoomError as e:
+        return ToolResult(output=str(e))
+    return ToolResult(output=result)
+
+
+@phase4_registry.tool(
+    "back_to_data_room_setup",
+    (
+        "Return to Phase 3 (data_room_setup) for the same session. "
+        "Note: the existing data room stays built; this is mainly "
+        "for forking off another room with a different question plan "
+        "or selection (the user would typically start a new session "
+        "instead). Mutates state."
+    ),
+    NoArgs,
+    mutates_state=True,
+)
+def back_to_data_room_setup(inp: NoArgs, ctx: dict) -> ToolResult:
+    def mutate_with_phase(
+        cur, conn, session_row, current_version_row
+    ) -> tuple[str, dict, str | None]:
+        cur_state = current_version_row["state"]
+        if isinstance(cur_state, str):
+            cur_state = json.loads(cur_state)
+        new_state = {
+            "inherits_from_version": str(current_version_row["id"]),
+            "selected_org_ids": cur_state.get("selected_org_ids") or [],
+            "selected_entity_ids": cur_state.get("selected_entity_ids") or {},
+            "preset_question_ids": [],
+            "custom_questions": [],
+            "data_room_id": None,
+        }
+        return "data_room_setup", new_state, "Back to data_room_setup"
+
+    return _append_version_with_phase(
+        ctx,
+        mutate_with_phase,
+        no_op_message="Already on data_room_setup.",
+        success_payload_key="next_phase",
+        success_payload_value="data_room_setup",
+    )
+
+
 # ---- Public registry lookup ------------------------------------------------
 
 REGISTRIES = {
     "org_select": phase1_registry,
     "entity_select": phase2_registry,
     "data_room_setup": phase3_registry,
+    "data_room_view": phase4_registry,
 }
 
 
@@ -1111,7 +1358,4 @@ def registry_for_phase(phase: str) -> ToolRegistry:
     try:
         return REGISTRIES[phase]
     except KeyError:
-        raise ValueError(
-            f"No tool registry for phase {phase!r}. Phase 2-4 not yet "
-            "implemented."
-        )
+        raise ValueError(f"No tool registry for phase {phase!r}.")

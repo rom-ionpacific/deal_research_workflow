@@ -31,6 +31,15 @@ services:
         sync: false
       - key: ALLOWED_ORIGINS
         sync: false
+      # ToltIQ -- Phase 4 ad-hoc question tool against built data rooms.
+      # Same values the deal_cloud_enhancer cron uses; set in the
+      # Render dashboard.
+      - key: TOLTIQ_BASE_URL
+        sync: false
+      - key: TOLTIQ_API_KEY
+        sync: false
+      - key: TOLTIQ_ORG_ID
+        sync: false
       - key: PYTHON_VERSION
         value: 3.13.0
 

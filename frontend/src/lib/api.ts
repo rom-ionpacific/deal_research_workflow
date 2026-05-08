@@ -156,6 +156,47 @@ export interface BuildDataRoomResp {
   created_at: string;
 }
 
+export interface PresetQA {
+  preset_question_id: number;
+  sort_order: number | null;
+  label: string;
+  question_text: string;
+  answer_id: number | null;
+  answer_status: string;
+  answer_text: string | null;
+  attachments: unknown;
+  answer_error: string | null;
+  answer_completed_at: string | null;
+}
+
+export interface FollowupQA {
+  answer_id: number;
+  question_text: string;
+  status: string;
+  answer_text: string | null;
+  attachments: unknown;
+  error_message: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface DataRoomDetail {
+  id: number;
+  name: string;
+  main_organization_id: number;
+  status: string;
+  toltiq_deal_id: string | null;
+  filters_applied: Record<string, unknown> | null;
+  error_message: string | null;
+  originator: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  entity_progress: Record<string, number>;
+  preset_questions: PresetQA[];
+  followup_questions: FollowupQA[];
+}
+
 // ----- chat -----
 
 export interface ChatMessage {
@@ -296,6 +337,12 @@ export const api = {
       `/api/v1/sessions/${sessionId}/data-rooms`,
       { method: "POST" },
     ),
+
+  // Phase 4 view: status + entity progress + preset Q&A + followups.
+  // Polled while the room is non-terminal so the FE shows the build
+  // advancing in real time.
+  getDataRoom: (roomId: number) =>
+    request<DataRoomDetail>(`/api/v1/data-rooms/${roomId}`),
 
   listMessages: (sessionId: string, limit = 200) =>
     request<ChatMessage[]>(

@@ -55,6 +55,65 @@ HISTORY_LIMIT = 40
 
 
 SYSTEM_PROMPTS: dict[str, str] = {
+    "data_room_view": (
+        "You are an AI assistant in Phase 4 (data_room_view) of the "
+        "deal-research workflow. The user has built (or is building) a "
+        "data room scoped to one or more organizations and a curated "
+        "set of entities (documents / emails / calendar / slack). Your "
+        "job is to answer the user's questions about that company "
+        "using the right source for the question.\n\n"
+        "Two modes, decided per-turn from the room status (visible in "
+        "the `## Current UI state (data_room_view)` block):\n"
+        "  * Pre-build (status: pending / uploading / extracting / "
+        "    querying): the data room isn't ready yet. ToltIQ is NOT "
+        "    available. Answer from local sources only -- the org "
+        "    dossier (`get_org_dossier`), document summaries "
+        "    (`read_document_summary`), and the org's identity "
+        "    metadata (`get_organization_detail`). If the local "
+        "    sources have a clear answer, give it with citations. If "
+        "    not, say so explicitly and tell the user the deeper "
+        "    answer will be available once the room finishes building "
+        "    (~10-15 min total).\n"
+        "  * Post-build (status: complete): start by checking the "
+        "    preset answers via `get_data_room_state` -- if any "
+        "    preset already covers the user's question, cite that "
+        "    instead of running a new query (cheaper, faster). For "
+        "    everything else, you may call `ask_toltiq` to send the "
+        "    question to the room's ToltIQ deal. ask_toltiq blocks "
+        "    ~30-90s while ToltIQ runs the workflow; only call it "
+        "    when you've decided the question really needs the full "
+        "    document corpus, not when local sources or preset "
+        "    answers already have it.\n\n"
+        "Tools available:\n"
+        "- `get_data_room_state(data_room_id)` -- room status, "
+        "  entity-upload counts, preset Q&A previews. Read-only.\n"
+        "- `get_preset_answer(data_room_id, preset_question_id)` -- "
+        "  full text of one preset Q&A. Read-only.\n"
+        "- `get_org_dossier(org_id)` -- per-org local context: recent "
+        "  docs/emails/events/slack with truncated summaries, main "
+        "  contacts, deal stats. Always your first stop for org-level "
+        "  questions. Read-only.\n"
+        "- `get_organization_detail(org_id)` -- canonical row for the "
+        "  org. Read-only.\n"
+        "- `read_document_summary(document_id)` -- full untruncated "
+        "  summary of a single document. Read-only.\n"
+        "- `find_organizations(query)` -- if the user mentions a "
+        "  different company than the one this room is built for. "
+        "  Read-only.\n"
+        "- `ask_toltiq(data_room_id, question)` -- ad-hoc ToltIQ "
+        "  query against the built room. POST-BUILD ONLY. Persists "
+        "  the answer to the followup_questions list.\n"
+        "- `back_to_data_room_setup()` -- nav back to Phase 3.\n\n"
+        "Citation rules:\n"
+        "- Always cite the source for any factual claim. For the "
+        "  dossier / document summaries, cite the document name + id "
+        "  (\"the IC memo `Project Sentinel.pdf` (doc #43012)\"). For "
+        "  ToltIQ answers, cite the preset question label + the "
+        "  answer's attachments if any.\n"
+        "- If you're unsure, say so. Don't invent an answer; ask the "
+        "  user a clarifying question or run another tool.\n\n"
+        "Respond directly without preamble. Keep replies concise."
+    ),
     "data_room_setup": (
         "You are an AI assistant inside the deal-research workflow web "
         "app, helping the user finalise the question plan for the data "
@@ -209,6 +268,46 @@ def _format_ui_context(phase: str, ctx: dict | None) -> str | None:
     the model still gets *something*."""
     if not ctx:
         return None
+
+    if phase == "data_room_view":
+        parts: list[str] = ["## Current UI state (data_room_view)"]
+        room_id = ctx.get("data_room_id")
+        room_status = ctx.get("status") or "unknown"
+        org_ids = ctx.get("selected_org_ids") or []
+        parts.append(f"data_room_id: {room_id}")
+        parts.append(f"status: {room_status}")
+        if org_ids:
+            parts.append(f"selected_org_ids: {org_ids}")
+        ent = ctx.get("entity_progress") or {}
+        if ent:
+            parts.append(
+                "entity progress: "
+                + ", ".join(f"{k}={v}" for k, v in ent.items())
+            )
+        n_preset = ctx.get("preset_question_count")
+        if n_preset is not None:
+            parts.append(f"preset_questions: {n_preset}")
+        n_followup = ctx.get("followup_question_count")
+        if n_followup is not None:
+            parts.append(f"followup_questions: {n_followup}")
+        if room_status == "complete":
+            parts.append(
+                "Room is BUILT. ToltIQ ad-hoc questions via ask_toltiq "
+                "are available."
+            )
+        elif room_status == "failed":
+            parts.append(
+                "Room build FAILED. ToltIQ tools are unavailable; "
+                "the user can rebuild from Phase 3."
+            )
+        else:
+            parts.append(
+                "Room is still BUILDING. Don't call ask_toltiq -- it "
+                "will refuse. Answer from local sources and tell the "
+                "user the deeper answer will be available once the "
+                "room finishes."
+            )
+        return "\n".join(parts)
 
     if phase == "org_select":
         parts: list[str] = ["## Current UI state (org_select)"]

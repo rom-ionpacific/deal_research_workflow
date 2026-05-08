@@ -2,22 +2,27 @@
 GET  /api/v1/data-rooms/preset-questions/by-ids?ids=1,2,3
 POST /api/v1/data-rooms/preset-questions
 POST /api/v1/sessions/{id}/data-rooms
+GET  /api/v1/data-rooms/{room_id}
 
-Phase 3 surface for the UI to (1) load the picklist of preset
-questions, (2) hydrate custom questions already on the session's
-plan, (3) create custom rows (used by both add and edit flows --
-edit creates a new row), and (4) trigger build. The chat side has
-parallel tools (see chat_research/tools.py phase3_registry).
+Phase 3 + 4 surface for the UI:
+  Phase 3: preset-question pick/edit/create + room build trigger.
+  Phase 4: GET data-room detail for the view (status, entity-progress
+  counts, preset Q&A list, ad-hoc follow-ups).
+
+The chat side has parallel tools (see chat_research/tools.py
+phase3_registry / phase4_registry).
 """
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from ..auth import UserCtx, require_user
+from ..services.data_room_view import RoomError, get_room_detail
 from ..services.dataroom_setup import (
     BuildError,
     build_data_room_from_session,
@@ -50,6 +55,48 @@ class BuildDataRoomResp(BaseModel):
     question_count: int
     new_version_id: UUID
     created_at: datetime
+
+
+class PresetQAResp(BaseModel):
+    preset_question_id: int
+    sort_order: int | None
+    label: str
+    question_text: str
+    answer_id: int | None
+    answer_status: str
+    answer_text: str | None
+    attachments: Any | None
+    answer_error: str | None
+    answer_completed_at: datetime | None
+
+
+class FollowupQAResp(BaseModel):
+    answer_id: int
+    question_text: str
+    status: str
+    answer_text: str | None
+    attachments: Any | None
+    error_message: str | None
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class DataRoomDetailResp(BaseModel):
+    id: int
+    name: str
+    main_organization_id: int
+    status: str
+    toltiq_deal_id: str | None
+    filters_applied: dict | None
+    error_message: str | None
+    originator: str | None
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    # Map from entity-row status ('pending'|'uploaded'|'failed') to count.
+    entity_progress: dict[str, int]
+    preset_questions: list[PresetQAResp]
+    followup_questions: list[FollowupQAResp]
 
 
 @router.get(
@@ -137,3 +184,21 @@ def build_data_room(
         new_version_id=built.new_version_id,
         created_at=datetime.utcnow(),
     )
+
+
+@router.get("/data-rooms/{room_id}", response_model=DataRoomDetailResp)
+def get_data_room(
+    room_id: int, user: UserCtx = Depends(require_user)
+) -> DataRoomDetailResp:
+    """Return the full state of a data room for Phase 4's view: status,
+    entity-progress counts, preset Q&A (each with answer text once
+    available), and any ad-hoc follow-up answers. The frontend polls
+    this endpoint every ~15s while status is non-terminal so the user
+    sees the build advance live."""
+    try:
+        detail = get_room_detail(room_id, user)
+    except RoomError as e:
+        msg = str(e)
+        code = 404 if "not found" in msg.lower() else 403
+        raise HTTPException(status_code=code, detail=msg)
+    return DataRoomDetailResp(**detail)
