@@ -630,7 +630,15 @@ def _to_anthropic_messages(rows: list[dict]) -> list[dict]:
 
     The schema lets multiple consecutive tool messages share one
     'tool result' user-turn; we reassemble those by walking the rows in
-    order and bundling adjacent tool messages."""
+    order and bundling adjacent tool messages.
+
+    Finally we run `_patch_orphan_tool_uses` to repair any assistant
+    `tool_use` blocks that don't have a matching `tool_result` in the
+    next message. This protects the next API call from a 400 like
+    `messages.N: tool_use ids were found without tool_result blocks
+    immediately after: toolu_...`. Orphans happen when a prior turn was
+    interrupted (client disconnect / cancellation) between persisting
+    the assistant message and persisting the tool result rows."""
     out: list[dict] = []
     pending_tool_results: list[dict] = []
 
@@ -668,7 +676,103 @@ def _to_anthropic_messages(rows: list[dict]) -> list[dict]:
             out.append({"role": "assistant", "content": content.get("blocks", [])})
 
     flush_tools()
-    return out
+    return _patch_orphan_tool_uses(out)
+
+
+# Sentinel content for synthetic tool_results we inject when the DB has
+# a tool_use without a recorded tool_result. The model sees this and can
+# decide whether to re-issue the call -- treating it as an error is the
+# safest default because the actual tool effect (if any) is unknown.
+_ORPHAN_TOOL_SENTINEL = (
+    "Previous tool call was interrupted before a result was recorded. "
+    "The effect (if any) is unknown; re-issue if you still need the "
+    "answer."
+)
+
+
+def _patch_orphan_tool_uses(msgs: list[dict]) -> list[dict]:
+    """For every assistant message whose `tool_use` block ids aren't all
+    answered by the immediately-following user message, inject synthetic
+    `tool_result` blocks (is_error=True) to satisfy Anthropic's rule
+    that every tool_use have a matching tool_result in the next message.
+
+    Operates in-place on the input list and also returns it.
+
+    Two shapes we handle:
+      * Next message is role=user with list content (tool_result bundle
+        from real tool rows). We prepend synthetic results for the
+        missing ids so the bundle covers every tool_use.
+      * Next message is role=user with str content (a plain user turn
+        followed an interrupted assistant). We promote it to a list
+        with [synth_tool_results..., text_block] so the rule holds
+        without losing the user's message.
+      * No next message (orphan at the tail). We append a synthetic
+        user-only message at the end of history. The current turn's
+        user_message is appended by the loop AFTER history; with this
+        synthetic in between, the next live request has the right
+        shape: [..., assistant(tool_use), user(synth tool_result),
+        user(current turn text)]. Two consecutive user messages are
+        legal in the Messages API; Anthropic merges them server-side.
+    """
+    for i, msg in enumerate(msgs):
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content") or []
+        tool_use_ids = [
+            b.get("id")
+            for b in content
+            if isinstance(b, dict)
+            and b.get("type") == "tool_use"
+            and b.get("id")
+        ]
+        if not tool_use_ids:
+            continue
+
+        next_msg = msgs[i + 1] if i + 1 < len(msgs) else None
+        existing: set = set()
+        if next_msg is not None and next_msg.get("role") == "user":
+            nc = next_msg.get("content")
+            if isinstance(nc, list):
+                for b in nc:
+                    if isinstance(b, dict) and b.get("type") == "tool_result":
+                        existing.add(b.get("tool_use_id"))
+
+        missing = [tid for tid in tool_use_ids if tid not in existing]
+        if not missing:
+            continue
+
+        synth = [
+            {
+                "type": "tool_result",
+                "tool_use_id": tid,
+                "content": _ORPHAN_TOOL_SENTINEL,
+                "is_error": True,
+            }
+            for tid in missing
+        ]
+
+        if next_msg is None or next_msg.get("role") != "user":
+            # Insert a new user message right after this assistant. This
+            # shifts subsequent indices by one; the loop's enumerate
+            # already snapshots indices, so we won't double-process the
+            # inserted message.
+            msgs.insert(i + 1, {"role": "user", "content": synth})
+            continue
+
+        # Next message is role=user.
+        nc = next_msg.get("content")
+        if isinstance(nc, list):
+            # Prepend synthetic results so they come before any later
+            # blocks (Anthropic doesn't strictly require ordering inside
+            # the user message, but keeping tool_results contiguous up
+            # front mirrors the live loop's output).
+            next_msg["content"] = synth + nc
+        elif isinstance(nc, str) and nc:
+            next_msg["content"] = synth + [{"type": "text", "text": nc}]
+        else:
+            next_msg["content"] = synth
+
+    return msgs
 
 
 async def _handle_loop_event(
