@@ -20,6 +20,12 @@ so the dossier stays compact.
 
 Each per-channel recent list is capped (5 docs+threads, 3 events+slack)
 and text fields are truncated. Typical dossier output is ~2-3 KB JSON.
+
+Each recent document carries `web_url` (SharePoint deep link); each
+recent slack group carries `permalink` (Slack message permalink) plus
+an inline `files[]` array (capped at 3 files per group) with each
+file's `download_url` and `slack_url`. The chat agent uses these to
+turn citations into clickable markdown links.
 """
 from __future__ import annotations
 
@@ -36,6 +42,11 @@ RECENT_DOCS_LIMIT = 5
 RECENT_THREADS_LIMIT = 5
 RECENT_EVENTS_LIMIT = 3
 RECENT_SLACK_LIMIT = 3
+# Cap attached file rows per slack group: keeps the dossier compact even
+# when a group has dozens of files (rare but happens for shared-folder
+# dumps). We pick most-recent-first by file id; if there are more we
+# add a `files_truncated` flag so the model can mention it.
+SLACK_FILES_PER_GROUP_LIMIT = 3
 SUMMARY_TRUNCATE = 200
 
 
@@ -90,7 +101,7 @@ def get_org_dossier(org_id: int) -> dict[str, Any]:
                   FROM dealcloud.organization_entity
                  WHERE organization_id = %s AND entity_type = 'document'
             )
-            SELECT d.id, d.name, d.path, d.modified_at,
+            SELECT d.id, d.name, d.path, d.modified_at, d.web_url,
                    LEFT(COALESCE(d.summary, ''), %s) AS summary
               FROM unique_docs u
               JOIN dealcloud.document d ON d.id = u.doc_id
@@ -148,7 +159,7 @@ def get_org_dossier(org_id: int) -> dict[str, Any]:
                    AND entity_type = 'slack_message_group'
             )
             SELECT smg.id, sc.name AS channel, smg.last_ts,
-                   smg.message_count,
+                   smg.message_count, smg.permalink,
                    LEFT(COALESCE(smg.summary, ''), %s) AS summary
               FROM unique_slack u
               JOIN dealcloud.slack_message_group smg
@@ -162,6 +173,61 @@ def get_org_dossier(org_id: int) -> dict[str, Any]:
             (org_id, SUMMARY_TRUNCATE, RECENT_SLACK_LIMIT),
         )
         recent_slack = [dict(r) for r in cur.fetchall()]
+
+        # Attach uploaded files (with download URLs) to each recent slack
+        # group so the model can cite/link them. Single query keyed by
+        # message_group_id; cap per group so a chatty file-dump doesn't
+        # bloat the dossier. files_truncated = TRUE if more existed.
+        slack_group_ids = [g["id"] for g in recent_slack]
+        if slack_group_ids:
+            cur.execute(
+                """
+                WITH ranked AS (
+                    SELECT f.message_group_id, f.id, f.file_name,
+                           f.mime_type, f.file_size, f.download_url,
+                           f.slack_url,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY f.message_group_id
+                               ORDER BY f.id DESC
+                           ) AS rn
+                      FROM dealcloud.slack_message_group_file f
+                     WHERE f.message_group_id = ANY(%s::int[])
+                ),
+                totals AS (
+                    SELECT message_group_id, COUNT(*) AS total
+                      FROM dealcloud.slack_message_group_file
+                     WHERE message_group_id = ANY(%s::int[])
+                     GROUP BY message_group_id
+                )
+                SELECT r.message_group_id, r.id, r.file_name, r.mime_type,
+                       r.file_size, r.download_url, r.slack_url,
+                       t.total
+                  FROM ranked r
+                  JOIN totals t ON t.message_group_id = r.message_group_id
+                 WHERE r.rn <= %s
+                 ORDER BY r.message_group_id, r.id DESC
+                """,
+                (slack_group_ids, slack_group_ids, SLACK_FILES_PER_GROUP_LIMIT),
+            )
+            files_by_group: dict[int, list[dict]] = {}
+            totals_by_group: dict[int, int] = {}
+            for r in cur.fetchall():
+                totals_by_group[r["message_group_id"]] = int(r["total"])
+                files_by_group.setdefault(r["message_group_id"], []).append(
+                    {
+                        "id": r["id"],
+                        "file_name": r["file_name"],
+                        "mime_type": r["mime_type"],
+                        "file_size": r["file_size"],
+                        "download_url": r["download_url"],
+                        "slack_url": r["slack_url"],
+                    }
+                )
+            for g in recent_slack:
+                files = files_by_group.get(g["id"], [])
+                total = totals_by_group.get(g["id"], 0)
+                g["files"] = files
+                g["files_truncated"] = total > len(files)
 
         # Communications count is on organization_summary; for the
         # dossier we also want the channel-level breakdown so the AI

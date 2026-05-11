@@ -54,6 +54,36 @@ DEFAULT_MAX_TOKENS = 4096
 HISTORY_LIMIT = 40
 
 
+# Shared instructions about how to cite sources. The frontend chat panel
+# renders assistant text as markdown, so a `[label](url)` becomes a
+# clickable link. We surface the URL fields we have today (document
+# SharePoint deep links, slack message permalinks, slack file download
+# URLs) and require the model to wrap citations in markdown links
+# whenever a URL is available.
+CITATION_RULES = (
+    "Citation + linking rules:\n"
+    "- The chat renders your replies as markdown. When you cite a source "
+    "  that has a URL in the dossier or tool output, write it as a "
+    "  markdown link `[label](url)` so the user can click through.\n"
+    "- Documents: use `web_url` from the dossier's `recent_documents`, "
+    "  from `read_document_summary`, or from Phase 2 `preview_entities` "
+    "  rows. Label = the doc's `name` (or `path` tail). Example: "
+    "  \"see [Project Sentinel — IC memo.pdf](https://...) (doc #43012)\".\n"
+    "- Slack message groups: use `permalink` from the dossier's "
+    "  `recent_slack_groups` or Phase 2 `preview_entities` rows. Label = "
+    "  `#<channel> · <date>` (or the summary headline). Example: "
+    "  \"discussed in [#deals-eu · 2026-03-11](https://slack.com/...)\".\n"
+    "- Slack files: each recent slack group in the dossier carries an "
+    "  inline `files[]` array. Use the file's `download_url` (or "
+    "  `slack_url` if download_url is null). Label = `file_name`. "
+    "  Example: \"see attachment [pitch_deck.pdf](https://...)\".\n"
+    "- Email threads and calendar events have no public URL today; cite "
+    "  by name + id only (e.g. \"the thread `Re: closing memo` (#7821)\").\n"
+    "- If the URL field is null/empty for a row, fall back to the plain "
+    "  name + id citation. Don't invent URLs.\n"
+)
+
+
 SYSTEM_PROMPTS: dict[str, str] = {
     "data_room_view": (
         "You are an AI assistant in Phase 4 (data_room_view) of the "
@@ -104,12 +134,10 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "  query against the built room. POST-BUILD ONLY. Persists "
         "  the answer to the followup_questions list.\n"
         "- `back_to_data_room_setup()` -- nav back to Phase 3.\n\n"
-        "Citation rules:\n"
-        "- Always cite the source for any factual claim. For the "
-        "  dossier / document summaries, cite the document name + id "
-        "  (\"the IC memo `Project Sentinel.pdf` (doc #43012)\"). For "
-        "  ToltIQ answers, cite the preset question label + the "
-        "  answer's attachments if any.\n"
+        + CITATION_RULES +
+        "- Always cite the source for any factual claim. For ToltIQ "
+        "  preset answers, cite the preset question label and quote "
+        "  attachments if any.\n"
         "- If you're unsure, say so. Don't invent an answer; ask the "
         "  user a clarifying question or run another tool.\n\n"
         "Respond directly without preamble. Keep replies concise."
@@ -155,6 +183,8 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "- An empty preset_question_ids list is intentional shorthand "
         "  for \"all default presets\" -- the cron falls back to that. "
         "  Mention this if the user picks zero questions.\n\n"
+        + CITATION_RULES +
+        "\n"
         "Respond directly without preamble. Keep replies concise; the "
         "UI shows the question list and a Build button."
     ),
@@ -194,6 +224,8 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "  -- the user may have a different filter typed than what they "
         "  describe to you. Always pass the filter you want to evaluate "
         "  as tool arguments; don't assume you can read the form.\n\n"
+        + CITATION_RULES +
+        "\n"
         "Respond directly without preamble. Keep replies concise; the UI "
         "shows tabs and counts in a separate panel."
     ),
@@ -236,6 +268,8 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "- When the user is ready to proceed, call "
         "  `advance_to_entity_select`. It will refuse if the selection is "
         "  empty.\n\n"
+        + CITATION_RULES +
+        "\n"
         "Respond directly without preamble. Keep replies concise; the UI "
         "shows a separate panel with the current selection."
     ),
