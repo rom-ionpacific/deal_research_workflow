@@ -112,6 +112,19 @@ export default function DataRoomViewPhase({
         <code className="text-xs bg-slate-100 px-1 rounded">
           {room.data.status}
         </code>
+        {room.data.toltiq_deal_id && (
+          <>
+            {" · "}
+            <a
+              href={`https://ui.diligentiq.io/deals/${room.data.toltiq_deal_id}/intelligence`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-blue-600 hover:underline"
+            >
+              Open in ToltIQ ↗
+            </a>
+          </>
+        )}
       </p>
 
       {isBuilding ? (
