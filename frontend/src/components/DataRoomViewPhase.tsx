@@ -332,21 +332,69 @@ function Spinner() {
 }
 
 function BuildFailedNotice({ room }: { room: DataRoomDetail }) {
+  const qc = useQueryClient();
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const retry = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.retryDataRoomBuild(room.id);
+      // Optimistic: flip status to 'pending' so the failure UI swaps
+      // out for the building spinner immediately. Polling resumes via
+      // refetchInterval and catches up to canonical state.
+      qc.setQueryData<DataRoomDetail | undefined>(
+        ["data-room", room.id],
+        (old) =>
+          old
+            ? {
+                ...old,
+                status: "pending",
+                error_message: null,
+                started_at: null,
+                completed_at: null,
+              }
+            : old,
+      );
+      void qc.invalidateQueries({ queryKey: ["data-room", room.id] });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
     <div className="mt-4 border border-red-200 rounded-md bg-red-50 p-4">
-      <div className="text-sm font-medium text-red-700">
-        Build failed
-      </div>
+      <div className="text-sm font-medium text-red-700">Build failed</div>
       {room.error_message && (
         <pre className="mt-2 text-xs text-red-700 whitespace-pre-wrap font-mono">
           {room.error_message}
         </pre>
       )}
-      <div className="mt-2 text-xs text-red-700">
-        You can rebuild from Phase 3 with a different selection or
-        question plan, or ask the assistant on the right for help
-        triaging.
+      <div className="mt-3 flex items-center gap-3">
+        <button
+          type="button"
+          onClick={retry}
+          disabled={submitting}
+          className="text-xs px-3 py-1.5 bg-red-700 text-white rounded-md hover:bg-red-800 disabled:opacity-50"
+        >
+          {submitting ? "Retrying…" : "Retry build"}
+        </button>
+        <div className="text-xs text-red-700">
+          Retry re-claims this room without changing the entity or
+          question selection. Already-uploaded entities skip. If it
+          keeps failing, rebuild from Phase 3 or ask the assistant for
+          help triaging.
+        </div>
       </div>
+      {error && (
+        <div className="mt-2 text-xs text-red-700">
+          Retry request failed: {error}
+        </div>
+      )}
     </div>
   );
 }

@@ -297,3 +297,65 @@ def retry_data_room_answer(
         run_toltiq_workflow_safe, answer_id, room_id, question_text
     )
     return RetryAnswerResp(answer_id=answer_id, status="running")
+
+
+class RetryRoomResp(BaseModel):
+    data_room_id: int
+    status: str  # always 'pending' when this returns
+
+
+@router.post(
+    "/data-rooms/{room_id}/retry",
+    response_model=RetryRoomResp,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def retry_data_room_build(
+    room_id: int,
+    user: UserCtx = Depends(require_user),
+) -> RetryRoomResp:
+    """Re-claim a failed data-room build. Resets status back to
+    'pending' and clears error_message / started_at / completed_at so
+    the data-room-builder cron (every 2 min) picks it up on its next
+    tick. Phase functions are idempotent: already-uploaded entities
+    skip; the existing toltiq_deal_id is reused. Only the room's
+    originator can retry. Returns 202; the cron handles the actual
+    rebuild asynchronously."""
+    from ..db import get_conn as _gc
+    import psycopg2.extras as _extras
+    with _gc() as conn:
+        cur = conn.cursor(cursor_factory=_extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT id, status, originator
+              FROM dealcloud.historical_data_room
+             WHERE id = %s
+            """,
+            (room_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Data room not found")
+        if row.get("originator") and row["originator"] != user.email:
+            raise HTTPException(
+                status_code=403, detail="Not your data room"
+            )
+        if row["status"] != "failed":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Data room is in state {row['status']!r}; only failed "
+                    "builds can be retried."
+                ),
+            )
+        cur.execute(
+            """
+            UPDATE dealcloud.historical_data_room
+               SET status = 'pending',
+                   error_message = NULL,
+                   started_at = NULL,
+                   completed_at = NULL
+             WHERE id = %s
+            """,
+            (room_id,),
+        )
+    return RetryRoomResp(data_room_id=room_id, status="pending")

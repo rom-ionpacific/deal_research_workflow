@@ -363,6 +363,16 @@ export const api = {
       { method: "POST" },
     ),
 
+  // Re-claims a failed data-room build. Resets status to 'pending';
+  // the data-room-builder cron picks it up on its next 2-min tick.
+  // Idempotent: already-uploaded entities skip, existing toltiq_deal_id
+  // is reused.
+  retryDataRoomBuild: (roomId: number) =>
+    request<{ data_room_id: number; status: string }>(
+      `/api/v1/data-rooms/${roomId}/retry`,
+      { method: "POST" },
+    ),
+
   listMessages: (sessionId: string, limit = 200) =>
     request<ChatMessage[]>(
       `/api/v1/sessions/${sessionId}/messages?limit=${limit}`
