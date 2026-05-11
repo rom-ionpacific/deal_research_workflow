@@ -354,6 +354,15 @@ export const api = {
       { method: "POST", body: JSON.stringify({ question }) },
     ),
 
+  // Re-runs a failed ToltIQ answer in place (same row, status reset to
+  // 'running'). Backed by POST /data-rooms/{id}/answers/{id}/retry on
+  // the API; works for both preset and ad-hoc follow-up answers.
+  retryDataRoomAnswer: (roomId: number, answerId: number) =>
+    request<{ answer_id: number; status: string }>(
+      `/api/v1/data-rooms/${roomId}/answers/${answerId}/retry`,
+      { method: "POST" },
+    ),
+
   listMessages: (sessionId: string, limit = 200) =>
     request<ChatMessage[]>(
       `/api/v1/sessions/${sessionId}/messages?limit=${limit}`

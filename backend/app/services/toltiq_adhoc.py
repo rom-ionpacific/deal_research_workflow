@@ -337,6 +337,60 @@ def _toltiq_document_ids(room_id: int) -> list[str]:
         return [r[0] for r in cur.fetchall() if r[0]]
 
 
+def reset_answer_for_retry(
+    answer_id: int, room_id: int, user: UserCtx
+) -> str:
+    """Auth-check the room and reset a failed answer row to 'running' so
+    a background task can re-run the workflow on the same row. Returns
+    the row's question_text so the caller can hand it to
+    `run_toltiq_workflow_safe`. Works for both preset answers
+    (`preset_question_id IS NOT NULL`) and ad-hoc follow-ups
+    (`preset_question_id IS NULL`) -- they share the same table.
+
+    Raises RoomError if the row isn't found in this room, doesn't belong
+    to the user, the room isn't built, or the row isn't in a retryable
+    state (only `failed` retries; we don't auto-cancel still-running
+    workflows).
+    """
+    _check_room_for_ask(room_id, user)
+    _client_config()  # raises ToltIQNotConfigured early
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT question_text, status
+              FROM dealcloud.historical_data_room_answer
+             WHERE id = %s
+               AND historical_data_room_id = %s
+            """,
+            (answer_id, room_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise RoomError(f"Answer {answer_id} not found in room {room_id}.")
+        if row["status"] != "failed":
+            raise RoomError(
+                f"Answer {answer_id} is in state '{row['status']}'; only "
+                f"failed answers can be retried."
+            )
+        question_text = row["question_text"]
+        cur.execute(
+            """
+            UPDATE dealcloud.historical_data_room_answer
+               SET status = 'running',
+                   error_message = NULL,
+                   answer_text = NULL,
+                   attachments = NULL,
+                   toltiq_chat_id = NULL,
+                   toltiq_workflow_id = NULL,
+                   completed_at = NULL
+             WHERE id = %s
+            """,
+            (answer_id,),
+        )
+    return question_text
+
+
 def _insert_running_answer(room_id: int, question: str) -> int:
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)

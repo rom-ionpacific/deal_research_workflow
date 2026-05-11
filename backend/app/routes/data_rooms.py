@@ -32,6 +32,7 @@ from ..services.dataroom_setup import (
 )
 from ..services.toltiq_adhoc import (
     ToltIQNotConfigured,
+    reset_answer_for_retry,
     run_toltiq_workflow_safe,
     start_room_question,
 )
@@ -249,3 +250,50 @@ def ask_data_room(
         )
     background.add_task(run_toltiq_workflow_safe, answer_id, room_id, req.question)
     return AskDataRoomResp(answer_id=answer_id, status="running")
+
+
+class RetryAnswerResp(BaseModel):
+    answer_id: int
+    status: str  # always 'running' when this returns
+
+
+@router.post(
+    "/data-rooms/{room_id}/answers/{answer_id}/retry",
+    response_model=RetryAnswerResp,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def retry_data_room_answer(
+    room_id: int,
+    answer_id: int,
+    background: BackgroundTasks,
+    user: UserCtx = Depends(require_user),
+) -> RetryAnswerResp:
+    """Re-run a failed ToltIQ answer in place. Works for both preset
+    answers and ad-hoc follow-ups since they share the same row schema;
+    the existing row is reset to 'running' and the workflow is kicked
+    off in a background task with the row's original question_text.
+    The frontend's data-room poller picks up the running -> complete
+    transition like a fresh ask."""
+    try:
+        question_text = reset_answer_for_retry(answer_id, room_id, user)
+    except RoomError as e:
+        msg = str(e)
+        lowered = msg.lower()
+        if "not found" in lowered:
+            code = 404
+        elif "still building" in lowered or "no toltiq_deal_id" in lowered:
+            code = 409
+        elif "only failed answers" in lowered:
+            code = 409
+        else:
+            code = 403
+        raise HTTPException(status_code=code, detail=msg)
+    except ToltIQNotConfigured as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"ToltIQ is not configured on this server: {e}",
+        )
+    background.add_task(
+        run_toltiq_workflow_safe, answer_id, room_id, question_text
+    )
+    return RetryAnswerResp(answer_id=answer_id, status="running")

@@ -8,6 +8,7 @@ import {
   type PresetQA,
 } from "../lib/api";
 import { useChat } from "../stores/chat";
+import Markdown from "./Markdown";
 
 const TERMINAL_STATUSES = new Set(["complete", "failed"]);
 const PROGRESS_LABELS: Record<string, string> = {
@@ -119,7 +120,10 @@ export default function DataRoomViewPhase({
         <BuildFailedNotice room={room.data} />
       ) : (
         <>
-          <PresetAnswersSection presets={room.data.preset_questions} />
+          <PresetAnswersSection
+            roomId={room.data.id}
+            presets={room.data.preset_questions}
+          />
           {/* Direct ToltIQ chat: posts straight to the deal. The
               followups list (the "chat history") is rendered inside
               this section so it reads like a conversation rather than
@@ -216,7 +220,7 @@ function DirectToltIQChat({
       {followups.length > 0 && (
         <div className="divide-y divide-slate-200">
           {followups.map((f) => (
-            <FollowupRow key={f.answer_id} f={f} />
+            <FollowupRow key={f.answer_id} f={f} roomId={roomId} />
           ))}
         </div>
       )}
@@ -347,7 +351,13 @@ function BuildFailedNotice({ room }: { room: DataRoomDetail }) {
   );
 }
 
-function PresetAnswersSection({ presets }: { presets: PresetQA[] }) {
+function PresetAnswersSection({
+  roomId,
+  presets,
+}: {
+  roomId: number;
+  presets: PresetQA[];
+}) {
   const [collapsed, setCollapsed] = useState(false);
 
   return (
@@ -365,7 +375,7 @@ function PresetAnswersSection({ presets }: { presets: PresetQA[] }) {
       {!collapsed && (
         <div className="divide-y divide-slate-200">
           {presets.map((q) => (
-            <PresetRow key={q.preset_question_id} q={q} />
+            <PresetRow key={q.preset_question_id} q={q} roomId={roomId} />
           ))}
         </div>
       )}
@@ -373,7 +383,7 @@ function PresetAnswersSection({ presets }: { presets: PresetQA[] }) {
   );
 }
 
-function PresetRow({ q }: { q: PresetQA }) {
+function PresetRow({ q, roomId }: { q: PresetQA; roomId: number }) {
   // Default open if there's an answer; default collapsed for pending/
   // failed so the user isn't pre-overwhelmed.
   const [open, setOpen] = useState(q.answer_status === "complete");
@@ -413,13 +423,18 @@ function PresetRow({ q }: { q: PresetQA }) {
       {open && (
         <div className="px-4 pb-4 -mt-1">
           {q.answer_status === "complete" && q.answer_text && (
-            <div className="text-sm text-slate-800 whitespace-pre-wrap leading-relaxed">
-              {q.answer_text}
+            <div className="text-sm text-slate-800">
+              <Markdown>{q.answer_text}</Markdown>
             </div>
           )}
           {q.answer_status === "failed" && (
-            <div className="text-sm text-red-700 whitespace-pre-wrap">
-              {q.answer_error || "ToltIQ returned an error for this question."}
+            <div>
+              <div className="text-sm text-red-700 whitespace-pre-wrap">
+                {q.answer_error || "ToltIQ returned an error for this question."}
+              </div>
+              {q.answer_id != null && (
+                <RetryButton roomId={roomId} answerId={q.answer_id} />
+              )}
             </div>
           )}
           {(q.answer_status === "pending" || q.answer_status === "running") && (
@@ -434,7 +449,7 @@ function PresetRow({ q }: { q: PresetQA }) {
   );
 }
 
-function FollowupRow({ f }: { f: FollowupQA }) {
+function FollowupRow({ f, roomId }: { f: FollowupQA; roomId: number }) {
   // Initial: complete means open, anything else means collapsed.
   // BUT: the row first appears as 'running' (just-asked question) and
   // later transitions to 'complete' on the next poll. useState only
@@ -469,13 +484,16 @@ function FollowupRow({ f }: { f: FollowupQA }) {
       {open && (
         <div className="px-4 pb-4 -mt-1">
           {f.status === "complete" && f.answer_text && (
-            <div className="text-sm text-slate-800 whitespace-pre-wrap leading-relaxed">
-              {f.answer_text}
+            <div className="text-sm text-slate-800">
+              <Markdown>{f.answer_text}</Markdown>
             </div>
           )}
           {f.status === "failed" && (
-            <div className="text-sm text-red-700 whitespace-pre-wrap">
-              {f.error_message || "ToltIQ returned an error."}
+            <div>
+              <div className="text-sm text-red-700 whitespace-pre-wrap">
+                {f.error_message || "ToltIQ returned an error."}
+              </div>
+              <RetryButton roomId={roomId} answerId={f.answer_id} />
             </div>
           )}
           {(f.status === "pending" || f.status === "running") && (
@@ -485,6 +503,75 @@ function FollowupRow({ f }: { f: FollowupQA }) {
           )}
           <AttachmentsList attachments={f.attachments} />
         </div>
+      )}
+    </div>
+  );
+}
+
+function RetryButton({
+  roomId,
+  answerId,
+}: {
+  roomId: number;
+  answerId: number;
+}) {
+  const qc = useQueryClient();
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const retry = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.retryDataRoomAnswer(roomId, answerId);
+      // Optimistic: flip the row's status to 'running' locally so the
+      // failure UI disappears immediately; canonical state will catch
+      // up on the next poll tick.
+      qc.setQueryData<DataRoomDetail | undefined>(
+        ["data-room", roomId],
+        (old) => {
+          if (!old) return old;
+          return {
+            ...old,
+            preset_questions: old.preset_questions.map((p) =>
+              p.answer_id === answerId
+                ? { ...p, answer_status: "running", answer_error: null }
+                : p,
+            ),
+            followup_questions: old.followup_questions.map((f) =>
+              f.answer_id === answerId
+                ? {
+                    ...f,
+                    status: "running",
+                    error_message: null,
+                    answer_text: null,
+                  }
+                : f,
+            ),
+          };
+        },
+      );
+      void qc.invalidateQueries({ queryKey: ["data-room", roomId] });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={retry}
+        disabled={submitting}
+        className="text-xs px-2 py-1 border border-slate-300 rounded-md bg-white hover:bg-slate-50 disabled:opacity-50"
+      >
+        {submitting ? "Retrying…" : "Retry"}
+      </button>
+      {error && (
+        <div className="mt-1 text-xs text-red-600">Retry failed: {error}</div>
       )}
     </div>
   );

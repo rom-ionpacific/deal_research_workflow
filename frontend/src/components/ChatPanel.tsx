@@ -8,6 +8,7 @@ import {
   type Phase,
 } from "../lib/api";
 import { useChat, type InFlightTurn } from "../stores/chat";
+import Markdown from "./Markdown";
 
 /**
  * Streaming chat panel for one session. Rendered inside ResearchPage as
@@ -260,7 +261,7 @@ function PersistedMessage({ m }: { m: ChatMessage }) {
     const tool_uses = blocks.filter((b) => b.type === "tool_use");
     return (
       <div className="text-sm">
-        {text && <div className="whitespace-pre-wrap">{text}</div>}
+        {text && <Markdown>{text}</Markdown>}
         {tool_uses.length > 0 && (
           <div className="mt-1 text-xs text-slate-500">
             {tool_uses.map((b) => (
@@ -306,7 +307,9 @@ function InFlightView({
         </div>
       )}
       {turn.assistantText && (
-        <div className="text-sm whitespace-pre-wrap">{turn.assistantText}</div>
+        <div className="text-sm">
+          <Markdown>{turn.assistantText}</Markdown>
+        </div>
       )}
       {turn.toolCalls.map((tc) => (
         <div key={tc.tool_use_id} className="text-xs text-slate-500">
