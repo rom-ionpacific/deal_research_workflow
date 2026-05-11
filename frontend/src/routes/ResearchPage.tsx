@@ -45,7 +45,7 @@ export default function ResearchPage() {
   const { current_version } = session.data;
 
   return (
-    <div className="h-full grid grid-cols-[1fr_400px]">
+    <ResizableSplit>
       {/* min-h-0 on each grid cell -- items default to
           min-height: auto, which lets them expand to fit content
           and breaks the columns' inner scrolling. */}
@@ -87,6 +87,97 @@ export default function ResearchPage() {
         phase={current_version.phase}
         parentVersionId={current_version.id}
       />
+    </ResizableSplit>
+  );
+}
+
+const CHAT_WIDTH_STORAGE_KEY = "research:chatWidth";
+const CHAT_WIDTH_DEFAULT = 400;
+const CHAT_WIDTH_MIN = 280;
+const MAIN_WIDTH_MIN = 320;
+
+/** Two-column split with a draggable gutter that resizes the right
+ * (chat) pane. Width is persisted to localStorage so it survives
+ * navigation and reload. Min/max are clamped so neither pane collapses
+ * past usable; on window resize we re-clamp so the chat can never
+ * exceed `window.innerWidth - MAIN_WIDTH_MIN`. */
+function ResizableSplit({ children }: { children: [React.ReactNode, React.ReactNode] }) {
+  const [main, chat] = children;
+  const [chatWidth, setChatWidth] = useState<number>(() => {
+    if (typeof window === "undefined") return CHAT_WIDTH_DEFAULT;
+    const raw = window.localStorage.getItem(CHAT_WIDTH_STORAGE_KEY);
+    const parsed = raw == null ? NaN : Number(raw);
+    return Number.isFinite(parsed) && parsed >= CHAT_WIDTH_MIN
+      ? parsed
+      : CHAT_WIDTH_DEFAULT;
+  });
+
+  // Re-clamp on viewport resize so a chat that was wide on a big screen
+  // doesn't squeeze the main content off-screen when the window shrinks.
+  useEffect(() => {
+    const handle = () => {
+      setChatWidth((w) => {
+        const max = window.innerWidth - MAIN_WIDTH_MIN;
+        return Math.max(CHAT_WIDTH_MIN, Math.min(max, w));
+      });
+    };
+    handle();
+    window.addEventListener("resize", handle);
+    return () => window.removeEventListener("resize", handle);
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(CHAT_WIDTH_STORAGE_KEY, String(chatWidth));
+  }, [chatWidth]);
+
+  const draggingRef = useRef(false);
+
+  const startDrag = (e: React.MouseEvent) => {
+    e.preventDefault();
+    draggingRef.current = true;
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+
+    const onMove = (ev: MouseEvent) => {
+      if (!draggingRef.current) return;
+      const max = window.innerWidth - MAIN_WIDTH_MIN;
+      const next = Math.max(
+        CHAT_WIDTH_MIN,
+        Math.min(max, window.innerWidth - ev.clientX),
+      );
+      setChatWidth(next);
+    };
+    const onUp = () => {
+      draggingRef.current = false;
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
+  // Double-click resets to default — quick escape hatch from an
+  // accidentally-tiny or accidentally-huge chat pane.
+  const onDoubleClick = () => setChatWidth(CHAT_WIDTH_DEFAULT);
+
+  return (
+    <div
+      className="h-full grid"
+      style={{ gridTemplateColumns: `1fr 5px ${chatWidth}px` }}
+    >
+      {main}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize AI assistant panel"
+        onMouseDown={startDrag}
+        onDoubleClick={onDoubleClick}
+        title="Drag to resize · double-click to reset"
+        className="cursor-col-resize bg-slate-200 hover:bg-slate-400 active:bg-slate-500 transition-colors"
+      />
+      {chat}
     </div>
   );
 }

@@ -189,7 +189,7 @@ export default function ChatPanel({
   // (the default in flex/grid is min-height: auto, which defeats
   // overflow-y on children).
   return (
-    <div className="flex flex-col h-full min-h-0 border-l border-slate-200 bg-slate-50">
+    <div className="flex flex-col h-full min-h-0 bg-slate-50">
       <header className="px-4 py-2 border-b border-slate-200 bg-white">
         <h3 className="text-sm font-semibold text-slate-700">AI assistant</h3>
         <p className="text-xs text-slate-500">
