@@ -315,6 +315,10 @@ def build_data_room_from_session(
             # Carry forward enough to navigate back / show provenance:
             "inherits_from_version": str(version_row["id"]),
             "selected_org_ids": org_ids,
+            # Also preserve selected_entity_ids so the UI's "Back to
+            # entity_select" path from data_room_view can restore the
+            # selection without walking the version chain.
+            "selected_entity_ids": state.get("selected_entity_ids") or {},
         }
         cur.execute(
             """

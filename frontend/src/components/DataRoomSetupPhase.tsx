@@ -6,6 +6,7 @@ import {
   type PresetQuestion,
   type SessionWithCurrent,
 } from "../lib/api";
+import { useChat } from "../stores/chat";
 import { useUI } from "../stores/ui";
 
 interface PhaseState {
@@ -350,6 +351,34 @@ export default function DataRoomSetupPhase({
     }
   };
 
+  // Publish UI context to the chat store so the orchestrator can render
+  // a "Current UI state (data_room_setup)" block.
+  const setUIContext = useChat((s) => s.setUIContext);
+  useEffect(() => {
+    setUIContext(sessionId, {
+      phase: "data_room_setup",
+      selected_org_ids: ps.selected_org_ids ?? [],
+      selected_entity_counts: {
+        document: entityMap.document?.length ?? 0,
+        email_thread: entityMap.email_thread?.length ?? 0,
+        calendar_event: entityMap.calendar_event?.length ?? 0,
+        slack_message_group: entityMap.slack_message_group?.length ?? 0,
+      },
+      preset_question_count: selectedQuestions.length,
+      custom_question_count: customsInOrder.length,
+    });
+  }, [
+    sessionId,
+    setUIContext,
+    ps.selected_org_ids,
+    entityMap.document?.length,
+    entityMap.email_thread?.length,
+    entityMap.calendar_event?.length,
+    entityMap.slack_message_group?.length,
+    selectedQuestions.length,
+    customsInOrder.length,
+  ]);
+
   // ---- Build / back -------------------------------------------------------
   const [building, setBuilding] = useState(false);
   const [buildError, setBuildError] = useState<string | null>(null);
@@ -369,37 +398,18 @@ export default function DataRoomSetupPhase({
     }
   };
 
-  const onBack = async () => {
-    try {
-      const data = await api.appendVersion(sessionId, {
-        parent_id: parentVersionId,
-        phase: "entity_select",
-        state: {
-          ...(ps as Record<string, unknown>),
-        },
-        summary: "Back to entity_select",
-      });
-      qc.setQueryData(["session", sessionId], {
-        session: data.session,
-        current_version: data.version,
-      });
-    } catch (err) {
-      console.error("back failed", err);
-      qc.invalidateQueries({ queryKey: ["session", sessionId] });
-    }
-  };
-
   return (
     <div>
       <h2 className="text-lg font-semibold mb-1">
-        Phase 3 — Data room setup
+        Historical data room — setup
       </h2>
       <p className="text-sm text-slate-500 mb-3">
         Pick which questions the AI should answer using your selection.{" "}
-        {totalEntities.toLocaleString()} entities scoped from Phase 2.
-        Click Build to ship the data room to ToltIQ — the builder cron
-        will upload your entities, run the playlist, and save answers
-        (typically 10–15 min).
+        {totalEntities.toLocaleString()} entities scoped from Entity
+        select. The data room will be built by ToltIQ — the builder
+        cron uploads your entities, runs the playlist, and saves
+        answers (typically 10–15 min). Once the room is built, the
+        same step turns into the answer view.
       </p>
 
       {presets.isLoading && (
@@ -519,23 +529,23 @@ export default function DataRoomSetupPhase({
         </div>
       )}
 
-      <div className="flex items-center justify-between mt-6 pt-4 border-t border-slate-200">
-        <button
-          type="button"
-          onClick={onBack}
-          disabled={building}
-          className="px-3 py-2 border border-slate-300 text-slate-700 text-sm rounded-md disabled:opacity-40"
-        >
-          ← Back to entity_select
-        </button>
+      {/* Build button: centered, prominent, immediately after the
+          question plan. Replaces the old bottom-nav Advance button --
+          the top-of-page nav handles Back. */}
+      <div className="flex flex-col items-center mt-8 mb-2">
         <button
           type="button"
           onClick={onBuild}
           disabled={building || totalEntities === 0}
-          className="px-4 py-2 bg-slate-900 text-white text-sm rounded-md disabled:opacity-40"
+          className="px-6 py-2.5 bg-slate-900 text-white text-sm font-medium rounded-md disabled:opacity-40 hover:bg-slate-800"
         >
-          {building ? "Building..." : "Build data room →"}
+          {building ? "Building..." : "Build data room"}
         </button>
+        <div className="mt-2 text-xs text-slate-500 text-center max-w-md">
+          {totalEntities === 0
+            ? "Go back to Entity select and pick at least one entity before building."
+            : `Builds with ${totalEntities.toLocaleString()} entities and ${selectedQuestions.length} questions. ToltIQ runs the playlist asynchronously (~10–15 min).`}
+        </div>
       </div>
     </div>
   );

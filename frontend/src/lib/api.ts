@@ -63,6 +63,52 @@ export interface OrgContact {
   name: string | null;
 }
 
+export interface OrgContactRecent {
+  // Shape from dealcloud.org_ion_contacts.top_contacts /
+  // dealcloud.org_their_contacts.top_contacts.
+  ion_email?: string | null;
+  ion_name?: string | null;
+  email?: string | null;
+  name?: string | null;
+  active_touches?: number;
+  passive_touches?: number;
+  last_touch?: string | null;
+}
+
+export interface OrgDossier {
+  org_id: number;
+  name: string;
+  dc_id?: string | null;
+  org_type?: string | null;
+  description?: string | null;
+  parent?: { org_id: number; name: string } | null;
+  fundraising_status?: string | null;
+  investor_status?: string | null;
+  counts: {
+    documents: number;
+    email_threads: number;
+    calendar_events: number;
+    slack_groups: number;
+    communications: number;
+  };
+  latest_update_at?: string | null;
+  main_contact?: OrgContact | null;
+  main_ion_contact?: OrgContact | null;
+  recent_documents: Array<Record<string, unknown>>;
+  recent_email_threads: Array<Record<string, unknown>>;
+  recent_calendar_events: Array<Record<string, unknown>>;
+  recent_slack_groups: Array<Record<string, unknown>>;
+  deal_stats: {
+    assessed: boolean;
+    deals_total: number;
+    by_status: Record<string, number>;
+    as_counterparty_count: number;
+    as_underlying_count: number;
+  };
+  top_ion_contacts: OrgContactRecent[];
+  top_their_contacts: OrgContactRecent[];
+}
+
 export interface OrgSearchResult {
   org_id: number;
   name: string;
@@ -285,6 +331,12 @@ export const api = {
     request<OrgSearchResult[]>(
       `/api/v1/orgs/by-ids?ids=${ids.join(",")}`
     ),
+
+  // Rich dossier for the expand panel: counts per entity type, recent
+  // items per channel, deal stats, top-5 Ion + counterpart contacts.
+  // Lazy-fetched (only when a card is expanded).
+  getOrgDossier: (orgId: number) =>
+    request<OrgDossier>(`/api/v1/orgs/${orgId}/dossier`),
 
   countEntities: (
     sessionId: string,

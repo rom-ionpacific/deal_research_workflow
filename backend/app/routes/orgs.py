@@ -14,7 +14,10 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from typing import Any
+
 from ..auth import UserCtx, require_user
+from ..services.org_dossier import get_org_dossier
 from ..services.org_search import (
     get_organizations_by_ids,
     search_organizations,
@@ -77,3 +80,18 @@ def orgs_by_ids(
         )
     rows = get_organizations_by_ids(id_list)
     return [OrgSearchResult(**r) for r in rows]
+
+
+@router.get("/orgs/{org_id}/dossier")
+def org_dossier(
+    org_id: int,
+    user: UserCtx = Depends(require_user),
+) -> dict[str, Any]:
+    """Rich dossier for the org-card expand panel and chat citations:
+    identity, counts by entity type, recent items per channel, deal
+    stats, and top-5 Ion + counterpart contacts (by communication
+    volume). Same payload the `get_org_dossier` chat tool returns."""
+    try:
+        return get_org_dossier(org_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))

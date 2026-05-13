@@ -8,6 +8,7 @@ import {
   type EntityType,
   type SessionWithCurrent,
 } from "../lib/api";
+import { useChat } from "../stores/chat";
 
 const TAB_LABEL: Record<EntityType, string> = {
   document: "Documents",
@@ -286,6 +287,38 @@ export default function EntitySelectPhase({
   const totalPages = Math.max(1, Math.ceil((list.data?.count ?? 0) / PAGE_SIZE));
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
 
+  // Publish per-turn UI snapshot so the chat orchestrator can render
+  // a "Current UI state (entity_select)" block. Without this the
+  // model sees the phase banner but not concrete counts.
+  const setUIContext = useChat((s) => s.setUIContext);
+  useEffect(() => {
+    setUIContext(sessionId, {
+      phase: "entity_select",
+      selected_org_ids: ps.selected_org_ids ?? [],
+      active_tab: activeTab,
+      count_by_type: countByType,
+      selected_counts: {
+        document: selected.document.length,
+        email_thread: selected.email_thread.length,
+        calendar_event: selected.calendar_event.length,
+        slack_message_group: selected.slack_message_group.length,
+      },
+    });
+  }, [
+    sessionId,
+    setUIContext,
+    activeTab,
+    countByType.document,
+    countByType.email_thread,
+    countByType.calendar_event,
+    countByType.slack_message_group,
+    selected.document.length,
+    selected.email_thread.length,
+    selected.calendar_event.length,
+    selected.slack_message_group.length,
+    ps.selected_org_ids,
+  ]);
+
   return (
     <div>
       <h2 className="text-lg font-semibold mb-1">
@@ -431,13 +464,13 @@ export default function EntitySelectPhase({
           Advance only enabled if at least one entity selected. */}
       <div className="flex items-center justify-between mt-6 pt-4 border-t border-slate-200">
         <PhaseNavButton
-          label="← Back to org_select"
+          label="← Back to Org select"
           onClick={() =>
             navPhase(qc, sessionId, parentVersionId, state, "org_select")
           }
         />
         <PhaseNavButton
-          label="Advance to data_room_setup →"
+          label="Advance to historical data room →"
           disabled={totalSelected === 0}
           primary
           onClick={() =>
@@ -532,6 +565,7 @@ function EntityRow({
   disabled?: boolean;
 }) {
   const r = row as any; // shape varies by entity_type
+  const [expanded, setExpanded] = useState(false);
   let title: string;
   let subtitle: string;
   let date: string | null;
@@ -558,52 +592,275 @@ function EntityRow({
         .join(" · ");
       date = r.start_time ?? null;
       break;
-    case "slack_message_group":
-      title = r.thread_ts ? `Thread @ ${r.thread_ts}` : `Group #${r.id}`;
-      subtitle = `${r.message_count ?? 0} messages`;
-      date = r.last_ts
-        ? new Date(parseInt(r.last_ts.split(".")[0], 10) * 1000).toISOString()
+    case "slack_message_group": {
+      const channel = r.channel_name
+        ? `#${r.channel_name}`
+        : `slack group #${r.id}`;
+      const firstTs = r.thread_ts
+        ? new Date(parseInt(r.thread_ts.split(".")[0], 10) * 1000)
         : null;
+      const lastTs = r.last_ts
+        ? new Date(parseInt(r.last_ts.split(".")[0], 10) * 1000)
+        : null;
+      const fmt = (d: Date) => d.toISOString().slice(0, 10);
+      let span = "";
+      if (firstTs && lastTs) {
+        span =
+          fmt(firstTs) === fmt(lastTs)
+            ? fmt(lastTs)
+            : `${fmt(firstTs)} → ${fmt(lastTs)}`;
+      } else if (lastTs) {
+        span = fmt(lastTs);
+      }
+      title = span ? `${channel} · ${span}` : channel;
+      subtitle = `${r.message_count ?? 0} messages`;
+      date = lastTs ? lastTs.toISOString() : null;
       break;
+    }
   }
 
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      disabled={disabled}
+    <div
       className={
-        "w-full text-left border rounded-md px-3 py-2 hover:bg-slate-50 " +
-        "disabled:opacity-50 transition-colors " +
+        "border rounded-md transition-colors " +
+        (disabled ? "opacity-50 pointer-events-none " : "") +
         (selected
           ? "border-slate-900 bg-slate-50"
-          : "border-slate-200 bg-white")
+          : "border-slate-200 bg-white hover:bg-slate-50")
       }
     >
-      <div className="flex items-start gap-2">
-        <input
-          type="checkbox"
-          readOnly
-          checked={selected}
-          className="mt-0.5"
-        />
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-medium truncate">{title}</div>
-          {subtitle && (
-            <div className="text-xs text-slate-500 truncate">{subtitle}</div>
-          )}
-          {r.summary && (
-            <div className="text-xs text-slate-500 mt-0.5 line-clamp-2">
-              {r.summary}
+      <div
+        onClick={() => setExpanded((v) => !v)}
+        role="button"
+        aria-expanded={expanded}
+        className="px-3 py-2 cursor-pointer"
+      >
+        <div className="flex items-start gap-2">
+          <span
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!disabled) onToggle();
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+            className="p-1 -m-1"
+          >
+            <input
+              type="checkbox"
+              readOnly
+              checked={selected}
+              disabled={disabled}
+              className="mt-0.5 cursor-pointer"
+            />
+          </span>
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-medium truncate">{title}</div>
+            {subtitle && (
+              <div className="text-xs text-slate-500 truncate">{subtitle}</div>
+            )}
+            {r.summary && (
+              <div className="text-xs text-slate-500 mt-0.5 line-clamp-2">
+                {r.summary}
+              </div>
+            )}
+          </div>
+          <div className="text-xs text-slate-400 shrink-0 tabular-nums">
+            {date ? formatDate(date) : "—"}
+          </div>
+          <RowChevron open={expanded} />
+        </div>
+      </div>
+      {expanded && (
+        <div className="border-t border-slate-200 px-3 py-3 text-xs text-slate-700">
+          <EntityDetail entityType={entityType} row={r} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EntityDetail({
+  entityType,
+  row,
+}: {
+  entityType: EntityType;
+  row: any;
+}) {
+  switch (entityType) {
+    case "document":
+      return (
+        <div className="space-y-2">
+          {row.summary && <Summary text={row.summary} />}
+          <KVRow label="Path" value={row.path} />
+          <KVRow label="Modified" value={formatTs(row.modified_at)} />
+          <KVRow label="MIME" value={row.mime_type} />
+          <KVRow
+            label="Size"
+            value={
+              row.size_bytes ? formatBytes(row.size_bytes as number) : null
+            }
+          />
+          {row.web_url && (
+            <div>
+              <a
+                href={row.web_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 hover:underline"
+              >
+                Open in SharePoint ↗
+              </a>
             </div>
           )}
         </div>
-        <div className="text-xs text-slate-400 shrink-0 tabular-nums">
-          {date ? formatDate(date) : "—"}
+      );
+    case "email_thread":
+      return (
+        <div className="space-y-2">
+          {row.summary && <Summary text={row.summary} />}
+          <KVRow
+            label="Span"
+            value={
+              row.first_message_at && row.last_message_at
+                ? `${formatTs(row.first_message_at)} → ${formatTs(row.last_message_at)}`
+                : formatTs(row.last_message_at)
+            }
+          />
+          <KVRow label="Messages" value={String(row.message_count ?? 0)} />
+          <KVRow label="Category" value={row.category} />
+          <KVRow
+            label="Internal / External"
+            value={
+              row.internal_count != null && row.external_count != null
+                ? `${row.internal_count} / ${row.external_count}`
+                : null
+            }
+          />
         </div>
-      </div>
-    </button>
+      );
+    case "calendar_event":
+      return (
+        <div className="space-y-2">
+          {row.summary && <Summary text={row.summary} />}
+          <KVRow
+            label="Start"
+            value={formatTs(row.start_time)}
+          />
+          <KVRow label="End" value={formatTs(row.end_time)} />
+          <KVRow
+            label="Organizer"
+            value={row.organizer_name || row.organizer_email}
+          />
+          <KVRow label="Location" value={row.location} />
+          <KVRow
+            label="Online"
+            value={row.is_online ? "yes" : null}
+          />
+          <KVRow
+            label="External attendees"
+            value={row.has_external ? "yes" : null}
+          />
+        </div>
+      );
+    case "slack_message_group":
+      return (
+        <div className="space-y-2">
+          {row.summary && <Summary text={row.summary} />}
+          <KVRow
+            label="Channel"
+            value={row.channel_name ? `#${row.channel_name}` : null}
+          />
+          <KVRow
+            label="Span"
+            value={(() => {
+              const a = row.thread_ts ? formatSlackTs(row.thread_ts) : null;
+              const b = row.last_ts ? formatSlackTs(row.last_ts) : null;
+              if (a && b && a !== b) return `${a} → ${b}`;
+              return b ?? a ?? null;
+            })()}
+          />
+          <KVRow label="Messages" value={String(row.message_count ?? 0)} />
+          {row.permalink && (
+            <div>
+              <a
+                href={row.permalink}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 hover:underline"
+              >
+                Open in Slack ↗
+              </a>
+            </div>
+          )}
+        </div>
+      );
+  }
+}
+
+function Summary({ text }: { text: string }) {
+  return (
+    <div className="leading-relaxed text-slate-800 whitespace-pre-wrap">
+      {text}
+    </div>
   );
+}
+
+function KVRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: string | null | undefined;
+}) {
+  if (!value) return null;
+  return (
+    <div className="flex gap-2">
+      <span className="text-[10px] uppercase tracking-wide text-slate-500 font-semibold w-24 shrink-0 mt-0.5">
+        {label}
+      </span>
+      <span className="text-slate-800 break-words">{value}</span>
+    </div>
+  );
+}
+
+function RowChevron({ open }: { open: boolean }) {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={
+        "shrink-0 text-slate-400 mt-1 transition-transform " +
+        (open ? "rotate-180" : "")
+      }
+    >
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  );
+}
+
+function formatTs(ts: string | null | undefined): string | null {
+  if (!ts) return null;
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts.slice(0, 10);
+  return d.toISOString().replace("T", " ").slice(0, 16) + "Z";
+}
+
+function formatSlackTs(ts: string): string {
+  const sec = parseInt(ts.split(".")[0], 10);
+  if (Number.isNaN(sec)) return ts;
+  return new Date(sec * 1000).toISOString().replace("T", " ").slice(0, 16) + "Z";
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 function PhaseNavButton({

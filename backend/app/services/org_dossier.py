@@ -268,6 +268,23 @@ def get_org_dossier(org_id: int) -> dict[str, Any]:
         )
         deal_history = cur.fetchone()["j"] or {}
 
+        # Top-5 contacts (Ion-side + counterpart-side) for the expand
+        # panel + AI citation. Pulls from the existing Q3/Q4 SQL
+        # functions in 002_todd.sql so we share ranking logic with Todd.
+        cur.execute(
+            "SELECT dealcloud.org_ion_contacts(ARRAY[%s]::int[]) AS j",
+            (org_id,),
+        )
+        ion_payload = cur.fetchone()["j"] or {}
+        top_ion_contacts = ion_payload.get("top_contacts") or []
+
+        cur.execute(
+            "SELECT dealcloud.org_their_contacts(ARRAY[%s]::int[]) AS j",
+            (org_id,),
+        )
+        their_payload = cur.fetchone()["j"] or {}
+        top_their_contacts = their_payload.get("top_contacts") or []
+
     return {
         "org_id":             ident["org_id"],
         "name":               ident["name"],
@@ -312,4 +329,6 @@ def get_org_dossier(org_id: int) -> dict[str, Any]:
             "as_underlying_count":
                 len(deal_history.get("as_underlying", []) or []),
         },
+        "top_ion_contacts":   top_ion_contacts,
+        "top_their_contacts": top_their_contacts,
     }

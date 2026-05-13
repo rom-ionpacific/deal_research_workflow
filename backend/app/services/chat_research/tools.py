@@ -1307,18 +1307,20 @@ def ask_toltiq(inp: AskToltIQInput, ctx: dict) -> ToolResult:
 
 
 @phase4_registry.tool(
-    "back_to_data_room_setup",
+    "back_to_entity_select",
     (
-        "Return to Phase 3 (data_room_setup) for the same session. "
-        "Note: the existing data room stays built; this is mainly "
-        "for forking off another room with a different question plan "
-        "or selection (the user would typically start a new session "
-        "instead). Mutates state."
+        "Return to Phase 2 (entity_select) from data_room_view. The "
+        "existing data room stays built; the session pivots to allow "
+        "the user to revise their entity selection for a future build. "
+        "Custom or preset questions can be added directly to the "
+        "existing data room via ask_toltiq instead of rebuilding, so "
+        "this nav is mostly for cases where the user wants to "
+        "fundamentally change which entities are scoped. Mutates state."
     ),
     NoArgs,
     mutates_state=True,
 )
-def back_to_data_room_setup(inp: NoArgs, ctx: dict) -> ToolResult:
+def back_to_entity_select_from_view(inp: NoArgs, ctx: dict) -> ToolResult:
     def mutate_with_phase(
         cur, conn, session_row, current_version_row
     ) -> tuple[str, dict, str | None]:
@@ -1329,18 +1331,15 @@ def back_to_data_room_setup(inp: NoArgs, ctx: dict) -> ToolResult:
             "inherits_from_version": str(current_version_row["id"]),
             "selected_org_ids": cur_state.get("selected_org_ids") or [],
             "selected_entity_ids": cur_state.get("selected_entity_ids") or {},
-            "preset_question_ids": [],
-            "custom_questions": [],
-            "data_room_id": None,
         }
-        return "data_room_setup", new_state, "Back to data_room_setup"
+        return "entity_select", new_state, "Back to entity_select"
 
     return _append_version_with_phase(
         ctx,
         mutate_with_phase,
-        no_op_message="Already on data_room_setup.",
+        no_op_message="Already on entity_select.",
         success_payload_key="next_phase",
-        success_payload_value="data_room_setup",
+        success_payload_value="entity_select",
     )
 
 

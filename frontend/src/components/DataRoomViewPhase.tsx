@@ -106,7 +106,9 @@ export default function DataRoomViewPhase({
 
   return (
     <div>
-      <h2 className="text-lg font-semibold mb-1">Phase 4 — Data room view</h2>
+      <h2 className="text-lg font-semibold mb-1">
+        Historical data room — answers
+      </h2>
       <p className="text-sm text-slate-500 mb-3">
         {room.data.name}. Status:{" "}
         <code className="text-xs bg-slate-100 px-1 rounded">

@@ -84,8 +84,45 @@ CITATION_RULES = (
 )
 
 
+# Prepended to every phase's system prompt so the active phase is the
+# very first thing the model sees. Phase drift (model offering Phase 2
+# entity tools after the user has moved to Phase 3) was the symptom we
+# observed; this banner + the synthetic phase-change markers we inject
+# into history together pin the model to the current phase.
+_PHASE_BANNERS: dict[str, str] = {
+    "org_select": (
+        "## CURRENT PHASE: org_select (Phase 1 of 4)\n"
+        "Only the org_select tools listed below are callable on this "
+        "turn. Tools from other phases will not be available even if "
+        "you used them earlier in this conversation.\n\n"
+    ),
+    "entity_select": (
+        "## CURRENT PHASE: entity_select (Phase 2 of 4)\n"
+        "Only the entity_select tools listed below are callable on "
+        "this turn. The find_organizations / add_to_selection / "
+        "advance_to_entity_select tools from Phase 1 are no longer "
+        "available; if the user wants to change orgs, use "
+        "`back_to_org_select` to return to Phase 1 first.\n\n"
+    ),
+    "data_room_setup": (
+        "## CURRENT PHASE: data_room_setup (Phase 3 of 4)\n"
+        "Only the data_room_setup tools below are callable. The Phase "
+        "2 entity-selection tools (select_entity, select_all_matching, "
+        "etc.) are NOT available -- if the user wants to change which "
+        "entities are in the room, use `back_to_entity_select`.\n\n"
+    ),
+    "data_room_view": (
+        "## CURRENT PHASE: data_room_view (Phase 4 of 4)\n"
+        "Only the data_room_view tools below are callable. The "
+        "entity-selection / question-plan tools from Phases 2 and 3 "
+        "are NOT available -- the room is already built.\n\n"
+    ),
+}
+
+
 SYSTEM_PROMPTS: dict[str, str] = {
     "data_room_view": (
+        _PHASE_BANNERS["data_room_view"] +
         "You are an AI assistant in Phase 4 (data_room_view) of the "
         "deal-research workflow. The user has built (or is building) a "
         "data room scoped to one or more organizations and a curated "
@@ -133,7 +170,9 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "- `ask_toltiq(data_room_id, question)` -- ad-hoc ToltIQ "
         "  query against the built room. POST-BUILD ONLY. Persists "
         "  the answer to the followup_questions list.\n"
-        "- `back_to_data_room_setup()` -- nav back to Phase 3.\n\n"
+        "- `back_to_entity_select()` -- nav back to Phase 2 if the "
+        "  user wants to revise the entity selection. The existing "
+        "  data room stays built.\n\n"
         + CITATION_RULES +
         "- Always cite the source for any factual claim. For ToltIQ "
         "  preset answers, cite the preset question label and quote "
@@ -143,6 +182,7 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "Respond directly without preamble. Keep replies concise."
     ),
     "data_room_setup": (
+        _PHASE_BANNERS["data_room_setup"] +
         "You are an AI assistant inside the deal-research workflow web "
         "app, helping the user finalise the question plan for the data "
         "room they're about to build. Phase 3 (data_room_setup).\n\n"
@@ -189,6 +229,7 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "UI shows the question list and a Build button."
     ),
     "entity_select": (
+        _PHASE_BANNERS["entity_select"] +
         "You are an AI assistant inside the deal-research workflow web app, "
         "helping the user select entities (documents, email threads, "
         "calendar events, slack threads) tied to the organisations they "
@@ -230,6 +271,7 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "shows tabs and counts in a separate panel."
     ),
     "org_select": (
+        _PHASE_BANNERS["org_select"] +
         "You are an AI assistant inside the deal-research workflow web app, "
         "helping the user select organisations from our internal deal cloud "
         "database. The user starts on Phase 1 (org_select).\n\n"
@@ -384,6 +426,52 @@ def _format_ui_context(phase: str, ctx: dict | None) -> str | None:
             "find_organizations again to act on them."
         )
         return "\n".join(parts)
+
+    if phase == "entity_select":
+        parts: list[str] = ["## Current UI state (entity_select)"]
+        # The frontend publishes selected_org_ids + per-tab counts
+        # when this phase mounts. Fall through to the JSON fallback
+        # if neither is present (older clients).
+        org_ids = ctx.get("selected_org_ids") or []
+        if org_ids:
+            parts.append(f"selected_org_ids: {org_ids}")
+        active_tab = ctx.get("active_tab")
+        if active_tab:
+            parts.append(f"active tab: {active_tab}")
+        counts = ctx.get("count_by_type") or {}
+        if counts:
+            parts.append(
+                "matching counts: "
+                + ", ".join(f"{k}={v}" for k, v in counts.items())
+            )
+        sel = ctx.get("selected_counts") or {}
+        if sel:
+            parts.append(
+                "selected so far: "
+                + ", ".join(f"{k}={v}" for k, v in sel.items())
+            )
+        if len(parts) > 1:
+            return "\n".join(parts)
+
+    if phase == "data_room_setup":
+        parts: list[str] = ["## Current UI state (data_room_setup)"]
+        org_ids = ctx.get("selected_org_ids") or []
+        if org_ids:
+            parts.append(f"selected_org_ids: {org_ids}")
+        ent = ctx.get("selected_entity_counts") or {}
+        if ent:
+            parts.append(
+                "entities going into the room: "
+                + ", ".join(f"{k}={v}" for k, v in ent.items())
+            )
+        n_preset = ctx.get("preset_question_count")
+        if n_preset is not None:
+            parts.append(f"preset_questions currently on plan: {n_preset}")
+        n_custom = ctx.get("custom_question_count")
+        if n_custom is not None:
+            parts.append(f"custom_questions currently on plan: {n_custom}")
+        if len(parts) > 1:
+            return "\n".join(parts)
 
     # Fallback for any phase we haven't tailored: render the dict as
     # JSON. Keeps the door open without breaking older clients.
@@ -590,9 +678,14 @@ def _setup_turn(
 
         # Load history (oldest first). Includes user/assistant/tool turns
         # in chronological order so the model sees the full conversation.
+        # `phase` column is fetched so we can inject explicit phase-
+        # change markers when reconstructing the Anthropic message list
+        # -- without these, the model sees prior-phase user requests in
+        # history and can drift into thinking those tools are still
+        # available on the current turn.
         cur.execute(
             """
-            SELECT id, role, content, created_at
+            SELECT id, role, content, created_at, phase
             FROM research.session_chat_message
             WHERE session_id = %s
             ORDER BY created_at ASC, id ASC
@@ -641,6 +734,7 @@ def _to_anthropic_messages(rows: list[dict]) -> list[dict]:
     the assistant message and persisting the tool result rows."""
     out: list[dict] = []
     pending_tool_results: list[dict] = []
+    last_phase: str | None = None
 
     def flush_tools() -> None:
         if pending_tool_results:
@@ -652,6 +746,7 @@ def _to_anthropic_messages(rows: list[dict]) -> list[dict]:
         if isinstance(content, str):
             content = json.loads(content)
         role = row["role"]
+        row_phase = row.get("phase") if isinstance(row, dict) else None
 
         if role == "tool":
             pending_tool_results.append(
@@ -670,10 +765,36 @@ def _to_anthropic_messages(rows: list[dict]) -> list[dict]:
 
         flush_tools()
 
+        # Inject a synthetic phase-change marker as a user message when
+        # the phase changes between turns. The model sees this and
+        # knows the prior-phase context (and its tools) no longer
+        # apply. We attach the marker before the user/assistant message
+        # so it reads as a state change preceding the turn.
+        if (
+            role == "user"
+            and row_phase
+            and last_phase is not None
+            and row_phase != last_phase
+        ):
+            out.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"[Phase changed from {last_phase!r} to {row_phase!r}. "
+                        "The previous phase's tools are no longer available; "
+                        "only the tools listed in the current system prompt "
+                        "can be called.]"
+                    ),
+                }
+            )
+
         if role == "user":
             out.append({"role": "user", "content": content.get("text", "")})
         elif role == "assistant":
             out.append({"role": "assistant", "content": content.get("blocks", [])})
+
+        if row_phase:
+            last_phase = row_phase
 
     flush_tools()
     return _patch_orphan_tool_uses(out)

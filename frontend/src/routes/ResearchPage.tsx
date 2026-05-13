@@ -16,12 +16,25 @@ import {
 } from "../lib/api";
 import { useChat } from "../stores/chat";
 
-const PHASES: Phase[] = [
-  "org_select",
-  "entity_select",
-  "data_room_setup",
-  "data_room_view",
-];
+// The user-facing step list. Each step maps to one or two underlying
+// phases; data_room_setup + data_room_view both surface under
+// "historical_data_room" because the user shouldn't see them as
+// separate workflow stages (the underlying phase swap is just whether
+// the room has been built yet).
+type Step = "org_select" | "entity_select" | "historical_data_room";
+
+const STEPS: Step[] = ["org_select", "entity_select", "historical_data_room"];
+
+const STEP_LABEL: Record<Step, string> = {
+  org_select: "Org select",
+  entity_select: "Entity select",
+  historical_data_room: "Historical data room",
+};
+
+function phaseToStep(phase: Phase): Step {
+  if (phase === "org_select" || phase === "entity_select") return phase;
+  return "historical_data_room";
+}
 
 export default function ResearchPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
@@ -52,7 +65,18 @@ export default function ResearchPage() {
       <div className="min-h-0 overflow-y-auto">
         <div className="max-w-3xl mx-auto p-6">
           <SessionTitleBar session={session.data.session} />
-          <PhaseStepper currentPhase={current_version.phase} />
+          <PhaseStepper
+            sessionId={sessionId!}
+            currentPhase={current_version.phase}
+            currentVersionId={current_version.id}
+            state={current_version.state}
+          />
+          <TopPhaseNav
+            sessionId={sessionId!}
+            currentPhase={current_version.phase}
+            currentVersionId={current_version.id}
+            state={current_version.state}
+          />
           {current_version.phase === "org_select" && (
             <OrgSelectPhase
               sessionId={sessionId!}
@@ -396,27 +420,251 @@ function SelectAllMatchesHeader({
   );
 }
 
-function PhaseStepper({ currentPhase }: { currentPhase: Phase }) {
-  const idx = PHASES.indexOf(currentPhase);
+function PhaseStepper({
+  sessionId,
+  currentPhase,
+  currentVersionId,
+  state,
+}: {
+  sessionId: string;
+  currentPhase: Phase;
+  currentVersionId: string;
+  state: Record<string, unknown>;
+}) {
+  const qc = useQueryClient();
+  const currentStep = phaseToStep(currentPhase);
+  const idx = STEPS.indexOf(currentStep);
+
+  const onTokenClick = (target: Step, i: number) => {
+    // Only allow back-navigation via tokens. Forward needs the
+    // explicit Advance/Build buttons in the phase content so the user
+    // can't skip required selections.
+    if (i >= idx) return;
+    void navigateToStep({
+      qc,
+      sessionId,
+      parentVersionId: currentVersionId,
+      currentState: state,
+      target,
+    });
+  };
+
   return (
-    <ol className="flex items-center gap-2 text-sm mb-8">
-      {PHASES.map((p, i) => (
-        <li
-          key={p}
-          className={
-            "px-3 py-1 rounded-full border " +
-            (i === idx
-              ? "bg-slate-900 text-white border-slate-900"
-              : i < idx
-              ? "bg-slate-200 text-slate-700"
-              : "text-slate-400 border-dashed")
-          }
-        >
-          {i + 1}. {p.replace("_", " ")}
-        </li>
-      ))}
+    <ol className="flex items-center gap-1 text-sm mb-4">
+      {STEPS.map((s, i) => {
+        const isActive = i === idx;
+        const isPast = i < idx;
+        return (
+          <li key={s} className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => onTokenClick(s, i)}
+              disabled={!isPast}
+              aria-current={isActive ? "step" : undefined}
+              className={
+                "px-3 py-1 rounded-full border transition-colors " +
+                (isActive
+                  ? "bg-slate-900 text-white border-slate-900"
+                  : isPast
+                    ? "bg-slate-200 text-slate-700 hover:bg-slate-300 cursor-pointer"
+                    : "text-slate-400 border-dashed cursor-default")
+              }
+            >
+              {i + 1}. {STEP_LABEL[s]}
+            </button>
+            {i < STEPS.length - 1 && (
+              <span
+                className={
+                  "text-slate-400 select-none " +
+                  (i < idx ? "text-slate-500" : "text-slate-300")
+                }
+                aria-hidden
+              >
+                →
+              </span>
+            )}
+          </li>
+        );
+      })}
     </ol>
   );
+}
+
+function TopPhaseNav({
+  sessionId,
+  currentPhase,
+  currentVersionId,
+  state,
+}: {
+  sessionId: string;
+  currentPhase: Phase;
+  currentVersionId: string;
+  state: Record<string, unknown>;
+}) {
+  const qc = useQueryClient();
+  const back = navTargets(currentPhase).back;
+  const advance = navTargets(currentPhase).advance;
+  const ps = state as Record<string, unknown>;
+
+  // Forward gating: only allow Advance when the user has the
+  // prerequisites for the next phase (mirrors the bottom-nav guards
+  // each phase component implements internally).
+  const orgIds = (ps.selected_org_ids as number[] | undefined) ?? [];
+  const entityMap = (ps.selected_entity_ids as
+    | Partial<Record<string, number[]>>
+    | undefined) ?? {};
+  const totalEntities =
+    (entityMap.document?.length ?? 0) +
+    (entityMap.email_thread?.length ?? 0) +
+    (entityMap.calendar_event?.length ?? 0) +
+    (entityMap.slack_message_group?.length ?? 0);
+
+  let advanceDisabled = false;
+  if (advance) {
+    if (currentPhase === "org_select" && orgIds.length === 0) advanceDisabled = true;
+    if (currentPhase === "entity_select" && totalEntities === 0)
+      advanceDisabled = true;
+  }
+
+  const go = (target: Step) =>
+    navigateToStep({
+      qc,
+      sessionId,
+      parentVersionId: currentVersionId,
+      currentState: state,
+      target,
+    });
+
+  // Render nothing for terminal phases with no nav (none today; both
+  // ends have either a back or an advance).
+  if (!back && !advance) return null;
+
+  return (
+    <div className="flex items-center justify-between mb-6 text-sm">
+      <div>
+        {back && (
+          <button
+            type="button"
+            onClick={() => void go(back)}
+            className="px-3 py-1.5 border border-slate-300 text-slate-700 rounded-md hover:bg-slate-50"
+          >
+            ← Back to {STEP_LABEL[back]}
+          </button>
+        )}
+      </div>
+      <div>
+        {advance && (
+          <button
+            type="button"
+            onClick={() => void go(advance)}
+            disabled={advanceDisabled}
+            className="px-3 py-1.5 bg-slate-900 text-white rounded-md disabled:opacity-40"
+          >
+            Advance to {STEP_LABEL[advance]} →
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function navTargets(phase: Phase): { back: Step | null; advance: Step | null } {
+  switch (phase) {
+    case "org_select":
+      return { back: null, advance: "entity_select" };
+    case "entity_select":
+      return { back: "org_select", advance: "historical_data_room" };
+    case "data_room_setup":
+      // Build button (centered below presets) replaces the top-nav
+      // Advance for this phase -- nothing on the right.
+      return { back: "entity_select", advance: null };
+    case "data_room_view":
+      // Per user: Back from view goes to entity_select (not setup).
+      // The data room stays built; this just pivots the session state.
+      return { back: "entity_select", advance: null };
+  }
+}
+
+async function navigateToStep({
+  qc,
+  sessionId,
+  parentVersionId,
+  currentState,
+  target,
+}: {
+  qc: ReturnType<typeof useQueryClient>;
+  sessionId: string;
+  parentVersionId: string;
+  currentState: Record<string, unknown>;
+  target: Step;
+}): Promise<void> {
+  // Build the next-phase state from what's available in the current
+  // version. Each transition preserves what makes sense for the target
+  // phase and resets the rest.
+  let newPhase: Phase;
+  let newState: Record<string, unknown>;
+  const cs = currentState as Record<string, unknown>;
+  const orgIds = (cs.selected_org_ids as number[] | undefined) ?? [];
+  const entitiesMap =
+    (cs.selected_entity_ids as Record<string, number[]> | undefined) ?? {};
+
+  if (target === "org_select") {
+    newPhase = "org_select";
+    newState = {
+      user_query: "",
+      ai_candidates: [],
+      selected_org_ids: orgIds,
+    };
+  } else if (target === "entity_select") {
+    newPhase = "entity_select";
+    newState = {
+      inherits_from_version: parentVersionId,
+      selected_org_ids: orgIds,
+      selected_entity_ids: entitiesMap,
+    };
+  } else {
+    // historical_data_room -> always enter as data_room_setup (the
+    // pre-build view). If the user has already built, they can navigate
+    // back here for now and it'll show setup; the underlying room
+    // still exists in dealcloud.
+    newPhase = "data_room_setup";
+    let preset_question_ids: number[] = [];
+    try {
+      const defaults = await api.getPresetQuestions();
+      preset_question_ids = defaults.map((q) => q.id);
+    } catch {
+      // Fall through with empty list; the cron treats empty as "all".
+    }
+    newState = {
+      inherits_from_version: parentVersionId,
+      selected_org_ids: orgIds,
+      selected_entity_ids: entitiesMap,
+      preset_question_ids,
+      custom_questions: [],
+      data_room_id: null,
+    };
+  }
+
+  try {
+    const data = await api.appendVersion(sessionId, {
+      parent_id: parentVersionId,
+      phase: newPhase,
+      state: newState,
+      summary:
+        target === "org_select"
+          ? "Back to org_select"
+          : target === "entity_select"
+            ? "Back to entity_select"
+            : "Advance to historical_data_room",
+    });
+    qc.setQueryData(["session", sessionId], {
+      session: data.session,
+      current_version: data.version,
+    });
+  } catch (err) {
+    console.error("phase nav failed", err);
+    qc.invalidateQueries({ queryKey: ["session", sessionId] });
+  }
 }
 
 function OrgSelectPhase({
@@ -869,7 +1117,7 @@ function OrgSelectPhase({
           }}
           className="px-3 py-2 bg-slate-900 text-white text-sm rounded-md disabled:opacity-40"
         >
-          Advance to entity_select →
+          Advance to Entity select →
         </button>
       </div>
     </div>

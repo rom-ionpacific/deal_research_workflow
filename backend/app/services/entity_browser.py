@@ -128,6 +128,16 @@ _QUERIES: dict[str, dict[str, Any]] = {
             "id, channel_id, thread_ts, last_ts, message_count, permalink"
         ),
         "summary_col": "summary",
+        # Extra joins / columns for richer display. `extra_join` is
+        # spliced verbatim after the main JOIN; `extra_select_cols`
+        # are spliced into the SELECT projection alongside e.<col>.
+        # Channel name is what users actually recognize ("#deals-eu"),
+        # so we pull it via the channel_id FK -- without this the UI
+        # has to fall back to "Group #N" which is unhelpful.
+        "extra_joins": (
+            "LEFT JOIN dealcloud.slack_channel sc ON sc.id = e.channel_id"
+        ),
+        "extra_select_cols": "sc.name AS channel_name",
     },
 }
 
@@ -227,6 +237,12 @@ def list_entities(
         order_expr = f'e.{spec["date_col"]}'
 
     summary_col = spec["summary_col"]
+    select_parts = [
+        "e." + c.strip() for c in spec["select_cols"].split(",")
+    ]
+    if spec.get("extra_select_cols"):
+        select_parts.append(spec["extra_select_cols"])
+    extra_joins = spec.get("extra_joins", "")
     sql = f"""
         WITH ids AS (
             SELECT DISTINCT entity_id
@@ -234,10 +250,11 @@ def list_entities(
              WHERE organization_id = ANY(%s::int[])
                AND entity_type = %s
         )
-        SELECT {", ".join("e." + c.strip() for c in spec["select_cols"].split(","))},
+        SELECT {", ".join(select_parts)},
                LEFT(COALESCE(e.{summary_col}, ''), 200) AS summary
           FROM ids
           JOIN {spec["table"]} e ON e.{spec["id_col"]} = ids.entity_id
+          {extra_joins}
          WHERE {where_sql}
          ORDER BY {order_expr} DESC NULLS LAST, e.{spec["id_col"]} DESC
          LIMIT %s OFFSET %s
