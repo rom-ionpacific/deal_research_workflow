@@ -162,6 +162,25 @@ export interface EntityListResp {
   offset: number;
 }
 
+export interface EntityOrgContextRow {
+  org_id: number;
+  org_name: string;
+  alias_text: string | null;
+  relationship_type: string | null;
+  context: string | null;
+  is_confirmed: boolean;
+  match_method: string | null;
+  confidence: number | null;
+  model: string | null;
+  notes: string | null;
+}
+
+export interface EntityOrgContextResp {
+  entity_type: EntityType;
+  entity_id: number;
+  rows: EntityOrgContextRow[];
+}
+
 function entityFilterToQuery(
   filter: EntityFilter,
   extra: Record<string, string | number> = {},
@@ -361,6 +380,17 @@ export const api = {
       `/api/v1/sessions/${sessionId}/entities/${entityType}/list${qs}`,
     );
   },
+
+  // Why this entity is linked to the session's selected orgs. Lazy-
+  // fetched only when an entity row is expanded.
+  getEntityOrgContext: (
+    sessionId: string,
+    entityType: EntityType,
+    entityId: number,
+  ) =>
+    request<EntityOrgContextResp>(
+      `/api/v1/sessions/${sessionId}/entities/${entityType}/${entityId}/org-context`,
+    ),
 
   // ---- phase 3: data-rooms ----
   getPresetQuestions: () =>

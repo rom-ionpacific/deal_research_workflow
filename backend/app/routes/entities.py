@@ -160,3 +160,145 @@ def entities_list(
         limit=limit,
         offset=offset,
     )
+
+
+class OrgContextRow(BaseModel):
+    org_id: int
+    org_name: str
+    alias_text: str | None = None
+    relationship_type: str | None = None
+    context: str | None = None
+    is_confirmed: bool = False
+    # Type-specific extras; missing on tables that don't carry them.
+    match_method: str | None = None
+    confidence: float | None = None
+    model: str | None = None
+    notes: str | None = None
+
+
+class OrgContextResp(BaseModel):
+    entity_type: str
+    entity_id: int
+    rows: list[OrgContextRow]
+
+
+# SQL templates per entity_type. Each table joins via
+# organization_alias_id -> organization_alias.organization_id, scoped
+# to the session's selected_org_ids so we only surface context for orgs
+# the user actually picked. Tables differ in which metadata columns
+# they carry; we coalesce to NULL for the ones a given table lacks so
+# the response shape is uniform.
+_ORG_CONTEXT_SQL: dict[str, str] = {
+    "document": """
+        SELECT o.id   AS org_id,
+               o.name AS org_name,
+               oa.alias AS alias_text,
+               doa.relationship_type,
+               doa.context,
+               COALESCE(doa.is_confirmed, FALSE) AS is_confirmed,
+               doa.match_method,
+               NULL::real AS confidence,
+               doa.model,
+               doa.notes
+          FROM dealcloud.document_organization_alias doa
+          JOIN dealcloud.organization_alias oa
+            ON oa.id = doa.organization_alias_id
+          JOIN dealcloud.organization o
+            ON o.id = oa.organization_id
+         WHERE doa.document_id = %s
+           AND oa.organization_id = ANY(%s::int[])
+         ORDER BY COALESCE(doa.is_confirmed, FALSE) DESC,
+                  o.id, doa.match_method NULLS LAST
+    """,
+    "email_thread": """
+        SELECT o.id   AS org_id,
+               o.name AS org_name,
+               oa.alias AS alias_text,
+               eto.relationship_type,
+               eto.context,
+               COALESCE(eto.is_confirmed, FALSE) AS is_confirmed,
+               NULL::text AS match_method,
+               eto.confidence,
+               eto.model,
+               NULL::text AS notes
+          FROM dealcloud.email_thread_organization eto
+          JOIN dealcloud.organization_alias oa
+            ON oa.id = eto.organization_alias_id
+          JOIN dealcloud.organization o
+            ON o.id = oa.organization_id
+         WHERE eto.thread_id = %s
+           AND oa.organization_id = ANY(%s::int[])
+         ORDER BY COALESCE(eto.is_confirmed, FALSE) DESC,
+                  eto.confidence DESC NULLS LAST,
+                  o.id
+    """,
+    "calendar_event": """
+        SELECT o.id   AS org_id,
+               o.name AS org_name,
+               oa.alias AS alias_text,
+               ceo.relationship_type,
+               ceo.context,
+               COALESCE(ceo.is_confirmed, FALSE) AS is_confirmed,
+               NULL::text AS match_method,
+               NULL::real AS confidence,
+               ceo.model,
+               NULL::text AS notes
+          FROM dealcloud.calendar_event_organization ceo
+          JOIN dealcloud.organization_alias oa
+            ON oa.id = ceo.organization_alias_id
+          JOIN dealcloud.organization o
+            ON o.id = oa.organization_id
+         WHERE ceo.event_id = %s
+           AND oa.organization_id = ANY(%s::int[])
+         ORDER BY COALESCE(ceo.is_confirmed, FALSE) DESC, o.id
+    """,
+    "slack_message_group": """
+        SELECT o.id   AS org_id,
+               o.name AS org_name,
+               oa.alias AS alias_text,
+               smgo.relationship_type,
+               smgo.context,
+               COALESCE(smgo.is_confirmed, FALSE) AS is_confirmed,
+               NULL::text AS match_method,
+               NULL::real AS confidence,
+               smgo.model,
+               NULL::text AS notes
+          FROM dealcloud.slack_message_group_organization smgo
+          JOIN dealcloud.organization_alias oa
+            ON oa.id = smgo.organization_alias_id
+          JOIN dealcloud.organization o
+            ON o.id = oa.organization_id
+         WHERE smgo.message_group_id = %s
+           AND oa.organization_id = ANY(%s::int[])
+         ORDER BY COALESCE(smgo.is_confirmed, FALSE) DESC, o.id
+    """,
+}
+
+
+@router.get(
+    "/sessions/{session_id}/entities/{entity_type}/{entity_id}/org-context",
+    response_model=OrgContextResp,
+)
+def entity_org_context(
+    session_id: UUID,
+    entity_type: str,
+    entity_id: int,
+    user: UserCtx = Depends(require_user),
+) -> OrgContextResp:
+    """Why was this entity linked to the user's selected orgs? Returns
+    one row per (org, alias) match from the appropriate
+    `<entity>_organization*` table: relationship_type, context snippet,
+    is_confirmed, plus type-specific match_method (documents) /
+    confidence (emails). Lazy-fetched by the expand panel in Phase 2;
+    list endpoint stays lean."""
+    _validate_entity_type(entity_type)
+    org_ids = _selected_org_ids_for_session(session_id, user)
+    sql = _ORG_CONTEXT_SQL[entity_type]
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(sql, (entity_id, org_ids))
+        raw = cur.fetchall()
+    rows = [OrgContextRow(**dict(r)) for r in raw]
+    return OrgContextResp(
+        entity_type=entity_type, entity_id=entity_id, rows=rows
+    )

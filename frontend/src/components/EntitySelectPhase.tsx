@@ -5,6 +5,7 @@ import {
   api,
   ENTITY_TYPES,
   type EntityFilter,
+  type EntityOrgContextRow,
   type EntityType,
   type SessionWithCurrent,
 } from "../lib/api";
@@ -423,6 +424,7 @@ export default function EntitySelectPhase({
             key={String(row.id)}
             entityType={activeTab}
             row={row}
+            sessionId={sessionId}
             selected={selected[activeTab].includes(row.id as number)}
             onToggle={() => toggle(activeTab, row.id as number)}
             disabled={pendingKeys.has(`${activeTab}:${row.id}`)}
@@ -557,12 +559,14 @@ function EntityRow({
   selected,
   onToggle,
   disabled,
+  sessionId,
 }: {
   entityType: EntityType;
   row: Record<string, unknown>;
   selected: boolean;
   onToggle: () => void;
   disabled?: boolean;
+  sessionId: string;
 }) {
   const r = row as any; // shape varies by entity_type
   const [expanded, setExpanded] = useState(false);
@@ -670,11 +674,112 @@ function EntityRow({
         </div>
       </div>
       {expanded && (
-        <div className="border-t border-slate-200 px-3 py-3 text-xs text-slate-700">
+        <div className="border-t border-slate-200 px-3 py-3 text-xs text-slate-700 space-y-3">
           <EntityDetail entityType={entityType} row={r} />
+          <OrgContextBlock
+            sessionId={sessionId}
+            entityType={entityType}
+            entityId={r.id as number}
+          />
         </div>
       )}
     </div>
+  );
+}
+
+function OrgContextBlock({
+  sessionId,
+  entityType,
+  entityId,
+}: {
+  sessionId: string;
+  entityType: EntityType;
+  entityId: number;
+}) {
+  const ctx = useQuery({
+    queryKey: ["entity-org-context", entityType, entityId, sessionId],
+    queryFn: () =>
+      api.getEntityOrgContext(sessionId, entityType, entityId),
+    // Org-link metadata barely ever changes after the entity is
+    // indexed; keep it cached across re-expands.
+    staleTime: 5 * 60_000,
+  });
+
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mb-1">
+        Org link
+      </div>
+      {ctx.isLoading && (
+        <div className="text-slate-400">Loading org context…</div>
+      )}
+      {ctx.error && (
+        <div className="text-red-600">
+          {(ctx.error as Error).message}
+        </div>
+      )}
+      {ctx.data && ctx.data.rows.length === 0 && (
+        <div className="text-slate-400">
+          No `{entityType}_organization` rows for the selected orgs.
+        </div>
+      )}
+      {ctx.data && ctx.data.rows.length > 0 && (
+        <ul className="space-y-2">
+          {ctx.data.rows.map((r, i) => (
+            <OrgContextRowView key={i} row={r} entityType={entityType} />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function OrgContextRowView({
+  row,
+  entityType,
+}: {
+  row: EntityOrgContextRow;
+  entityType: EntityType;
+}) {
+  const meta: string[] = [];
+  if (row.relationship_type) meta.push(row.relationship_type);
+  if (row.alias_text && row.alias_text !== row.org_name)
+    meta.push(`alias: ${row.alias_text}`);
+  if (entityType === "document" && row.match_method)
+    meta.push(`via ${row.match_method}`);
+  if (entityType === "email_thread" && row.confidence != null)
+    meta.push(`conf ${row.confidence.toFixed(2)}`);
+  if (row.model) meta.push(row.model);
+
+  return (
+    <li className="border border-slate-200 rounded-md px-2 py-1.5 bg-slate-50">
+      <div className="flex items-center gap-2">
+        <span className="font-medium text-slate-800 truncate">
+          {row.org_name}
+        </span>
+        <code className="text-[10px] text-slate-400 shrink-0">
+          #{row.org_id}
+        </code>
+        {row.is_confirmed && (
+          <span className="ml-auto text-[10px] uppercase tracking-wide bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded shrink-0">
+            confirmed
+          </span>
+        )}
+      </div>
+      {meta.length > 0 && (
+        <div className="mt-0.5 text-[11px] text-slate-500">
+          {meta.join(" · ")}
+        </div>
+      )}
+      {row.context && (
+        <div className="mt-1 text-slate-700 leading-relaxed whitespace-pre-wrap">
+          {row.context}
+        </div>
+      )}
+      {row.notes && (
+        <div className="mt-1 text-slate-500 italic">{row.notes}</div>
+      )}
+    </li>
   );
 }
 
