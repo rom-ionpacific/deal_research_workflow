@@ -11,6 +11,7 @@ import {
   api,
   type OrgSearchResult,
   type Phase,
+  type SearchMode,
   type Session,
   type SessionWithCurrent,
 } from "../lib/api";
@@ -371,6 +372,51 @@ function StarButton({
   );
 }
 
+function SearchModeToggle({
+  mode,
+  onChange,
+}: {
+  mode: SearchMode;
+  onChange: (m: SearchMode) => void;
+}) {
+  // Segmented control. Trigram = name/alias text match; Hybrid = both
+  // legs merged via RRF; Semantic = embedding cosine only. Help text
+  // under the buttons calls out which is doing what so the user
+  // doesn't have to remember.
+  const modes: Array<{ k: SearchMode; label: string; hint: string }> = [
+    { k: "trigram", label: "Name", hint: "Exact / fuzzy name match." },
+    { k: "hybrid", label: "Hybrid", hint: "Name + meaning, merged." },
+    { k: "semantic", label: "Meaning", hint: "Embedding similarity only." },
+  ];
+  return (
+    <div className="flex items-center gap-2 mt-1 text-xs text-slate-500">
+      <span className="text-slate-400">Match:</span>
+      <div className="inline-flex rounded-md border border-slate-300 overflow-hidden">
+        {modes.map((m, i) => (
+          <button
+            key={m.k}
+            type="button"
+            onClick={() => onChange(m.k)}
+            className={
+              "px-2 py-1 transition-colors " +
+              (mode === m.k
+                ? "bg-slate-900 text-white"
+                : "bg-white hover:bg-slate-50 text-slate-700") +
+              (i > 0 ? " border-l border-slate-300" : "")
+            }
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+      <span className="truncate">
+        {modes.find((m) => m.k === mode)?.hint}
+      </span>
+    </div>
+  );
+}
+
+
 function SelectAllMatchesHeader({
   matchIds,
   selectedIds,
@@ -680,6 +726,11 @@ function OrgSelectPhase({
 
   const [q, setQ] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
+  // Search mode toggle. Trigram is the default (matches prior behavior;
+  // best for exact-name lookups). Hybrid blends trigram with semantic
+  // via RRF -- exact matches stay top-ranked, descriptive matches get
+  // added. Semantic-only is here mainly for diagnostic A/B.
+  const [searchMode, setSearchMode] = useState<SearchMode>("trigram");
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(q.trim()), 300);
     return () => clearTimeout(t);
@@ -688,8 +739,8 @@ function OrgSelectPhase({
   const selected = (state.selected_org_ids as number[] | undefined) ?? [];
 
   const search = useQuery({
-    queryKey: ["orgs", "search", debouncedQ],
-    queryFn: () => api.searchOrgs(debouncedQ, 15),
+    queryKey: ["orgs", "search", debouncedQ, searchMode],
+    queryFn: () => api.searchOrgs(debouncedQ, 15, searchMode),
     enabled: debouncedQ.length > 0,
   });
 
@@ -990,16 +1041,27 @@ function OrgSelectPhase({
       </p>
 
       {/* Search box stays sticky at the top of the scrolling parent
-          (overflow-y-auto in ResearchPage) so it's always reachable. */}
+          (overflow-y-auto in ResearchPage) so it's always reachable.
+          Below the input, a 3-way mode toggle: trigram (default, exact
+          name lookups), hybrid (RRF over trigram + semantic; best for
+          mixed queries), semantic (cosine only; good for descriptive
+          phrasing). UI state only -- not persisted to session. */}
       <div className="sticky top-0 bg-white pb-2 z-20 -mx-1 px-1">
         <input
           type="text"
           autoFocus
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="Type a company name..."
+          placeholder={
+            searchMode === "trigram"
+              ? "Type a company name..."
+              : searchMode === "hybrid"
+                ? "Name, or describe the company..."
+                : "Describe the kind of company you're looking for..."
+          }
           className="w-full border border-slate-300 rounded-md px-3 py-2"
         />
+        <SearchModeToggle mode={searchMode} onChange={setSearchMode} />
       </div>
 
       {/* Selected section + search results in one scroll flow. Selected

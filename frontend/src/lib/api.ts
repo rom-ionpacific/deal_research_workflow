@@ -109,6 +109,8 @@ export interface OrgDossier {
   top_their_contacts: OrgContactRecent[];
 }
 
+export type SearchMode = "trigram" | "semantic" | "hybrid";
+
 export interface OrgSearchResult {
   org_id: number;
   name: string;
@@ -341,9 +343,13 @@ export const api = {
       { method: "POST", body: JSON.stringify(body) }
     ),
 
-  searchOrgs: (q: string, limit = 10) =>
+  // mode: 'trigram' (default; backwards compat) | 'semantic' (cosine
+  // over embeddings) | 'hybrid' (RRF over both legs). The FE's search
+  // box exposes a small toggle so the user can compare; AI chat tools
+  // hit the route with mode='hybrid' regardless.
+  searchOrgs: (q: string, limit = 10, mode: SearchMode = "trigram") =>
     request<OrgSearchResult[]>(
-      `/api/v1/orgs/search?q=${encodeURIComponent(q)}&limit=${limit}`
+      `/api/v1/orgs/search?q=${encodeURIComponent(q)}&limit=${limit}&mode=${mode}`
     ),
 
   getOrgsByIds: (ids: number[]) =>

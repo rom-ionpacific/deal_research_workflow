@@ -100,7 +100,12 @@ phase1_registry = ToolRegistry()
     FindOrganizationsInput,
 )
 def find_organizations(inp: FindOrganizationsInput, ctx: dict) -> ToolResult:
-    rows = search_organizations(inp.query, inp.limit)
+    # Chat tools default to hybrid so the AI can handle descriptive
+    # queries ("Singapore family office that invests in AI") in
+    # addition to exact-name lookups. Falls back to trigram-only
+    # automatically if the semantic leg errors -- callers always get
+    # results.
+    rows = search_organizations(inp.query, inp.limit, mode="hybrid")
     return ToolResult(output={"query": inp.query, "results": rows})
 
 

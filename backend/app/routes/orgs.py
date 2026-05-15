@@ -14,7 +14,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from typing import Any
+from typing import Any, Literal
 
 from ..auth import UserCtx, require_user
 from ..services.org_dossier import get_org_dossier
@@ -22,6 +22,9 @@ from ..services.org_search import (
     get_organizations_by_ids,
     search_organizations,
 )
+
+
+SearchModeQuery = Literal["trigram", "semantic", "hybrid"]
 
 router = APIRouter()
 
@@ -48,9 +51,17 @@ class OrgSearchResult(BaseModel):
 def orgs_search(
     q: str = Query(..., min_length=1, max_length=200),
     limit: int = Query(10, ge=1, le=50),
+    mode: SearchModeQuery = Query(
+        "trigram",
+        description=(
+            "trigram (default): exact/prefix/pg_trgm on name+alias. "
+            "semantic: cosine over OpenAI embeddings (1536d). "
+            "hybrid: RRF fusion of both legs."
+        ),
+    ),
     user: UserCtx = Depends(require_user),
 ) -> list[OrgSearchResult]:
-    rows = search_organizations(q, limit)
+    rows = search_organizations(q, limit, mode=mode)
     return [OrgSearchResult(**r) for r in rows]
 
 

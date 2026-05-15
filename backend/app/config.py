@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     toltiq_api_key: str = ""
     toltiq_org_id: str = ""
 
+    # OpenAI -- query-time embeddings for hybrid org search (and later
+    # document search). Empty value forces search_organizations to
+    # silently fall back to trigram-only (no error, just no semantic
+    # leg) so local dev without a key still functions.
+    openai_api_key: str = ""
+
     @property
     def origin_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]

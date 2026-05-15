@@ -82,7 +82,10 @@ slack_registry = ToolRegistry()
     FindOrganizationsInput,
 )
 def find_organizations(inp: FindOrganizationsInput, ctx: dict) -> ToolResult:
-    rows = search_organizations(inp.query, inp.limit)
+    # Same rationale as chat_research/tools.py: hybrid for descriptive
+    # query support, with automatic trigram fallback if the semantic
+    # leg fails.
+    rows = search_organizations(inp.query, inp.limit, mode="hybrid")
     return ToolResult(output={"query": inp.query, "results": rows})
 
 
