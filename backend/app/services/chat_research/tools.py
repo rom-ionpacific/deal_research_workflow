@@ -1164,6 +1164,66 @@ phase4_registry._tools["get_org_dossier"] = phase1_registry._tools[
 ]
 
 
+class SearchDocumentsInput(BaseModel):
+    data_room_id: int = Field(
+        ...,
+        description=(
+            "dealcloud.historical_data_room.id of the room to search "
+            "within. Pulled from `state.data_room_id` in the session; "
+            "available in the Current UI state block."
+        ),
+    )
+    query: str = Field(
+        ...,
+        description=(
+            "Free-text query: a filename fragment ('IC memo'), a topic "
+            "phrase ('pricing exposure'), or a description ('term sheet "
+            "from late 2025'). Hybrid retrieval -- filename matches stay "
+            "top-ranked, semantic matches surface from summary content."
+        ),
+        min_length=1,
+        max_length=200,
+    )
+    limit: int = Field(
+        10, ge=1, le=25,
+        description="Max documents to return.",
+    )
+
+
+@phase4_registry.tool(
+    "search_documents",
+    (
+        "Search the documents IN THIS DATA ROOM by name or by what they "
+        "discuss. Uses hybrid retrieval (filename trigram + embedding "
+        "cosine over the doc's name+summary). Returns up to `limit` rows "
+        "ranked by relevance: each row has document_id, name, path, "
+        "web_url, modified_at, summary_preview, score. Use this when the "
+        "user asks about a doc by topic ('the doc that talks about our "
+        "pricing exposure') OR by partial filename ('the IC memo from "
+        "last October'); follow up with read_document_summary on a "
+        "specific id if you need full summary text. Scoped to documents "
+        "the room has successfully uploaded to ToltIQ, so anything you "
+        "find is queryable via ask_toltiq. Read-only."
+    ),
+    SearchDocumentsInput,
+)
+def search_documents_phase4(inp: SearchDocumentsInput, ctx: dict) -> ToolResult:
+    # Local import keeps tools.py free of a cross-module dep at top
+    # level (avoids potential circular imports in the chat_lib layer).
+    from ..document_search import search_documents as _search_documents
+    rows = _search_documents(
+        room_id=inp.data_room_id, query=inp.query, limit=inp.limit,
+    )
+    return ToolResult(
+        output={
+            "query": inp.query,
+            "data_room_id": inp.data_room_id,
+            "count": len(rows),
+            "results": rows,
+        }
+    )
+
+
 @phase4_registry.tool(
     "read_document_summary",
     (
