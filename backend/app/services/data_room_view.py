@@ -118,7 +118,7 @@ def get_room_detail(room_id: int, user: UserCtx) -> dict:
         cur.execute(
             """
             SELECT id, question_text, status, answer_text, attachments,
-                   error_message, completed_at, created_at
+                   error_message, completed_at, created_at, provider
               FROM dealcloud.historical_data_room_answer
              WHERE historical_data_room_id = %s
                AND preset_question_id IS NULL
@@ -180,4 +180,5 @@ def _row_to_followup(row: dict) -> dict:
         "error_message": row["error_message"],
         "created_at": row["created_at"],
         "completed_at": row["completed_at"],
+        "provider": row.get("provider") or "toltiq",
     }

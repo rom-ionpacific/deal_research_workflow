@@ -245,6 +245,9 @@ export interface FollowupQA {
   error_message: string | null;
   created_at: string;
   completed_at: string | null;
+  // 'toltiq' (default) | 'claude'. Lets the UI render which provider
+  // answered, important during the A/B period.
+  provider: "toltiq" | "claude";
 }
 
 export interface DataRoomDetail {
@@ -439,6 +442,24 @@ export const api = {
   askDataRoom: (roomId: number, question: string) =>
     request<{ answer_id: number; status: string }>(
       `/api/v1/data-rooms/${roomId}/ask`,
+      { method: "POST", body: JSON.stringify({ question }) },
+    ),
+
+  // Parallel Claude path. SYNCHRONOUS: blocks ~3-8s while Claude
+  // answers from our pgvector retrieval over the room's docs.
+  // Returns the full answer text + metadata. Used for the A/B
+  // comparison against ToltIQ.
+  askDataRoomClaude: (roomId: number, question: string) =>
+    request<{
+      answer_id: number;
+      answer_text: string;
+      retrieved_doc_ids: number[];
+      status: string;
+      model: string | null;
+      latency_s: number | null;
+      tokens: { input: number; output: number; cache_read: number } | null;
+    }>(
+      `/api/v1/data-rooms/${roomId}/ask-claude`,
       { method: "POST", body: JSON.stringify({ question }) },
     ),
 

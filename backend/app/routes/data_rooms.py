@@ -30,6 +30,10 @@ from ..services.dataroom_setup import (
     get_preset_questions_by_ids,
     list_preset_questions,
 )
+from ..services.claude_data_room import (
+    ClaudeRoomError,
+    ask_room as ask_room_claude,
+)
 from ..services.toltiq_adhoc import (
     ToltIQNotConfigured,
     reset_answer_for_retry,
@@ -85,6 +89,9 @@ class FollowupQAResp(BaseModel):
     error_message: str | None
     created_at: datetime
     completed_at: datetime | None
+    # 'toltiq' (default) | 'claude'. Defaults to 'toltiq' for any
+    # answer row pre-dating the provider column.
+    provider: str = "toltiq"
 
 
 class DataRoomDetailResp(BaseModel):
@@ -297,6 +304,40 @@ def retry_data_room_answer(
         run_toltiq_workflow_safe, answer_id, room_id, question_text
     )
     return RetryAnswerResp(answer_id=answer_id, status="running")
+
+
+class AskClaudeResp(BaseModel):
+    answer_id: int
+    answer_text: str
+    retrieved_doc_ids: list[int]
+    status: str
+    model: str | None = None
+    latency_s: float | None = None
+    tokens: dict | None = None
+
+
+@router.post(
+    "/data-rooms/{room_id}/ask-claude",
+    response_model=AskClaudeResp,
+)
+def ask_data_room_claude(
+    room_id: int,
+    req: AskDataRoomReq,
+    user: UserCtx = Depends(require_user),
+) -> AskClaudeResp:
+    """Parallel to /ask but runs the question through Claude directly
+    over Stage 4's pgvector retrieval (no ToltIQ round-trip). Used to
+    A/B against the ToltIQ path on the same rooms while we decide
+    whether to migrate. Synchronous: blocks 3-8 s while Claude
+    answers, returns the full answer text + metadata."""
+    try:
+        return AskClaudeResp(**ask_room_claude(room_id, req.question, user))
+    except RoomError as e:
+        msg = str(e)
+        code = 404 if "not found" in msg.lower() else 403
+        raise HTTPException(status_code=code, detail=msg)
+    except ClaudeRoomError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 class RetryRoomResp(BaseModel):

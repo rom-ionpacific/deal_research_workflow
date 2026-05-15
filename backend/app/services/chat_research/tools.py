@@ -1344,6 +1344,55 @@ def get_preset_answer(inp: GetPresetAnswerInput, ctx: dict) -> ToolResult:
     )
 
 
+class AskClaudeRoomInput(BaseModel):
+    data_room_id: int = Field(
+        ..., description="dealcloud.historical_data_room.id of the room."
+    )
+    question: str = Field(
+        ...,
+        description=(
+            "Question to ask of the data room. Phrased as a complete "
+            "question; the answer will only draw on the room's "
+            "uploaded documents."
+        ),
+        min_length=4,
+        max_length=2000,
+    )
+
+
+@phase4_registry.tool(
+    "ask_claude_room",
+    (
+        "ALTERNATIVE to ask_toltiq: answers the user's question using "
+        "Claude directly over our local pgvector retrieval of the "
+        "room's uploaded documents. Faster (3-8 s vs 30-90 s for "
+        "ask_toltiq), works even before the room has finished "
+        "building, and answers are sterile (only sees the retrieved "
+        "docs, not the web or prior conversations). Citations come "
+        "back as inline `[doc_id=N]` markers the frontend renders as "
+        "clickable links. The answer is persisted to "
+        "historical_data_room_answer with provider='claude' so it "
+        "appears alongside ToltIQ follow-ups in the UI -- handy for "
+        "A/B comparing answer quality on the same room."
+    ),
+    AskClaudeRoomInput,
+    mutates_state=False,
+)
+def ask_claude_room(inp: AskClaudeRoomInput, ctx: dict) -> ToolResult:
+    user = ctx["user"]
+    from ..claude_data_room import (
+        ClaudeRoomError as _ClaudeRoomError,
+        ask_room as _ask_room,
+    )
+    try:
+        result = _ask_room(inp.data_room_id, inp.question, user)
+    except _RoomError as e:
+        return ToolResult(output=str(e))
+    except _ClaudeRoomError as e:
+        return ToolResult(output=f"Claude room error: {e}")
+    return ToolResult(output=result)
+
+
 @phase4_registry.tool(
     "ask_toltiq",
     (
