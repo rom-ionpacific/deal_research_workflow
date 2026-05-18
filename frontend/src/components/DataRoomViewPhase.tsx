@@ -733,14 +733,15 @@ function FollowupRow({ f, roomId }: { f: FollowupQA; roomId: number }) {
           {f.status === "failed" && (
             <div>
               <div className="text-sm text-red-700 whitespace-pre-wrap">
-                {f.error_message || "ToltIQ returned an error."}
+                {f.error_message ||
+                  `${f.provider === "claude" ? "Claude" : "ToltIQ"} returned an error.`}
               </div>
               <RetryButton roomId={roomId} answerId={f.answer_id} />
             </div>
           )}
           {(f.status === "pending" || f.status === "running") && (
             <div className="text-sm text-slate-500 italic">
-              Waiting for ToltIQ…
+              Waiting for {f.provider === "claude" ? "Claude" : "ToltIQ"}…
             </div>
           )}
           <AttachmentsList attachments={f.attachments} />
