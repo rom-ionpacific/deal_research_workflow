@@ -47,10 +47,18 @@ export default function Markdown({ children }: { children: string }) {
         ),
         em: ({ children }) => <em className="italic">{children}</em>,
         a: ({ href, children }) => (
+          // SharePoint Doc.aspx URLs rely on the Referer header to
+          // decide whether to bounce through the login redirect or
+          // trust the existing M365 session. `rel="noreferrer"`
+          // strips that header and the link silently fails with
+          // "connection was reset". We keep `noopener` (prevents the
+          // opened tab from controlling our window) but drop
+          // `noreferrer` so SharePoint can read the Referer.
+          // org_history_viewer's templates do the same.
           <a
             href={href}
             target="_blank"
-            rel="noopener noreferrer"
+            rel="noopener"
             className="text-blue-600 hover:underline"
           >
             {children}
