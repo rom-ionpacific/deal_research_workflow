@@ -146,6 +146,7 @@ export default function DataRoomViewPhase({
               getting mixed in with the preset Q&A above. */}
           <DirectToltIQChat
             roomId={room.data.id}
+            provider={room.data.provider}
             followups={room.data.followup_questions}
           />
         </>
@@ -166,15 +167,22 @@ export default function DataRoomViewPhase({
 
 function DirectToltIQChat({
   roomId,
+  provider,
   followups,
 }: {
   roomId: number;
+  provider: "toltiq" | "claude" | "both";
   followups: FollowupQA[];
 }) {
   const qc = useQueryClient();
   const [draft, setDraft] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Which ask buttons make sense: matches what the server accepts.
+  // ToltIQ-only rooms have no Claude path; Claude-only rooms have no
+  // ToltIQ deal. 'both' rooms expose both buttons.
+  const showToltiq = provider === "toltiq" || provider === "both";
+  const showClaude = provider === "claude" || provider === "both";
 
   const submitToltiq = async () => {
     const text = draft.trim();
@@ -295,9 +303,12 @@ function DirectToltIQChat({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          // Cmd/Ctrl+Enter sends to ToltIQ (the established default);
-          // Alt/Shift+Enter sends to Claude.
-          void submitToltiq();
+          // Enter submits to whichever provider the room was built
+          // for. ToltIQ takes precedence on 'both' rooms (preserves
+          // the prior default keyboard behavior). Alt/Shift+Enter on
+          // 'both' rooms routes to Claude.
+          if (showToltiq) void submitToltiq();
+          else if (showClaude) void submitClaude();
         }}
         className={
           "p-3 " +
@@ -310,13 +321,21 @@ function DirectToltIQChat({
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
               e.preventDefault();
-              void submitToltiq();
+              if (showToltiq) void submitToltiq();
+              else if (showClaude) void submitClaude();
             } else if (e.key === "Enter" && (e.altKey || e.shiftKey)) {
               e.preventDefault();
-              void submitClaude();
+              if (showClaude) void submitClaude();
+              else if (showToltiq) void submitToltiq();
             }
           }}
-          placeholder="Ask anything about this room. Send to ToltIQ (~30-90s, page-cited) or Claude (~5s, doc-cited)."
+          placeholder={
+            provider === "both"
+              ? "Ask anything. Send to ToltIQ (~30-90s, page-cited) or Claude (~5s, doc-cited)."
+              : provider === "claude"
+                ? "Ask anything. Claude answers in ~5s with inline doc-id citations."
+                : "Ask anything. ToltIQ answers in ~30-90s with page-cited responses."
+          }
           maxLength={2000}
           rows={3}
           disabled={submitting}
@@ -324,26 +343,33 @@ function DirectToltIQChat({
         />
         <div className="flex items-center justify-between mt-2 gap-2">
           <div className="text-xs text-slate-500">
-            ToltIQ ~30–90s · Claude ~5s. Both answer from the same
-            curated docs.
+            {provider === "both"
+              ? "ToltIQ ~30–90s · Claude ~5s. Both answer from the same curated docs."
+              : provider === "claude"
+                ? "Claude over our local pgvector retrieval. ~5s per question."
+                : "ToltIQ workflow over the uploaded entities. ~30–90s per question."}
           </div>
           <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => void submitClaude()}
-              disabled={submitting || !draft.trim()}
-              title="Faster answer via Claude over local retrieval"
-              className="px-3 py-1.5 bg-violet-700 text-white text-sm rounded-md disabled:opacity-50 hover:bg-violet-800"
-            >
-              {submitting ? "..." : "Ask Claude"}
-            </button>
-            <button
-              type="submit"
-              disabled={submitting || !draft.trim()}
-              className="px-3 py-1.5 bg-slate-900 text-white text-sm rounded-md disabled:opacity-50"
-            >
-              {submitting ? "Sending..." : "Ask ToltIQ"}
-            </button>
+            {showClaude && (
+              <button
+                type="button"
+                onClick={() => void submitClaude()}
+                disabled={submitting || !draft.trim()}
+                title="Faster answer via Claude over local retrieval"
+                className="px-3 py-1.5 bg-violet-700 text-white text-sm rounded-md disabled:opacity-50 hover:bg-violet-800"
+              >
+                {submitting ? "..." : "Ask Claude"}
+              </button>
+            )}
+            {showToltiq && (
+              <button
+                type="submit"
+                disabled={submitting || !draft.trim()}
+                className="px-3 py-1.5 bg-slate-900 text-white text-sm rounded-md disabled:opacity-50"
+              >
+                {submitting ? "Sending..." : "Ask ToltIQ"}
+              </button>
+            )}
           </div>
         </div>
         {error && (

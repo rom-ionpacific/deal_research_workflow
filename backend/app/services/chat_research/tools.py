@@ -1384,6 +1384,20 @@ def ask_claude_room(inp: AskClaudeRoomInput, ctx: dict) -> ToolResult:
         ClaudeRoomError as _ClaudeRoomError,
         ask_room as _ask_room,
     )
+    # Gate: ad-hoc Claude only on rooms built with Claude or Both.
+    try:
+        detail = _get_room_detail(inp.data_room_id, user)
+    except _RoomError as e:
+        return ToolResult(output=str(e))
+    if (detail.get("provider") or "toltiq") == "toltiq":
+        return ToolResult(
+            output=(
+                "This room was built with ToltIQ only -- Claude isn't "
+                "available on it. Use ask_toltiq instead, or tell the "
+                "user to rebuild the room with provider 'claude' or "
+                "'both' if they want Claude answers."
+            )
+        )
     try:
         result = _ask_room(inp.data_room_id, inp.question, user)
     except _RoomError as e:
@@ -1411,6 +1425,22 @@ def ask_claude_room(inp: AskClaudeRoomInput, ctx: dict) -> ToolResult:
 )
 def ask_toltiq(inp: AskToltIQInput, ctx: dict) -> ToolResult:
     user = ctx["user"]
+    # Gate: ToltIQ only on rooms built with ToltIQ or Both. Claude-only
+    # rooms have no toltiq_deal_id and would error deep inside the
+    # ToltIQ client; this surfaces a cleaner message.
+    try:
+        detail = _get_room_detail(inp.data_room_id, user)
+    except _RoomError as e:
+        return ToolResult(output=str(e))
+    if (detail.get("provider") or "toltiq") == "claude":
+        return ToolResult(
+            output=(
+                "This room was built with Claude only -- no ToltIQ "
+                "deal exists for it. Use ask_claude_room instead, or "
+                "tell the user to rebuild the room with provider "
+                "'toltiq' or 'both' if they want ToltIQ answers."
+            )
+        )
     try:
         result = _ask_room_question(inp.data_room_id, inp.question, user)
     except _ToltIQNotConfigured as e:

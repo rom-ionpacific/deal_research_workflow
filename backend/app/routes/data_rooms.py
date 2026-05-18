@@ -277,7 +277,24 @@ def ask_data_room(
     after persisting the running answer row; the actual workflow runs
     in a background task and updates the row when done. The frontend
     polls /data-rooms/{id} which surfaces the new row in
-    `followup_questions[]`, transitioning running -> complete / failed."""
+    `followup_questions[]`, transitioning running -> complete / failed.
+
+    Refuses 409 on claude-only rooms (no ToltIQ deal was created)."""
+    try:
+        detail = get_room_detail(room_id, user)
+    except RoomError as e:
+        msg = str(e)
+        code = 404 if "not found" in msg.lower() else 403
+        raise HTTPException(status_code=code, detail=msg)
+    if (detail.get("provider") or "toltiq") == "claude":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This data room was built with Claude only; ToltIQ "
+                "ad-hoc Q&A isn't available. Rebuild the room with "
+                "'ToltIQ' or 'Both' to use this."
+            ),
+        )
     try:
         answer_id = start_room_question(room_id, req.question, user)
     except RoomError as e:
@@ -361,11 +378,28 @@ def ask_data_room_claude(
     req: AskDataRoomReq,
     user: UserCtx = Depends(require_user),
 ) -> AskClaudeResp:
-    """Parallel to /ask but runs the question through Claude directly
-    over Stage 4's pgvector retrieval (no ToltIQ round-trip). Used to
-    A/B against the ToltIQ path on the same rooms while we decide
-    whether to migrate. Synchronous: blocks 3-8 s while Claude
-    answers, returns the full answer text + metadata."""
+    """Ad-hoc question to a Claude-enabled room. Refuses with 409 if
+    the room was built provider='toltiq' (no Claude column existed at
+    build time -- to ask Claude on it the user must rebuild with
+    'claude' or 'both'). Otherwise synchronous: blocks 3-8 s while
+    Claude answers, returns the full answer text + metadata."""
+    # Gate: ad-hoc Claude is only available when the room's build
+    # provider includes Claude. Lookup is a tiny SELECT.
+    try:
+        detail = get_room_detail(room_id, user)
+    except RoomError as e:
+        msg = str(e)
+        code = 404 if "not found" in msg.lower() else 403
+        raise HTTPException(status_code=code, detail=msg)
+    if (detail.get("provider") or "toltiq") == "toltiq":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This data room was built with ToltIQ only; Claude "
+                "ad-hoc Q&A isn't available. Rebuild the room with "
+                "'Claude' or 'Both' to use this."
+            ),
+        )
     try:
         return AskClaudeResp(**ask_room_claude(room_id, req.question, user))
     except RoomError as e:
