@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -55,11 +56,14 @@ _SYSTEM_PROMPT = (
     "If the documents don't contain enough information to answer, say "
     "so explicitly (e.g. \"The available documents don't address this "
     "question.\"); don't speculate.\n\n"
-    "When you reference a document, use the inline marker "
-    "`[doc_id=N]` where N is the document id shown in the DOCUMENTS "
-    "section. The frontend renders these as clickable links back to "
-    "the source. Multiple citations on a single claim are fine: "
-    "`[doc_id=43012][doc_id=43015]`.\n\n"
+    "Citation format: when you reference a document, use the inline "
+    "marker `[doc_id=N]` where N is the document id shown in the "
+    "DOCUMENTS section. The frontend post-processes these into compact "
+    "clickable `#N` chips that link to the source. Because the chip "
+    "itself is just `#N`, mention the document's name in your prose "
+    "when context helps the reader (e.g. \"as the IC memo notes "
+    "[doc_id=43012], the exit multiple was 3.2x\"). Multiple citations "
+    "on one claim are fine: `[doc_id=43012][doc_id=43015]`.\n\n"
     "Be precise. Quote document language when it supports the answer. "
     "Keep the response focused on the question -- don't recap context "
     "the user didn't ask about."
@@ -145,6 +149,48 @@ def _mark_answer_failed(answer_id: int, err: str) -> None:
             """,
             (err[:1000], answer_id),
         )
+
+
+# Matches the citation markers the system prompt asks the model to
+# use. Tolerates extra whitespace inside the brackets but not outside
+# (that's the model's prose around the citation). The trailing `]`
+# anchor keeps us from greedy-matching across run-on citations like
+# `[doc_id=A][doc_id=B]`.
+_DOC_ID_RE = re.compile(r"\[doc_id\s*=\s*(\d+)\s*\]")
+
+
+def _render_citations(text: str, docs: list[dict]) -> str:
+    """Post-process the model's answer text: replace every inline
+    `[doc_id=N]` marker with a compact markdown link to the doc's
+    `web_url` so the frontend's Markdown renderer turns it into a
+    clickable `#N` chip. Falls back to plain `[#N]` brackets when the
+    doc has no web_url (older docs we don't have the SharePoint deep
+    link for). Markers referencing doc_ids that aren't in the
+    retrieved set (model hallucination, rare) are normalised to
+    `[#N]` plain so the reader still sees the citation but doesn't
+    chase a bogus link.
+
+    Compact `#N` chosen over the doc name as the link label so chains
+    of citations like `[doc_id=A][doc_id=B][doc_id=C]` don't blow up
+    the line. Hover/title surfaces the name."""
+    by_id = {d["document_id"]: d for d in docs}
+
+    def sub(m: re.Match) -> str:
+        doc_id_str = m.group(1)
+        try:
+            doc_id = int(doc_id_str)
+        except ValueError:
+            return m.group(0)  # leave malformed marker alone
+        doc = by_id.get(doc_id)
+        if doc and doc.get("web_url"):
+            # `title` (the third part of [text](url "title")) surfaces
+            # on hover. Use the doc name there so the link chip stays
+            # compact but the user can preview what they're clicking.
+            name = (doc.get("name") or "").replace('"', "'")
+            return f'[#{doc_id}]({doc["web_url"]} "{name}")'
+        return f"[#{doc_id}]"
+
+    return _DOC_ID_RE.sub(sub, text)
 
 
 def _format_doc_context(docs: list[dict]) -> str:
@@ -237,6 +283,12 @@ def ask_room(
             raise ClaudeRoomError(
                 "Claude returned an empty response; check model/version"
             )
+
+        # 4b. Post-process citations. Replace [doc_id=N] markers with
+        # compact `#N` markdown links pointing at the doc's SharePoint
+        # URL (when available). Done BEFORE persisting so the stored
+        # answer is self-contained -- the FE just renders markdown.
+        answer_text = _render_citations(answer_text, docs)
 
         # 5. Persist.
         usage = response.usage
