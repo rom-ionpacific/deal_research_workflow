@@ -339,3 +339,124 @@ def ask_room(
                 "backstop _mark_answer_failed also failed for ans=%d", answer_id
             )
         raise ClaudeRoomError(str(e)) from e
+
+
+def run_preset_playlist(room_id: int, user: UserCtx) -> None:
+    """Run every preset question for `room_id` through Claude, one at
+    a time. Designed as a FastAPI BackgroundTask target: never raises
+    (errors are persisted per answer row), suitable for fire-and-forget
+    after the build route returns.
+
+    For each preset_question_id on the room that doesn't already have
+    a 'complete' or 'running' Claude answer, calls ask_room() with the
+    question text. Sequential -- no parallelism -- so we get the prompt-
+    caching benefit (the doc context for question N is the same
+    cache_control breakpoint as N-1, just embedded for a new query).
+
+    Skips silently if the room's provider doesn't include Claude or if
+    ANTHROPIC_API_KEY is unset. Marks the room status to 'complete'
+    when the playlist finishes (for claude-only rooms). For 'both'
+    rooms, status is owned by the ToltIQ cron -- we don't touch it."""
+    logger.info("claude_room playlist start room=%d", room_id)
+
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            "SELECT id, provider, status FROM dealcloud.historical_data_room "
+            "WHERE id = %s",
+            (room_id,),
+        )
+        room = cur.fetchone()
+        if not room:
+            logger.warning("claude_room playlist: room %d not found", room_id)
+            return
+        if room["provider"] not in ("claude", "both"):
+            logger.info(
+                "claude_room playlist: room %d provider=%r; nothing to do",
+                room_id, room["provider"],
+            )
+            return
+
+        cur.execute(
+            """
+            SELECT q.preset_question_id, p.question_text
+              FROM dealcloud.historical_data_room_question q
+              JOIN dealcloud.data_room_preset_question p
+                ON p.id = q.preset_question_id
+             WHERE q.historical_data_room_id = %s
+             ORDER BY q.sort_order, q.preset_question_id
+            """,
+            (room_id,),
+        )
+        plan = list(cur.fetchall())
+
+        # Skip rows that already have a 'complete' or 'running' Claude
+        # answer (idempotent resume; e.g. if the BackgroundTask died
+        # mid-run and we re-trigger it later).
+        cur.execute(
+            """
+            SELECT preset_question_id FROM dealcloud.historical_data_room_answer
+             WHERE historical_data_room_id = %s
+               AND provider = 'claude'
+               AND preset_question_id IS NOT NULL
+               AND status IN ('complete', 'running')
+            """,
+            (room_id,),
+        )
+        already = {r["preset_question_id"] for r in cur.fetchall()}
+
+    if room["provider"] == "claude" and room["status"] == "pending":
+        # Claude-only room. Take ownership of the room status so the
+        # FE's polling shows the build advancing. 'both' rooms have
+        # the cron in charge of status; we don't touch it.
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE dealcloud.historical_data_room "
+                "SET status='querying', started_at=NOW() WHERE id=%s",
+                (room_id,),
+            )
+            conn.commit()
+
+    runnable = [q for q in plan if q["preset_question_id"] not in already]
+    logger.info(
+        "claude_room playlist room=%d: %d preset(s) to run (%d already done)",
+        room_id, len(runnable), len(already),
+    )
+    for q in runnable:
+        try:
+            ask_room(
+                room_id, q["question_text"], user,
+                preset_question_id=q["preset_question_id"],
+            )
+        except Exception:
+            # ask_room marks the failed row; keep going so one bad
+            # question doesn't sink the rest of the playlist.
+            logger.exception(
+                "claude_room playlist preset failed room=%d preset=%d",
+                room_id, q["preset_question_id"],
+            )
+
+    if room["provider"] == "claude":
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE dealcloud.historical_data_room "
+                "SET status='complete', completed_at=NOW() WHERE id=%s",
+                (room_id,),
+            )
+            conn.commit()
+
+    logger.info("claude_room playlist done room=%d", room_id)
+
+
+def run_preset_playlist_safe(room_id: int, user_email: str) -> None:
+    """BackgroundTask entry point. Reconstructs UserCtx from email (we
+    can't pickle the original UserCtx across the asyncio boundary)
+    and swallows any exception so a runner crash doesn't poison the
+    BackgroundTask machinery."""
+    try:
+        user = UserCtx(email=user_email)
+        run_preset_playlist(room_id, user)
+    except Exception:
+        logger.exception("run_preset_playlist_safe crashed room=%d", room_id)

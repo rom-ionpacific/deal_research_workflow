@@ -33,6 +33,7 @@ from ..services.dataroom_setup import (
 from ..services.claude_data_room import (
     ClaudeRoomError,
     ask_room as ask_room_claude,
+    run_preset_playlist_safe as run_claude_preset_playlist_safe,
 )
 from ..services.toltiq_adhoc import (
     ToltIQNotConfigured,
@@ -67,17 +68,26 @@ class BuildDataRoomResp(BaseModel):
     created_at: datetime
 
 
-class PresetQAResp(BaseModel):
-    preset_question_id: int
-    sort_order: int | None
-    label: str
-    question_text: str
+class PresetAnswerResp(BaseModel):
+    """One answer for a preset question. Multi-provider rooms have
+    multiple entries per preset (one per provider). Pending slots
+    (answer not yet produced) carry `answer_id=None` so the FE can
+    show a per-provider 'pending' state without special-casing."""
     answer_id: int | None
+    provider: str
     answer_status: str
     answer_text: str | None
     attachments: Any | None
     answer_error: str | None
     answer_completed_at: datetime | None
+
+
+class PresetQAResp(BaseModel):
+    preset_question_id: int
+    sort_order: int | None
+    label: str
+    question_text: str
+    answers: list[PresetAnswerResp]
 
 
 class FollowupQAResp(BaseModel):
@@ -100,6 +110,7 @@ class DataRoomDetailResp(BaseModel):
     main_organization_id: int
     status: str
     toltiq_deal_id: str | None
+    provider: str = "toltiq"
     filters_applied: dict | None
     error_message: str | None
     originator: str | None
@@ -172,6 +183,18 @@ def create_preset_question_route(
     return PresetQuestionResp(**row)
 
 
+class BuildDataRoomReq(BaseModel):
+    provider: str = Field(
+        "toltiq",
+        description=(
+            "Answer pipeline: 'toltiq' (default, existing cron path), "
+            "'claude' (skip ToltIQ; Claude over pgvector retrieval), "
+            "or 'both' (parallel; useful for A/B comparing preset "
+            "answers across providers)."
+        ),
+    )
+
+
 @router.post(
     "/sessions/{session_id}/data-rooms",
     response_model=BuildDataRoomResp,
@@ -179,16 +202,29 @@ def create_preset_question_route(
 )
 def build_data_room(
     session_id: UUID,
+    background: BackgroundTasks,
+    req: BuildDataRoomReq | None = None,
     user: UserCtx = Depends(require_user),
 ) -> BuildDataRoomResp:
     """Materialise the session's selection into a dealcloud data room
-    and transition the session to data_room_view. The data-room-builder
-    cron in deal_cloud_enhancer picks up the room within ~2 minutes
-    and runs the playlist."""
+    and transition the session to data_room_view. With provider in
+    ('toltiq', 'both') the existing data-room-builder cron picks up
+    the room within ~2 minutes and runs the ToltIQ playlist. With
+    provider in ('claude', 'both') a BackgroundTask runs the Claude
+    playlist immediately; sequential preset Q calls take ~5s each so
+    a 12-question room finishes in ~60s. 'both' runs both in
+    parallel -- each preset gets two answer rows, tagged by provider."""
+    provider = (req.provider if req else "toltiq") or "toltiq"
     try:
-        built = build_data_room_from_session(session_id, user)
+        built = build_data_room_from_session(session_id, user, provider=provider)
     except BuildError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if provider in ("claude", "both"):
+        background.add_task(
+            run_claude_preset_playlist_safe,
+            built.data_room_id,
+            user.email,
+        )
     return BuildDataRoomResp(
         data_room_id=built.data_room_id,
         name=built.name,

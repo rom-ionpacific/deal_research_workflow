@@ -5,6 +5,7 @@ import {
   api,
   type DataRoomDetail,
   type FollowupQA,
+  type PresetAnswer,
   type PresetQA,
 } from "../lib/api";
 import { useChat } from "../stores/chat";
@@ -514,21 +515,34 @@ function PresetAnswersSection({
 }
 
 function PresetRow({ q, roomId }: { q: PresetQA; roomId: number }) {
-  // Default open if there's an answer; default collapsed for pending/
-  // failed so the user isn't pre-overwhelmed.
-  const [open, setOpen] = useState(q.answer_status === "complete");
+  // Aggregate status for the header row: 'complete' iff any answer
+  // has landed (gives the user something useful to click open even
+  // mid-build); 'failed' iff all are failed; otherwise 'pending'.
+  const anyComplete = q.answers.some((a) => a.answer_status === "complete");
+  const allFailed =
+    q.answers.length > 0 && q.answers.every((a) => a.answer_status === "failed");
+  const aggregateStatus = anyComplete
+    ? "complete"
+    : allFailed
+      ? "failed"
+      : "pending";
+
+  const [open, setOpen] = useState(aggregateStatus === "complete");
+  useEffect(() => {
+    if (aggregateStatus === "complete") setOpen(true);
+  }, [aggregateStatus]);
 
   const statusBadge =
-    q.answer_status === "complete" ? null : (
+    aggregateStatus === "complete" ? null : (
       <span
         className={
           "ml-2 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded " +
-          (q.answer_status === "failed"
+          (aggregateStatus === "failed"
             ? "bg-red-100 text-red-700"
             : "bg-amber-100 text-amber-700")
         }
       >
-        {q.answer_status}
+        {aggregateStatus}
       </span>
     );
 
@@ -551,30 +565,92 @@ function PresetRow({ q, roomId }: { q: PresetQA; roomId: number }) {
         <Chevron open={open} />
       </button>
       {open && (
-        <div className="px-4 pb-4 -mt-1">
-          {q.answer_status === "complete" && q.answer_text && (
-            <div className="text-sm text-slate-800">
-              <Markdown>{q.answer_text}</Markdown>
-            </div>
-          )}
-          {q.answer_status === "failed" && (
-            <div>
-              <div className="text-sm text-red-700 whitespace-pre-wrap">
-                {q.answer_error || "ToltIQ returned an error for this question."}
-              </div>
-              {q.answer_id != null && (
-                <RetryButton roomId={roomId} answerId={q.answer_id} />
-              )}
-            </div>
-          )}
-          {(q.answer_status === "pending" || q.answer_status === "running") && (
-            <div className="text-sm text-slate-500 italic">
-              Waiting for ToltIQ…
-            </div>
-          )}
-          <AttachmentsList attachments={q.attachments} />
+        <div className="px-4 pb-4 -mt-1 space-y-3">
+          {q.answers.map((a) => (
+            <PresetAnswerView
+              key={`${a.provider}:${a.answer_id ?? "pending"}`}
+              answer={a}
+              roomId={roomId}
+              singleProvider={q.answers.length === 1}
+            />
+          ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function PresetAnswerView({
+  answer,
+  roomId,
+  singleProvider,
+}: {
+  answer: PresetAnswer;
+  roomId: number;
+  singleProvider: boolean;
+}) {
+  const providerLabel =
+    answer.provider === "claude" ? "Claude" : "ToltIQ";
+  const providerColor =
+    answer.provider === "claude"
+      ? "bg-indigo-100 text-indigo-800"
+      : "bg-emerald-100 text-emerald-800";
+
+  return (
+    <div
+      className={
+        singleProvider
+          ? "" // visually identical to the prior single-answer layout
+          : "border border-slate-200 rounded-md p-3 bg-slate-50"
+      }
+    >
+      {!singleProvider && (
+        <div className="flex items-center gap-2 mb-2">
+          <span
+            className={
+              "text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded " +
+              providerColor
+            }
+          >
+            {providerLabel}
+          </span>
+          {answer.answer_status !== "complete" && (
+            <span
+              className={
+                "text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded " +
+                (answer.answer_status === "failed"
+                  ? "bg-red-100 text-red-700"
+                  : "bg-amber-100 text-amber-700")
+              }
+            >
+              {answer.answer_status}
+            </span>
+          )}
+        </div>
+      )}
+      {answer.answer_status === "complete" && answer.answer_text && (
+        <div className="text-sm text-slate-800">
+          <Markdown>{answer.answer_text}</Markdown>
+        </div>
+      )}
+      {answer.answer_status === "failed" && (
+        <div>
+          <div className="text-sm text-red-700 whitespace-pre-wrap">
+            {answer.answer_error ||
+              `${providerLabel} returned an error for this question.`}
+          </div>
+          {answer.answer_id != null && (
+            <RetryButton roomId={roomId} answerId={answer.answer_id} />
+          )}
+        </div>
+      )}
+      {(answer.answer_status === "pending" ||
+        answer.answer_status === "running") && (
+        <div className="text-sm text-slate-500 italic">
+          Waiting for {providerLabel}…
+        </div>
+      )}
+      <AttachmentsList attachments={answer.attachments} />
     </div>
   );
 }
@@ -674,11 +750,14 @@ function RetryButton({
           if (!old) return old;
           return {
             ...old,
-            preset_questions: old.preset_questions.map((p) =>
-              p.answer_id === answerId
-                ? { ...p, answer_status: "running", answer_error: null }
-                : p,
-            ),
+            preset_questions: old.preset_questions.map((p) => ({
+              ...p,
+              answers: p.answers.map((a) =>
+                a.answer_id === answerId
+                  ? { ...a, answer_status: "running", answer_error: null }
+                  : a,
+              ),
+            })),
             followup_questions: old.followup_questions.map((f) =>
               f.answer_id === answerId
                 ? {

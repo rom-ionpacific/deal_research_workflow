@@ -57,7 +57,8 @@ def get_room_detail(room_id: int, user: UserCtx) -> dict:
             """
             SELECT id, name, main_organization_id, status, toltiq_deal_id,
                    filters_applied, error_message, created_by, originator,
-                   created_at, started_at, completed_at
+                   created_at, started_at, completed_at,
+                   COALESCE(provider, 'toltiq') AS provider
               FROM dealcloud.historical_data_room
              WHERE id = %s
             """,
@@ -84,9 +85,11 @@ def get_room_detail(room_id: int, user: UserCtx) -> dict:
         )
         entity_progress = {r["status"]: int(r["n"]) for r in cur.fetchall()}
 
-        # Preset Q&A. Question rows -> answer rows by (room, preset_id).
-        # LEFT JOIN so questions without an answer row yet still render
-        # with status='pending'.
+        # Preset Q&A. With multi-provider rooms each preset can have
+        # 0..2 answer rows (one per provider). LEFT JOIN returns one
+        # row per (preset, answer) and we group provider-side in
+        # Python so the response is one entry per preset_question_id
+        # with an answers[] list inside.
         cur.execute(
             """
             SELECT q.preset_question_id   AS preset_question_id,
@@ -94,6 +97,7 @@ def get_room_detail(room_id: int, user: UserCtx) -> dict:
                    p.label                AS label,
                    p.question_text        AS question_text,
                    a.id                   AS answer_id,
+                   a.provider             AS provider,
                    COALESCE(a.status, 'pending') AS answer_status,
                    a.answer_text          AS answer_text,
                    a.attachments          AS attachments,
@@ -106,11 +110,11 @@ def get_room_detail(room_id: int, user: UserCtx) -> dict:
                 ON a.historical_data_room_id = q.historical_data_room_id
                AND a.preset_question_id = q.preset_question_id
              WHERE q.historical_data_room_id = %s
-             ORDER BY q.sort_order, q.preset_question_id
+             ORDER BY q.sort_order, q.preset_question_id, a.provider
             """,
             (room_id,),
         )
-        questions = [_row_to_question_answer(r) for r in cur.fetchall()]
+        questions = _group_preset_answers(cur.fetchall(), room["provider"])
 
         # Ad-hoc questions (preset_question_id IS NULL) appear after
         # presets, ordered by created_at. These are answers to user
@@ -134,6 +138,7 @@ def get_room_detail(room_id: int, user: UserCtx) -> dict:
         "main_organization_id": int(room["main_organization_id"]),
         "status": room["status"],
         "toltiq_deal_id": room["toltiq_deal_id"],
+        "provider": room["provider"],
         "filters_applied": room["filters_applied"]
             if isinstance(room["filters_applied"], dict)
             else (json.loads(room["filters_applied"])
@@ -149,22 +154,73 @@ def get_room_detail(room_id: int, user: UserCtx) -> dict:
     }
 
 
-def _row_to_question_answer(row: dict) -> dict:
-    attachments = row.get("attachments")
-    if isinstance(attachments, str):
-        attachments = json.loads(attachments)
-    return {
-        "preset_question_id": int(row["preset_question_id"]),
-        "sort_order": int(row["sort_order"]) if row["sort_order"] is not None else None,
-        "label": row["label"],
-        "question_text": row["question_text"],
-        "answer_id": int(row["answer_id"]) if row["answer_id"] else None,
-        "answer_status": row["answer_status"],
-        "answer_text": row["answer_text"],
-        "attachments": attachments,
-        "answer_error": row["answer_error"],
-        "answer_completed_at": row["answer_completed_at"],
-    }
+def _group_preset_answers(rows: list[dict], room_provider: str) -> list[dict]:
+    """Walk the JOIN result and emit one entry per preset_question_id
+    with an answers[] list of per-provider answers. For single-provider
+    rooms (the common case) answers[] has 0 or 1 entries; for
+    provider='both' it has up to 2.
+
+    Always populates answers[] with a placeholder 'pending' entry per
+    expected provider when no row exists yet, so the FE can render
+    columns/rows uniformly without special-casing missing data."""
+    expected_providers: list[str]
+    if room_provider == "both":
+        expected_providers = ["toltiq", "claude"]
+    else:
+        expected_providers = [room_provider or "toltiq"]
+
+    by_preset: dict[int, dict] = {}
+    for r in rows:
+        preset_id = int(r["preset_question_id"])
+        entry = by_preset.setdefault(preset_id, {
+            "preset_question_id": preset_id,
+            "sort_order": (
+                int(r["sort_order"]) if r["sort_order"] is not None else None
+            ),
+            "label": r["label"],
+            "question_text": r["question_text"],
+            "answers": [],
+        })
+        # If the LEFT JOIN produced no answer row, answer_id is NULL
+        # and provider is NULL too. Skip the empty slot; we backfill
+        # placeholders below.
+        if r["answer_id"] is None:
+            continue
+        attachments = r.get("attachments")
+        if isinstance(attachments, str):
+            attachments = json.loads(attachments)
+        entry["answers"].append({
+            "answer_id": int(r["answer_id"]),
+            "provider": r["provider"] or "toltiq",
+            "answer_status": r["answer_status"],
+            "answer_text": r["answer_text"],
+            "attachments": attachments,
+            "answer_error": r["answer_error"],
+            "answer_completed_at": r["answer_completed_at"],
+        })
+
+    # Inject pending placeholders for providers we expect but haven't
+    # seen yet (room just built; cron / BackgroundTask hasn't run).
+    for entry in by_preset.values():
+        seen = {a["provider"] for a in entry["answers"]}
+        for prov in expected_providers:
+            if prov not in seen:
+                entry["answers"].append({
+                    "answer_id": None,
+                    "provider": prov,
+                    "answer_status": "pending",
+                    "answer_text": None,
+                    "attachments": None,
+                    "answer_error": None,
+                    "answer_completed_at": None,
+                })
+        # Stable order: toltiq before claude.
+        entry["answers"].sort(key=lambda a: 0 if a["provider"] == "toltiq" else 1)
+
+    return sorted(
+        by_preset.values(),
+        key=lambda e: (e["sort_order"] is None, e["sort_order"] or 0, e["preset_question_id"]),
+    )
 
 
 def _row_to_followup(row: dict) -> dict:

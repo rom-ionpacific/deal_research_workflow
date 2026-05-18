@@ -169,12 +169,31 @@ class BuildError(Exception):
     chat tool returns the message to the model so it can recover."""
 
 
+VALID_PROVIDERS = ("toltiq", "claude", "both")
+
+
 def build_data_room_from_session(
-    session_id: UUID, user: UserCtx
+    session_id: UUID,
+    user: UserCtx,
+    provider: str = "toltiq",
 ) -> BuiltDataRoom:
     """Materialise the session's selection into a dealcloud data room
     and transition the session to data_room_view phase. Single
-    transaction; rolls back on any insert failure."""
+    transaction; rolls back on any insert failure.
+
+    `provider` controls which answering pipeline(s) will run:
+      * 'toltiq' (default) -- existing ToltIQ-only build via the
+        data-room-builder cron.
+      * 'claude'           -- skip ToltIQ entirely; answers come from
+        Claude via the BackgroundTask runner.
+      * 'both'             -- both providers answer each preset
+        question. Cron runs ToltIQ; BackgroundTask runs Claude in
+        parallel. Each preset gets two answer rows tagged by provider.
+    """
+    if provider not in VALID_PROVIDERS:
+        raise BuildError(
+            f"provider must be one of {VALID_PROVIDERS!r}, got {provider!r}"
+        )
     new_version_id = uuid4()
 
     with get_conn() as conn:
@@ -251,11 +270,14 @@ def build_data_room_from_session(
             """
             INSERT INTO dealcloud.historical_data_room
                 (name, main_organization_id, status, originator,
-                 created_by, filters_applied)
-            VALUES (%s, %s, 'pending', %s, 'deal_research_workflow', %s)
+                 created_by, filters_applied, provider)
+            VALUES (%s, %s, 'pending', %s, 'deal_research_workflow', %s, %s)
             RETURNING id
             """,
-            (room_name, org_ids[0], user.email, json.dumps(filters_applied)),
+            (
+                room_name, org_ids[0], user.email,
+                json.dumps(filters_applied), provider,
+            ),
         )
         room_id = int(cur.fetchone()["id"])
 

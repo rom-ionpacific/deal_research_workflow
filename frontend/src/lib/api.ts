@@ -223,17 +223,22 @@ export interface BuildDataRoomResp {
   created_at: string;
 }
 
-export interface PresetQA {
-  preset_question_id: number;
-  sort_order: number | null;
-  label: string;
-  question_text: string;
+export interface PresetAnswer {
   answer_id: number | null;
+  provider: "toltiq" | "claude";
   answer_status: string;
   answer_text: string | null;
   attachments: unknown;
   answer_error: string | null;
   answer_completed_at: string | null;
+}
+
+export interface PresetQA {
+  preset_question_id: number;
+  sort_order: number | null;
+  label: string;
+  question_text: string;
+  answers: PresetAnswer[];
 }
 
 export interface FollowupQA {
@@ -256,6 +261,8 @@ export interface DataRoomDetail {
   main_organization_id: number;
   status: string;
   toltiq_deal_id: string | null;
+  // 'toltiq' (default + back-compat) | 'claude' | 'both'
+  provider: "toltiq" | "claude" | "both";
   filters_applied: Record<string, unknown> | null;
   error_message: string | null;
   originator: string | null;
@@ -423,10 +430,16 @@ export const api = {
       body: JSON.stringify({ label, question_text }),
     }),
 
-  buildDataRoom: (sessionId: string) =>
+  buildDataRoom: (
+    sessionId: string,
+    body?: { provider?: "toltiq" | "claude" | "both" },
+  ) =>
     request<BuildDataRoomResp>(
       `/api/v1/sessions/${sessionId}/data-rooms`,
-      { method: "POST" },
+      {
+        method: "POST",
+        body: JSON.stringify(body ?? { provider: "toltiq" }),
+      },
     ),
 
   // Phase 4 view: status + entity progress + preset Q&A + followups.

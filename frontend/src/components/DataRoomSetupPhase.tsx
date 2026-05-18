@@ -382,12 +382,18 @@ export default function DataRoomSetupPhase({
   // ---- Build / back -------------------------------------------------------
   const [building, setBuilding] = useState(false);
   const [buildError, setBuildError] = useState<string | null>(null);
+  // Build provider selection. Defaults to ToltIQ (current production
+  // path); Claude / Both are A/B-test options that route through the
+  // pgvector retrieval layer.
+  const [buildProvider, setBuildProvider] = useState<
+    "toltiq" | "claude" | "both"
+  >("toltiq");
 
   const onBuild = async () => {
     setBuilding(true);
     setBuildError(null);
     try {
-      const resp = await api.buildDataRoom(sessionId);
+      const resp = await api.buildDataRoom(sessionId, { provider: buildProvider });
       await qc.invalidateQueries({ queryKey: ["session", sessionId] });
       console.info("Built data room:", resp);
     } catch (err) {
@@ -530,22 +536,77 @@ export default function DataRoomSetupPhase({
       )}
 
       {/* Build button: centered, prominent, immediately after the
-          question plan. Replaces the old bottom-nav Advance button --
-          the top-of-page nav handles Back. */}
+          question plan. Above it: small provider toggle for the A/B
+          experiment. Defaults to ToltIQ (the established path);
+          Claude is the fast pgvector-only path; Both runs them in
+          parallel so each preset gets one answer per provider. */}
       <div className="flex flex-col items-center mt-8 mb-2">
+        <BuildProviderToggle
+          mode={buildProvider}
+          onChange={setBuildProvider}
+          disabled={building}
+        />
         <button
           type="button"
           onClick={onBuild}
           disabled={building || totalEntities === 0}
-          className="px-6 py-2.5 bg-slate-900 text-white text-sm font-medium rounded-md disabled:opacity-40 hover:bg-slate-800"
+          className="mt-3 px-6 py-2.5 bg-slate-900 text-white text-sm font-medium rounded-md disabled:opacity-40 hover:bg-slate-800"
         >
           {building ? "Building..." : "Build data room"}
         </button>
         <div className="mt-2 text-xs text-slate-500 text-center max-w-md">
           {totalEntities === 0
             ? "Go back to Entity select and pick at least one entity before building."
-            : `Builds with ${totalEntities.toLocaleString()} entities and ${selectedQuestions.length} questions. ToltIQ runs the playlist asynchronously (~10–15 min).`}
+            : buildProvider === "toltiq"
+              ? `Builds with ${totalEntities.toLocaleString()} entities and ${selectedQuestions.length} questions. ToltIQ runs the playlist asynchronously (~10–15 min).`
+              : buildProvider === "claude"
+                ? `Claude answers each of the ${selectedQuestions.length} questions over our pgvector retrieval — no ToltIQ ingest. Done in ~1–2 min.`
+                : `Both providers answer each of the ${selectedQuestions.length} questions in parallel. ToltIQ ~10–15 min; Claude finishes in ~1–2 min and you'll see its column populate first.`}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function BuildProviderToggle({
+  mode,
+  onChange,
+  disabled,
+}: {
+  mode: "toltiq" | "claude" | "both";
+  onChange: (m: "toltiq" | "claude" | "both") => void;
+  disabled?: boolean;
+}) {
+  const modes: Array<{
+    k: "toltiq" | "claude" | "both";
+    label: string;
+  }> = [
+    { k: "toltiq", label: "ToltIQ" },
+    { k: "claude", label: "Claude" },
+    { k: "both", label: "Both" },
+  ];
+  return (
+    <div className="inline-flex items-center gap-2 text-xs">
+      <span className="text-slate-500">Answer with:</span>
+      <div className="inline-flex rounded-md border border-slate-300 overflow-hidden">
+        {modes.map((m, i) => (
+          <button
+            key={m.k}
+            type="button"
+            onClick={() => onChange(m.k)}
+            disabled={disabled}
+            className={
+              "px-2.5 py-1 transition-colors " +
+              (mode === m.k
+                ? "bg-slate-900 text-white"
+                : "bg-white hover:bg-slate-50 text-slate-700") +
+              (i > 0 ? " border-l border-slate-300" : "") +
+              " disabled:opacity-50"
+            }
+          >
+            {m.label}
+          </button>
+        ))}
       </div>
     </div>
   );
