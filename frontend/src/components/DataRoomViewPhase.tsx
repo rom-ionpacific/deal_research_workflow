@@ -104,6 +104,17 @@ export default function DataRoomViewPhase({
 
   const isBuilding = !TERMINAL_STATUSES.has(room.data.status);
   const isFailed = room.data.status === "failed";
+  // When the user adds the OTHER provider to an existing room (or
+  // when a fresh 'both' build has progressed far enough that Claude
+  // answers have started landing), there's already content worth
+  // showing. Detect that by looking for ANY complete answer; if
+  // we find one, switch from the full-page BuildingSpinner to a
+  // small inline indicator and keep the preset Q&A + chat box live.
+  const hasAnyCompleteAnswer = room.data.preset_questions.some((q) =>
+    q.answers.some((a) => a.answer_status === "complete"),
+  );
+  const showInlineBuild = isBuilding && hasAnyCompleteAnswer;
+  const showFullSpinner = isBuilding && !hasAnyCompleteAnswer;
 
   return (
     <div>
@@ -130,7 +141,9 @@ export default function DataRoomViewPhase({
         )}
       </p>
 
-      {isBuilding ? (
+      {showInlineBuild && <InlineBuildIndicator room={room.data} />}
+
+      {showFullSpinner ? (
         <BuildingSpinner room={room.data} />
       ) : isFailed ? (
         <BuildFailedNotice room={room.data} />
@@ -157,6 +170,7 @@ export default function DataRoomViewPhase({
           <DirectToltIQChat
             roomId={room.data.id}
             provider={room.data.provider}
+            roomStatus={room.data.status}
             followups={room.data.followup_questions}
           />
         </>
@@ -178,10 +192,12 @@ export default function DataRoomViewPhase({
 function DirectToltIQChat({
   roomId,
   provider,
+  roomStatus,
   followups,
 }: {
   roomId: number;
   provider: "toltiq" | "claude" | "both";
+  roomStatus: string;
   followups: FollowupQA[];
 }) {
   const qc = useQueryClient();
@@ -193,6 +209,12 @@ function DirectToltIQChat({
   // ToltIQ deal. 'both' rooms expose both buttons.
   const showToltiq = provider === "toltiq" || provider === "both";
   const showClaude = provider === "claude" || provider === "both";
+  // ToltIQ's ad-hoc /ask requires the room to be 'complete' (deal_id
+  // populated + entities ingested). Claude works regardless of room
+  // status since it queries our pgvector retrieval directly. Disable
+  // the ToltIQ button while the ToltIQ pipeline is still running so
+  // the user doesn't burn a click on a guaranteed 409.
+  const toltiqReady = roomStatus === "complete";
 
   const submitToltiq = async () => {
     const text = draft.trim();
@@ -374,10 +396,19 @@ function DirectToltIQChat({
             {showToltiq && (
               <button
                 type="submit"
-                disabled={submitting || !draft.trim()}
+                disabled={submitting || !draft.trim() || !toltiqReady}
+                title={
+                  toltiqReady
+                    ? undefined
+                    : "ToltIQ side is still building; ask Claude or wait."
+                }
                 className="px-3 py-1.5 bg-slate-900 text-white text-sm rounded-md disabled:opacity-50"
               >
-                {submitting ? "Sending..." : "Ask ToltIQ"}
+                {submitting
+                  ? "Sending..."
+                  : toltiqReady
+                    ? "Ask ToltIQ"
+                    : "ToltIQ building…"}
               </button>
             )}
           </div>
@@ -389,6 +420,55 @@ function DirectToltIQChat({
         )}
       </form>
     </section>
+  );
+}
+
+function InlineBuildIndicator({ room }: { room: DataRoomDetail }) {
+  // Used when the room has SOME complete answers (typically the
+  // already-built provider's column) and the OTHER provider's build
+  // is still running. Compact banner at the top of the content area;
+  // leaves the preset Q&A and chat box live underneath.
+  const status = room.status;
+  const label = PROGRESS_LABELS[status] ?? status;
+  const ent = room.entity_progress;
+  const total = Object.values(ent).reduce((a, b) => a + b, 0);
+  const uploaded = ent.uploaded ?? 0;
+  // Status drives the ToltIQ pipeline today; if it's non-terminal we
+  // know ToltIQ is the side that's still building (claude finishes
+  // before status flips). Phrase the message accordingly.
+  return (
+    <div className="mt-3 mb-2 flex items-center gap-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded-md">
+      <SmallSpinner />
+      <div className="flex-1 text-xs text-amber-900">
+        <span className="font-medium">Building ToltIQ side: {label}.</span>
+        {total > 0 && status === "uploading" && (
+          <>
+            {" "}
+            Entities uploaded: {uploaded.toLocaleString()} /{" "}
+            {total.toLocaleString()}.
+          </>
+        )}
+        {" "}
+        You can keep querying the existing answers below in the meantime.
+      </div>
+    </div>
+  );
+}
+
+function SmallSpinner() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      className="text-amber-700 animate-spin shrink-0"
+    >
+      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+    </svg>
   );
 }
 
