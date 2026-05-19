@@ -15,5 +15,7 @@ Boundary:
 """
 from .tool_registry import Tool, ToolRegistry, ToolResult
 from .loop import run_chat_turn
+from .web_tools import register_web_tools
 
-__all__ = ["Tool", "ToolRegistry", "ToolResult", "run_chat_turn"]
+__all__ = ["Tool", "ToolRegistry", "ToolResult", "run_chat_turn",
+           "register_web_tools"]

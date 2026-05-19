@@ -56,6 +56,13 @@ interface ChatState {
   // and forwards to the orchestrator. Keyed by sessionId so multiple
   // tabs with different sessions don't trample each other.
   uiContexts: Record<string, Record<string, unknown> | null>;
+  // Sticky per-session toggle for external web sources. Off by default
+  // (privacy-safe). ChatPanel renders a segmented button; flipping it
+  // sets this value, which then rides on the next turn's request body.
+  // Not persisted across reloads in v1 -- session-bound is the right
+  // granularity for now since each research session has its own
+  // intent.
+  webSearchEnabled: Record<string, boolean>;
 
   setDraft: (sessionId: string, value: string) => void;
   startTurn: (sessionId: string) => void;
@@ -69,6 +76,7 @@ interface ChatState {
     sessionId: string,
     ctx: Record<string, unknown> | null,
   ) => void;
+  setWebSearchEnabled: (sessionId: string, enabled: boolean) => void;
 }
 
 const blankTurn = (): InFlightTurn => ({
@@ -82,6 +90,7 @@ export const useChat = create<ChatState>((set, get) => ({
   inFlight: {},
   streaming: {},
   uiContexts: {},
+  webSearchEnabled: {},
 
   setDraft: (sessionId, value) =>
     set((s) => ({ drafts: { ...s.drafts, [sessionId]: value } })),
@@ -120,5 +129,10 @@ export const useChat = create<ChatState>((set, get) => ({
   setUIContext: (sessionId, ctx) =>
     set((s) => ({
       uiContexts: { ...s.uiContexts, [sessionId]: ctx },
+    })),
+
+  setWebSearchEnabled: (sessionId, enabled) =>
+    set((s) => ({
+      webSearchEnabled: { ...s.webSearchEnabled, [sessionId]: enabled },
     })),
 }));

@@ -60,6 +60,16 @@ class ChatRequest(BaseModel):
             "without us inventing a tool for it. Not persisted."
         ),
     )
+    web_search_enabled: bool = Field(
+        default=False,
+        description=(
+            "Per-message opt-in for external web sources via Gemini "
+            "with Google Search grounding. When false (default), the "
+            "model only sees internal tools -- no leaks to external "
+            "providers. Frontend persists the last choice in session "
+            "state so it sticks until the user flips it off."
+        ),
+    )
 
 
 @router.post("/sessions/{session_id}/chat")
@@ -78,6 +88,7 @@ async def chat(
         user=user,
         parent_id=req.parent_id,
         ui_context=req.ui_context,
+        web_search_enabled=req.web_search_enabled,
     )
     return StreamingResponse(
         stream_chat_turn(turn),

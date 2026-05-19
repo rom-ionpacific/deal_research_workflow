@@ -8,3 +8,4 @@ anthropic>=0.42
 sse-starlette>=2.1
 python-multipart>=0.0.12
 slack-sdk>=3.31
+google-genai>=0.3

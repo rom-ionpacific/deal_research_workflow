@@ -50,6 +50,10 @@ export default function ChatPanel({
   const inFlight = useChat((s) => s.inFlight[sessionId] ?? null);
   const streaming = useChat((s) => s.streaming[sessionId] ?? false);
   const uiContext = useChat((s) => s.uiContexts[sessionId] ?? null);
+  const webSearchEnabled = useChat(
+    (s) => s.webSearchEnabled[sessionId] ?? false,
+  );
+  const setWebSearchEnabled = useChat((s) => s.setWebSearchEnabled);
   const startTurn = useChat((s) => s.startTurn);
   const endTurn = useChat((s) => s.endTurn);
   const resetTurn = useChat((s) => s.resetTurn);
@@ -87,6 +91,7 @@ export default function ChatPanel({
         message: text,
         parentId: parentVersionId,
         uiContext: ctxToSend,
+        webSearchEnabled,
         onEvent: (ev) => {
           switch (ev.type) {
             case "turn_start":
@@ -219,6 +224,46 @@ export default function ChatPanel({
         }}
         className="p-3 border-t border-slate-200 bg-white"
       >
+        <div
+          role="radiogroup"
+          aria-label="Source mode"
+          className="mb-2 inline-flex rounded-md border border-slate-300 overflow-hidden text-xs"
+        >
+          <button
+            type="button"
+            role="radio"
+            aria-checked={!webSearchEnabled}
+            onClick={() => setWebSearchEnabled(sessionId, false)}
+            disabled={streaming}
+            className={
+              "px-2 py-1 " +
+              (!webSearchEnabled
+                ? "bg-slate-900 text-white"
+                : "bg-white text-slate-600 hover:bg-slate-50") +
+              " disabled:opacity-50"
+            }
+            title="Answer only from internal data (data room, dossier, DB)."
+          >
+            📁 Data room only
+          </button>
+          <button
+            type="button"
+            role="radio"
+            aria-checked={webSearchEnabled}
+            onClick={() => setWebSearchEnabled(sessionId, true)}
+            disabled={streaming}
+            className={
+              "px-2 py-1 border-l border-slate-300 " +
+              (webSearchEnabled
+                ? "bg-slate-900 text-white"
+                : "bg-white text-slate-600 hover:bg-slate-50") +
+              " disabled:opacity-50"
+            }
+            title="Allow the assistant to call out to a web search (Gemini, with citations) when the data room doesn't have the answer."
+          >
+            🌐 + Web
+          </button>
+        </div>
         <div className="flex gap-2">
           <input
             type="text"

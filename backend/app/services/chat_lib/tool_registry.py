@@ -143,3 +143,12 @@ class ToolRegistry:
 
     def __iter__(self):
         return iter(self._tools.values())
+
+    def clone(self) -> "ToolRegistry":
+        """Shallow copy: new registry, same Tool references. Used by the
+        orchestrator to assemble per-turn variants of a phase registry
+        (e.g. add the `web_search` tool when the user toggle is on)
+        without mutating the cached module-level base."""
+        out = ToolRegistry()
+        out._tools = dict(self._tools)
+        return out

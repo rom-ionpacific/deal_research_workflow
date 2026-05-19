@@ -527,6 +527,11 @@ export interface ChatStreamRequest {
   // to the orchestrator and rendered as a system block. Skip for
   // phases that don't have a useful snapshot.
   uiContext?: Record<string, unknown> | null;
+  // Per-message toggle: when true, the orchestrator registers the
+  // `web_search` tool (Gemini-grounded) for this turn. Default false
+  // (data-room-only). Frontend keeps the last choice sticky in the
+  // chat store so flipping it sticks until the user flips back.
+  webSearchEnabled?: boolean;
   onEvent: (ev: ChatEvent) => void;
 }
 
@@ -545,6 +550,7 @@ export async function streamChat(req: ChatStreamRequest): Promise<void> {
       message: req.message,
       parent_id: req.parentId,
       ui_context: req.uiContext ?? null,
+      web_search_enabled: req.webSearchEnabled ?? false,
     }),
     signal: req.signal,
   });

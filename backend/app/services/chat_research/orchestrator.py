@@ -38,7 +38,7 @@ from anthropic import AsyncAnthropic
 from ...auth import UserCtx
 from ...config import settings
 from ...db import get_conn
-from ..chat_lib import run_chat_turn
+from ..chat_lib import register_web_tools, run_chat_turn
 from .tools import registry_for_phase
 
 logger = logging.getLogger(__name__)
@@ -81,6 +81,32 @@ CITATION_RULES = (
     "  by name + id only (e.g. \"the thread `Re: closing memo` (#7821)\").\n"
     "- If the URL field is null/empty for a row, fall back to the plain "
     "  name + id citation. Don't invent URLs.\n"
+)
+
+
+# Appended to the system prompt when the user has toggled web search ON
+# for this turn. Kept as a separate trailing block so it doesn't disturb
+# the cached phase prompt above (prompt caching wants the cached prefix
+# to stay byte-stable across turns).
+_WEB_SEARCH_GUIDE = (
+    "## External web search: ENABLED\n"
+    "The user has toggled external sources on for this turn. A "
+    "`web_search` tool is available alongside the usual internal tools. "
+    "Rules:\n"
+    "- ALWAYS try the internal tools first. Only call `web_search` when "
+    "  the data room / dossier / database genuinely doesn't answer the "
+    "  question (e.g. recent news, public market data, regulatory "
+    "  filings, third-party commentary).\n"
+    "- Hard limit: at most 3 `web_search` calls per turn. If you need "
+    "  more, the question probably belongs offline.\n"
+    "- For every claim you take from a web result, cite the source URL "
+    "  inline as a markdown link `[title](url)` (the source list is in "
+    "  the tool's `sources` field). Mention explicitly that it came "
+    "  from a web search so the user can distinguish external from "
+    "  internal claims.\n"
+    "- Don't blend internal and external claims into one undifferentiated "
+    "  paragraph. Either separate them, or attach a citation to each "
+    "  sentence.\n"
 )
 
 
@@ -344,6 +370,12 @@ class TurnRequest:
     # which look like financial institutions?" without us inventing a
     # tool for it. Not persisted to chat history.
     ui_context: dict | None = None
+    # Per-message toggle for external web search (Gemini-grounded). When
+    # False (the default), the `web_search` tool isn't even visible to
+    # the model -- the privacy posture is internal-only by default. The
+    # frontend persists the last choice in session state so it's sticky
+    # within a session.
+    web_search_enabled: bool = False
 
 
 # ---- SSE event helpers -----------------------------------------------------
@@ -522,10 +554,18 @@ async def stream_chat_turn(req: TurnRequest) -> AsyncIterator[str]:
         return
 
     try:
-        registry = registry_for_phase(req.phase)
+        base_registry = registry_for_phase(req.phase)
     except ValueError as e:
         yield _sse_format("error", {"message": str(e)})
         return
+
+    # Clone the cached phase registry so we can extend it per turn
+    # without mutating the module-level base. When the user has enabled
+    # external sources via the toggle, register the web_search tool;
+    # otherwise the tool isn't visible to the model at all.
+    registry = base_registry.clone()
+    if req.web_search_enabled:
+        register_web_tools(registry)
 
     system = SYSTEM_PROMPTS.get(req.phase)
     if system is None:
@@ -594,6 +634,11 @@ async def stream_chat_turn(req: TurnRequest) -> AsyncIterator[str]:
     ui_text = _format_ui_context(req.phase, req.ui_context)
     if ui_text:
         system_blocks.append({"type": "text", "text": ui_text})
+
+    # External-sources block. Same caching trade-off as ui_text: per-turn,
+    # not worth caching. Only appended when the user toggle is on.
+    if req.web_search_enabled:
+        system_blocks.append({"type": "text", "text": _WEB_SEARCH_GUIDE})
 
     client = AsyncAnthropic(api_key=settings.anthropic_api_key)
 

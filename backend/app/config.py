@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     # leg) so local dev without a key still functions.
     openai_api_key: str = ""
 
+    # Gemini -- powers the opt-in `web_search` tool in chat (Google Search
+    # grounding). Empty value forces the tool to return a friendly
+    # "not configured" message rather than 500ing.
+    gemini_api_key: str = ""
+
     @property
     def origin_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
