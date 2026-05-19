@@ -140,6 +140,16 @@ export default function DataRoomViewPhase({
             roomId={room.data.id}
             presets={room.data.preset_questions}
           />
+          {/* Add-the-other-provider call-to-action. Only shown when
+              the room is single-provider so users can backfill the
+              other side without rebuilding from scratch. */}
+          {(room.data.provider === "toltiq" ||
+            room.data.provider === "claude") && (
+            <AddProviderBanner
+              roomId={room.data.id}
+              currentProvider={room.data.provider}
+            />
+          )}
           {/* Direct ToltIQ chat: posts straight to the deal. The
               followups list (the "chat history") is rendered inside
               this section so it reads like a conversation rather than
@@ -502,6 +512,94 @@ function BuildFailedNotice({ room }: { room: DataRoomDetail }) {
       {error && (
         <div className="mt-2 text-xs text-red-700">
           Retry request failed: {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AddProviderBanner({
+  roomId,
+  currentProvider,
+}: {
+  roomId: number;
+  currentProvider: "toltiq" | "claude";
+}) {
+  const qc = useQueryClient();
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const adding = currentProvider === "toltiq" ? "claude" : "toltiq";
+  const addingLabel = adding === "claude" ? "Claude" : "ToltIQ";
+  const currentLabel = currentProvider === "claude" ? "Claude" : "ToltIQ";
+
+  const onClick = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.addDataRoomProvider(roomId, adding);
+      // Optimistic flip: room.provider becomes 'both' so the
+      // PresetAnswersSection injects pending placeholders for the
+      // new provider's column, and the chat box's button-gate
+      // unhides the now-available Ask button. Polling takes over
+      // from here -- ToltIQ-add resets status to 'pending' so the
+      // BuildingSpinner replaces this section until the cron
+      // finishes; Claude-add stays on 'complete' status and the
+      // BackgroundTask fills in the new answer rows row-by-row.
+      qc.setQueryData<DataRoomDetail | undefined>(
+        ["data-room", roomId],
+        (old) => {
+          if (!old) return old;
+          return {
+            ...old,
+            provider: "both",
+            // For ToltIQ-add the server reset status to pending;
+            // for Claude-add we keep the existing status.
+            status: adding === "toltiq" ? "pending" : old.status,
+          };
+        },
+      );
+      void qc.invalidateQueries({ queryKey: ["data-room", roomId] });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 border border-violet-200 bg-violet-50/50 rounded-md px-4 py-3">
+      <div className="flex items-start gap-3">
+        <div className="flex-1 text-sm text-slate-700">
+          <span className="font-medium">
+            Built with {currentLabel} only.
+          </span>{" "}
+          {adding === "claude" ? (
+            <>
+              Add {addingLabel} answers (~1–2 min) to get side-by-side
+              answers for the same preset questions. Existing
+              {" "}{currentLabel} answers stay intact.
+            </>
+          ) : (
+            <>
+              Add {addingLabel} answers (~10–15 min). The cron will
+              upload the room's entities to ToltIQ and run the preset
+              playlist. Existing {currentLabel} answers stay intact.
+            </>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onClick}
+          disabled={submitting}
+          className="shrink-0 px-3 py-1.5 bg-violet-700 text-white text-sm rounded-md hover:bg-violet-800 disabled:opacity-50"
+        >
+          {submitting ? "Starting…" : `+ Add ${addingLabel}`}
+        </button>
+      </div>
+      {error && (
+        <div className="mt-2 text-xs text-red-600">
+          Couldn't add {addingLabel}: {error}
         </div>
       )}
     </div>

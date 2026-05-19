@@ -15,7 +15,7 @@ phase3_registry / phase4_registry).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
@@ -408,6 +408,122 @@ def ask_data_room_claude(
         raise HTTPException(status_code=code, detail=msg)
     except ClaudeRoomError as e:
         raise HTTPException(status_code=503, detail=str(e))
+
+
+class AddProviderReq(BaseModel):
+    provider: Literal["toltiq", "claude"] = Field(
+        ...,
+        description=(
+            "The provider to ADD to an existing room. Must not be one "
+            "the room already has."
+        ),
+    )
+
+
+class AddProviderResp(BaseModel):
+    room_id: int
+    provider: str  # 'both' after the operation
+    status: str   # the room's status post-op (may have been reset)
+
+
+@router.post(
+    "/data-rooms/{room_id}/add-provider",
+    response_model=AddProviderResp,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def add_room_provider(
+    room_id: int,
+    req: AddProviderReq,
+    background: BackgroundTasks,
+    user: UserCtx = Depends(require_user),
+) -> AddProviderResp:
+    """Augment an existing data room with the OTHER provider's answers.
+
+    For toltiq-only rooms: adds Claude. Spawns a BackgroundTask that
+    runs the Claude playlist over the room's existing question plan;
+    Claude answer rows land alongside the ToltIQ ones with
+    provider='claude'. Room status is unaffected (ToltIQ owns it).
+
+    For claude-only rooms: adds ToltIQ. Resets status to 'pending'
+    and clears started_at/completed_at/error_message so the
+    data-room-builder cron picks the room up within ~2 min and runs
+    the full upload + extract + playlist pipeline. Entities are
+    already in 'pending' state from the original build (the cron
+    skipped the room while it was provider='claude'). Existing Claude
+    answers stay intact -- the cron's recovery DELETE was scoped to
+    provider='toltiq' so it can never touch them.
+
+    Both transitions flip the room's provider column to 'both'
+    atomically. Refuses 409 if the room is already 'both' or the
+    requested provider matches the one already on the room."""
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT id, status, originator,
+                   COALESCE(provider, 'toltiq') AS provider
+              FROM dealcloud.historical_data_room
+             WHERE id = %s
+            """,
+            (room_id,),
+        )
+        room = cur.fetchone()
+        if not room:
+            raise HTTPException(status_code=404, detail="Data room not found")
+        if (room.get("originator") or "") != user.email:
+            raise HTTPException(status_code=403, detail="Not your data room")
+
+        current = room["provider"]
+        if current == "both":
+            raise HTTPException(
+                status_code=409,
+                detail="This room already has both providers.",
+            )
+        if current == req.provider:
+            raise HTTPException(
+                status_code=409,
+                detail=f"This room already has {req.provider}.",
+            )
+
+        # Atomically flip provider; for the ToltIQ-add path also reset
+        # status so the cron will pick it up. The Claude-add path leaves
+        # status alone (ToltIQ already finished or is still running and
+        # owns status; Claude piggybacks via the BackgroundTask).
+        if req.provider == "toltiq":
+            cur.execute(
+                """
+                UPDATE dealcloud.historical_data_room
+                   SET provider = 'both',
+                       status = 'pending',
+                       error_message = NULL,
+                       started_at = NULL,
+                       completed_at = NULL
+                 WHERE id = %s
+                """,
+                (room_id,),
+            )
+            new_status = "pending"
+        else:  # adding claude
+            cur.execute(
+                """
+                UPDATE dealcloud.historical_data_room
+                   SET provider = 'both'
+                 WHERE id = %s
+                """,
+                (room_id,),
+            )
+            new_status = room["status"]
+
+    if req.provider == "claude":
+        background.add_task(
+            run_claude_preset_playlist_safe,
+            room_id,
+            user.email,
+        )
+
+    return AddProviderResp(
+        room_id=room_id, provider="both", status=new_status,
+    )
 
 
 class RetryRoomResp(BaseModel):

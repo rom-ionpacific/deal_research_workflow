@@ -495,6 +495,17 @@ export const api = {
       { method: "POST" },
     ),
 
+  // Add the OTHER provider's answers to a room that was built single-
+  // provider. Backend flips room.provider to 'both' and either spawns
+  // the Claude BackgroundTask (when adding claude) or resets status to
+  // 'pending' so the cron picks it up (when adding toltiq). Existing
+  // answers from the original provider are preserved.
+  addDataRoomProvider: (roomId: number, provider: "toltiq" | "claude") =>
+    request<{ room_id: number; provider: string; status: string }>(
+      `/api/v1/data-rooms/${roomId}/add-provider`,
+      { method: "POST", body: JSON.stringify({ provider }) },
+    ),
+
   listMessages: (sessionId: string, limit = 200) =>
     request<ChatMessage[]>(
       `/api/v1/sessions/${sessionId}/messages?limit=${limit}`
