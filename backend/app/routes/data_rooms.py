@@ -18,10 +18,12 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
+import psycopg2.extras
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from ..auth import UserCtx, require_user
+from ..db import get_conn
 from ..services.data_room_view import RoomError, get_room_detail
 from ..services.dataroom_setup import (
     BuildError,
