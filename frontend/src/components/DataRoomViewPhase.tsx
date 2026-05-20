@@ -146,6 +146,20 @@ export default function DataRoomViewPhase({
 
       {showInlineBuild && <InlineBuildIndicator room={room.data} />}
 
+      {/* Add-the-other-provider call-to-action. Lives ABOVE the
+          build conditional so it's reachable even during a fresh
+          toltiq-only build (the most common state where a user
+          realises mid-build they wanted Claude too) -- Claude
+          doesn't need ToltIQ ingest, it queries pgvector, so the
+          add-claude path works the moment the room is created. */}
+      {(room.data.provider === "toltiq" ||
+        room.data.provider === "claude") && (
+        <AddProviderBanner
+          roomId={room.data.id}
+          currentProvider={room.data.provider}
+        />
+      )}
+
       {showFullSpinner ? (
         <BuildingSpinner room={room.data} />
       ) : isFailed ? (
@@ -156,16 +170,6 @@ export default function DataRoomViewPhase({
             roomId={room.data.id}
             presets={room.data.preset_questions}
           />
-          {/* Add-the-other-provider call-to-action. Only shown when
-              the room is single-provider so users can backfill the
-              other side without rebuilding from scratch. */}
-          {(room.data.provider === "toltiq" ||
-            room.data.provider === "claude") && (
-            <AddProviderBanner
-              roomId={room.data.id}
-              currentProvider={room.data.provider}
-            />
-          )}
           {/* Direct ToltIQ chat: posts straight to the deal. The
               followups list (the "chat history") is rendered inside
               this section so it reads like a conversation rather than
