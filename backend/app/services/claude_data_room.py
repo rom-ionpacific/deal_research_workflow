@@ -83,6 +83,21 @@ def _check_room(room_id: int, user: UserCtx) -> dict:
     return detail
 
 
+def _get_org_name(org_id: int) -> str | None:
+    """Look up an org's canonical name. Tiny indexed PK fetch; safe to
+    call once per ask_room. Returns None if the org has been deleted
+    or the id is bogus -- caller falls back to a generic prompt in
+    that case."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT name FROM dealcloud.organization WHERE id = %s",
+            (org_id,),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
 def _insert_running_answer(
     room_id: int,
     question: str,
@@ -231,15 +246,26 @@ def ask_room(
 
     detail = _check_room(room_id, user)  # raises RoomError if not yours / missing
 
+    # The room's main organization grounds every question -- without this
+    # the model sees only generic preset prompts ("What does this company
+    # do?") and has to guess from the retrieved docs which company
+    # they're about, which goes wrong on small / template-y rooms.
+    org_name = _get_org_name(detail["main_organization_id"])
+
     answer_id = _insert_running_answer(
         room_id, question, preset_question_id=preset_question_id
     )
 
     try:
-        # 1. Retrieve. Stage 4's hybrid search scoped to the room.
+        # 1. Retrieve. Bias the embedding query with the org name when
+        # we have one -- generic preset questions ("what does this
+        # company do?") don't pull on-topic docs without an anchor, and
+        # the room scope alone isn't enough since cosine similarity
+        # ranks within the scoped set.
+        retrieval_query = f"{org_name}: {question}" if org_name else question
         docs = search_documents(
             room_id=room_id,
-            query=question,
+            query=retrieval_query,
             limit=RETRIEVAL_LIMIT,
             mode="hybrid",
         )
@@ -249,10 +275,26 @@ def ask_room(
         # room (with different questions) pay only for the question.
         # The base system prompt is short; cache it too to keep
         # everything else free.
+        #
+        # SUBJECT COMPANY banner lives at the very top of the system
+        # text so "the company" / "this company" / "the deal" in the
+        # preset questions all resolve unambiguously. Per-room (not
+        # per-question) so the cache prefix stays stable across all
+        # questions on the same room.
+        subject_block = (
+            f"## SUBJECT COMPANY: {org_name}\n"
+            f"Every question in this turn is about this specific "
+            f"company. References to \"the company\", \"this company\", "
+            f"\"the deal\", \"them\", etc. all resolve to {org_name}. "
+            f"The DOCUMENTS section below is curated for this deal "
+            f"only.\n\n"
+            if org_name
+            else ""
+        )
         system_blocks: list[dict] = [
             {
                 "type": "text",
-                "text": _SYSTEM_PROMPT,
+                "text": subject_block + _SYSTEM_PROMPT,
                 "cache_control": {"type": "ephemeral"},
             },
             {
