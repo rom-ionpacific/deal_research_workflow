@@ -72,7 +72,15 @@ hits AS (
       ON hdre.entity_id = d.id
        AND hdre.entity_type = 'document'
        AND hdre.historical_data_room_id = (SELECT room FROM q)
-       AND hdre.status = 'uploaded'
+       -- Don't filter on hdre.status. That column tracks ToltIQ's
+       -- upload state ('pending' -> 'uploaded' / 'failed'); for
+       -- Claude rooms the cron is skipped entirely so docs stay
+       -- 'pending' forever, and filtering on 'uploaded' would
+       -- return zero. For Both rooms the Claude playlist runs
+       -- before ToltIQ finishes ingesting -- same problem.
+       -- Membership in historical_data_room_entity IS the scope;
+       -- Claude reads dealcloud.document.summary directly without
+       -- needing the doc to be in ToltIQ.
     WHERE
        lower(d.name) = lower((SELECT qtext FROM q))
        OR lower(d.name) LIKE '%%' || lower((SELECT qtext FROM q)) || '%%'
@@ -106,7 +114,8 @@ SELECT d.id,
     ON hdre.entity_id = d.id
      AND hdre.entity_type = 'document'
      AND hdre.historical_data_room_id = (SELECT room FROM q)
-     AND hdre.status = 'uploaded'
+     -- See trigram-leg note above: status='uploaded' filter dropped
+     -- because Claude rooms never reach that state.
  WHERE de.model = %s
  ORDER BY de.embedding <=> (SELECT qvec FROM q)
  LIMIT (SELECT lim FROM q)
