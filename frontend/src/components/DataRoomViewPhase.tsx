@@ -32,9 +32,14 @@ const PROGRESS_LABELS: Record<string, string> = {
 export default function DataRoomViewPhase({
   sessionId,
   state,
+  forcedProvider,
 }: {
   sessionId: string;
   state: Record<string, unknown>;
+  // ?only=toltiq|claude in the URL collapses the view to a single
+  // provider regardless of room.provider. Filters answers, hides
+  // banners + buttons for the disabled side. null = no override.
+  forcedProvider?: "toltiq" | "claude" | null;
 }) {
   const dataRoomId =
     typeof state.data_room_id === "number"
@@ -107,13 +112,29 @@ export default function DataRoomViewPhase({
 
   const isBuilding = !TERMINAL_STATUSES.has(room.data.status);
   const isFailed = room.data.status === "failed";
+
+  // Apply the ?only= URL filter. When set, we collapse the view to a
+  // single provider for display: filter each preset's answers list,
+  // hide the add-provider banner (you're explicitly hiding one side,
+  // why prompt to backfill it?), and pass the forced provider down
+  // to DirectToltIQChat so only the matching Ask button shows.
+  const effectivePresets = forcedProvider
+    ? room.data.preset_questions.map((q) => ({
+        ...q,
+        answers: q.answers.filter((a) => a.provider === forcedProvider),
+      }))
+    : room.data.preset_questions;
+  const effectiveChatProvider: "toltiq" | "claude" | "both" =
+    forcedProvider ?? room.data.provider;
+
   // When the user adds the OTHER provider to an existing room (or
   // when a fresh 'both' build has progressed far enough that Claude
   // answers have started landing), there's already content worth
-  // showing. Detect that by looking for ANY complete answer; if
-  // we find one, switch from the full-page BuildingSpinner to a
-  // small inline indicator and keep the preset Q&A + chat box live.
-  const hasAnyCompleteAnswer = room.data.preset_questions.some((q) =>
+  // showing. Detect that by looking for ANY complete answer in the
+  // CURRENTLY-VISIBLE (post-filter) set; if we find one, switch from
+  // the full-page BuildingSpinner to a small inline indicator and
+  // keep the preset Q&A + chat box live.
+  const hasAnyCompleteAnswer = effectivePresets.some((q) =>
     q.answers.some((a) => a.answer_status === "complete"),
   );
   const showInlineBuild = isBuilding && hasAnyCompleteAnswer;
@@ -151,14 +172,18 @@ export default function DataRoomViewPhase({
           toltiq-only build (the most common state where a user
           realises mid-build they wanted Claude too) -- Claude
           doesn't need ToltIQ ingest, it queries pgvector, so the
-          add-claude path works the moment the room is created. */}
-      {(room.data.provider === "toltiq" ||
-        room.data.provider === "claude") && (
-        <AddProviderBanner
-          roomId={room.data.id}
-          currentProvider={room.data.provider}
-        />
-      )}
+          add-claude path works the moment the room is created.
+          Hidden when ?only= forces single-provider view -- the user
+          explicitly opted into hiding one side; adding it would
+          defeat that. */}
+      {!forcedProvider &&
+        (room.data.provider === "toltiq" ||
+          room.data.provider === "claude") && (
+          <AddProviderBanner
+            roomId={room.data.id}
+            currentProvider={room.data.provider}
+          />
+        )}
 
       {showFullSpinner ? (
         <BuildingSpinner room={room.data} />
@@ -168,7 +193,7 @@ export default function DataRoomViewPhase({
         <>
           <PresetAnswersSection
             roomId={room.data.id}
-            presets={room.data.preset_questions}
+            presets={effectivePresets}
           />
           {/* Direct ToltIQ chat: posts straight to the deal. The
               followups list (the "chat history") is rendered inside
@@ -176,9 +201,15 @@ export default function DataRoomViewPhase({
               getting mixed in with the preset Q&A above. */}
           <DirectToltIQChat
             roomId={room.data.id}
-            provider={room.data.provider}
+            provider={effectiveChatProvider}
             roomStatus={room.data.status}
-            followups={room.data.followup_questions}
+            followups={
+              forcedProvider
+                ? room.data.followup_questions.filter(
+                    (f) => f.provider === forcedProvider,
+                  )
+                : room.data.followup_questions
+            }
           />
         </>
       )}

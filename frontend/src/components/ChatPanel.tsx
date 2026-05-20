@@ -30,10 +30,14 @@ export default function ChatPanel({
   sessionId,
   phase,
   parentVersionId,
+  forcedProvider,
 }: {
   sessionId: string;
   phase: Phase;
   parentVersionId: string;
+  // ?only=toltiq|claude URL override. When set, hides the
+  // Both/Claude/ToltIQ toggle and pins the chat to that provider.
+  forcedProvider?: "toltiq" | "claude" | null;
 }) {
   const qc = useQueryClient();
 
@@ -65,8 +69,18 @@ export default function ChatPanel({
     phase === "data_room_view"
       ? ((uiContext?.room_provider as string | undefined) ?? null)
       : null;
+  // Toggle is hidden when ?only= is forcing a single provider (the
+  // user has made their A/B choice at the URL level; per-turn
+  // toggling would just confuse the picture).
   const showProviderToggle =
-    phase === "data_room_view" && roomProvider === "both";
+    phase === "data_room_view" &&
+    roomProvider === "both" &&
+    !forcedProvider;
+  // Effective chat-provider mode that rides on the request. Forced
+  // wins; otherwise use the toggle's value (if it's visible) or
+  // 'both' as the no-op default.
+  const effectiveChatProviderMode: "both" | "claude" | "toltiq" =
+    forcedProvider ?? (showProviderToggle ? chatProviderMode : "both");
   const startTurn = useChat((s) => s.startTurn);
   const endTurn = useChat((s) => s.endTurn);
   const resetTurn = useChat((s) => s.resetTurn);
@@ -105,7 +119,7 @@ export default function ChatPanel({
         parentId: parentVersionId,
         uiContext: ctxToSend,
         webSearchEnabled,
-        chatProviderMode: showProviderToggle ? chatProviderMode : "both",
+        chatProviderMode: effectiveChatProviderMode,
         onEvent: (ev) => {
           switch (ev.type) {
             case "turn_start":
@@ -282,12 +296,14 @@ export default function ChatPanel({
         {/* Phase 4 A/B knob. Only meaningful when room.provider is
             'both'; otherwise hidden. Lets the user pin the assistant
             to a specific data-room provider for the next turn so they
-            can compare answer quality on the same question. */}
+            can compare answer quality on the same question.
+            Right-aligned so it sits visually separate from the
+            Data-room / + Web toggle above it. */}
         {showProviderToggle && (
           <div
             role="radiogroup"
             aria-label="Data room provider for the assistant"
-            className="mb-2 inline-flex rounded-md border border-slate-300 overflow-hidden text-xs"
+            className="mb-2 ml-auto flex w-fit rounded-md border border-slate-300 overflow-hidden text-xs"
           >
             {(["both", "claude", "toltiq"] as const).map((m, i) => {
               const label =

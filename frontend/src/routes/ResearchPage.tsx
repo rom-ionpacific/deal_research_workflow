@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 
 import ChatPanel from "../components/ChatPanel";
 import DataRoomSetupPhase from "../components/DataRoomSetupPhase";
@@ -39,6 +39,15 @@ function phaseToStep(phase: Phase): Step {
 
 export default function ResearchPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
+  // Optional ?only=toltiq|claude lets reviewers see the room as if it
+  // had been built single-provider, even when room.provider is 'both'.
+  // Filters preset answers, hides the other Ask button + add-provider
+  // banner, and pins the AI assistant to that provider. Pure
+  // presentation-layer override -- the data is unchanged.
+  const [searchParams] = useSearchParams();
+  const onlyParam = searchParams.get("only");
+  const forcedProvider: "toltiq" | "claude" | null =
+    onlyParam === "toltiq" || onlyParam === "claude" ? onlyParam : null;
 
   const session = useQuery({
     queryKey: ["session", sessionId],
@@ -103,6 +112,7 @@ export default function ResearchPage() {
             <DataRoomViewPhase
               sessionId={sessionId!}
               state={current_version.state}
+              forcedProvider={forcedProvider}
             />
           )}
         </div>
@@ -111,6 +121,7 @@ export default function ResearchPage() {
         sessionId={sessionId!}
         phase={current_version.phase}
         parentVersionId={current_version.id}
+        forcedProvider={forcedProvider}
       />
     </ResizableSplit>
   );
