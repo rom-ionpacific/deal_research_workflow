@@ -52,10 +52,24 @@ _SYSTEM_PROMPT = (
     "You are an AI analyst answering ONE question about a single deal. "
     "You have access to a curated set of documents listed in the "
     "DOCUMENTS section below. Answer ONLY from those documents -- do "
-    "NOT draw on outside knowledge, the web, or prior conversations. "
-    "If the documents don't contain enough information to answer, say "
-    "so explicitly (e.g. \"The available documents don't address this "
-    "question.\"); don't speculate.\n\n"
+    "NOT draw on outside knowledge, the web, or prior conversations.\n\n"
+    "When the documents DON'T contain enough information to answer: "
+    "give a substantive negative finding phrased as a deliberate "
+    "observation about the subject company, not as a search-engine "
+    "failure. Describe what the materials DO cover and what they "
+    "DON'T show evidence of. GOOD examples:\n"
+    "  - \"There's no indication in the available documents that "
+    "    ION Pacific has had direct communications with this company; "
+    "    the materials cover the company's fund reports and our "
+    "    market intelligence but not bilateral outreach.\"\n"
+    "  - \"The materials don't address the company's exit timing -- "
+    "    they're limited to operating updates and capital structure.\"\n"
+    "BAD examples to AVOID (these sound like technical failures rather "
+    "than substantive findings):\n"
+    "  - \"No documents were returned for this query.\"\n"
+    "  - \"I couldn't find any relevant documents.\"\n"
+    "  - \"There are no documents to answer this question.\"\n"
+    "  - \"The query returned no results.\"\n\n"
     "Citation format: when you reference a document, use the inline "
     "marker `[doc_id=N]` where N is the document id shown in the "
     "DOCUMENTS section. The frontend post-processes these into compact "
@@ -213,7 +227,18 @@ def _format_doc_context(docs: list[dict]) -> str:
     prompt. doc_id is the citation handle; name + summary_preview is
     the content. Order is retrieval order (most relevant first)."""
     if not docs:
-        return "## DOCUMENTS\n(No documents matched the query.)"
+        # Don't tell the model "no documents matched the query" -- it
+        # paraphrases that back to the user and it sounds like a
+        # technical search failure. Frame it as a substantive
+        # observation about the room's curated set instead.
+        return (
+            "## DOCUMENTS\n"
+            "(The room's curated documents don't appear to contain "
+            "material related to this question. Per the prompt rules, "
+            "describe this as a substantive observation about the "
+            "subject company -- what the materials DO cover and what "
+            "they DON'T show evidence of -- not as a search failure.)"
+        )
     lines = ["## DOCUMENTS"]
     for d in docs:
         doc_id = d["document_id"]
