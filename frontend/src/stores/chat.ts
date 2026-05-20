@@ -63,6 +63,11 @@ interface ChatState {
   // granularity for now since each research session has its own
   // intent.
   webSearchEnabled: Record<string, boolean>;
+  // Phase 4 data-room A/B knob. Default 'both' -- the model sees
+  // both ask_toltiq + ask_claude_room. 'claude' / 'toltiq' strip
+  // the other tool so the model has only one path. UI surfaces the
+  // toggle only when room.provider === 'both'.
+  chatProviderMode: Record<string, "both" | "claude" | "toltiq">;
 
   setDraft: (sessionId: string, value: string) => void;
   startTurn: (sessionId: string) => void;
@@ -77,6 +82,10 @@ interface ChatState {
     ctx: Record<string, unknown> | null,
   ) => void;
   setWebSearchEnabled: (sessionId: string, enabled: boolean) => void;
+  setChatProviderMode: (
+    sessionId: string,
+    mode: "both" | "claude" | "toltiq",
+  ) => void;
 }
 
 const blankTurn = (): InFlightTurn => ({
@@ -91,6 +100,7 @@ export const useChat = create<ChatState>((set, get) => ({
   streaming: {},
   uiContexts: {},
   webSearchEnabled: {},
+  chatProviderMode: {},
 
   setDraft: (sessionId, value) =>
     set((s) => ({ drafts: { ...s.drafts, [sessionId]: value } })),
@@ -134,5 +144,10 @@ export const useChat = create<ChatState>((set, get) => ({
   setWebSearchEnabled: (sessionId, enabled) =>
     set((s) => ({
       webSearchEnabled: { ...s.webSearchEnabled, [sessionId]: enabled },
+    })),
+
+  setChatProviderMode: (sessionId, mode) =>
+    set((s) => ({
+      chatProviderMode: { ...s.chatProviderMode, [sessionId]: mode },
     })),
 }));

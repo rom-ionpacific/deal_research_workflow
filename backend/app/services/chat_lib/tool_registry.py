@@ -152,3 +152,10 @@ class ToolRegistry:
         out = ToolRegistry()
         out._tools = dict(self._tools)
         return out
+
+    def remove(self, name: str) -> None:
+        """Remove a tool by name. No-op if it doesn't exist (so callers
+        can blindly strip optional tools without checking first). Used
+        by the orchestrator to honour per-turn user preferences (e.g.
+        chat_provider_mode='claude' strips ask_toltiq)."""
+        self._tools.pop(name, None)

@@ -70,6 +70,17 @@ class ChatRequest(BaseModel):
             "state so it sticks until the user flips it off."
         ),
     )
+    chat_provider_mode: str = Field(
+        default="both",
+        description=(
+            "Phase 4 data-room A/B knob. 'both' (default) exposes "
+            "both ask_toltiq and ask_claude_room tools to the model. "
+            "'claude' strips ask_toltiq; 'toltiq' strips ask_claude_room. "
+            "Only meaningful on data_room_view rooms whose provider "
+            "is 'both'; on other phases / single-provider rooms it's "
+            "a no-op."
+        ),
+    )
 
 
 @router.post("/sessions/{session_id}/chat")
@@ -89,6 +100,7 @@ async def chat(
         parent_id=req.parent_id,
         ui_context=req.ui_context,
         web_search_enabled=req.web_search_enabled,
+        chat_provider_mode=req.chat_provider_mode,
     )
     return StreamingResponse(
         stream_chat_turn(turn),

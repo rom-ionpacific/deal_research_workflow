@@ -376,6 +376,11 @@ class TurnRequest:
     # frontend persists the last choice in session state so it's sticky
     # within a session.
     web_search_enabled: bool = False
+    # Phase 4 data-room A/B knob. 'both' exposes both ask_toltiq AND
+    # ask_claude_room to the model; 'claude' strips ask_toltiq;
+    # 'toltiq' strips ask_claude_room. On phases that don't have these
+    # tools (Phase 1-3) the filter is a no-op.
+    chat_provider_mode: str = "both"
 
 
 # ---- SSE event helpers -----------------------------------------------------
@@ -566,6 +571,14 @@ async def stream_chat_turn(req: TurnRequest) -> AsyncIterator[str]:
     registry = base_registry.clone()
     if req.web_search_enabled:
         register_web_tools(registry)
+
+    # Honour the Phase 4 chat_provider_mode toggle. On phases without
+    # these tools the remove() calls are no-ops, so this is safe to
+    # apply unconditionally.
+    if req.chat_provider_mode == "claude":
+        registry.remove("ask_toltiq")
+    elif req.chat_provider_mode == "toltiq":
+        registry.remove("ask_claude_room")
 
     system = SYSTEM_PROMPTS.get(req.phase)
     if system is None:

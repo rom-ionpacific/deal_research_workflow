@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   api,
@@ -76,6 +76,9 @@ export default function DataRoomViewPhase({
       phase: "data_room_view",
       data_room_id: room.data.id,
       status: room.data.status,
+      // room_provider lets ChatPanel decide whether to surface the
+      // Both / Claude / ToltIQ toggle (only meaningful on 'both' rooms).
+      room_provider: room.data.provider,
       selected_org_ids: [room.data.main_organization_id],
       entity_progress: room.data.entity_progress,
       preset_question_count: room.data.preset_questions.length,
@@ -769,17 +772,115 @@ function PresetRow({ q, roomId }: { q: PresetQA; roomId: number }) {
         <Chevron open={open} />
       </button>
       {open && (
-        <div className="px-4 pb-4 -mt-1 space-y-3">
-          {q.answers.map((a) => (
+        <div className="px-4 pb-4 -mt-1">
+          {q.answers.length > 1 ? (
+            <PresetAnswerTabs answers={q.answers} roomId={roomId} />
+          ) : q.answers.length === 1 ? (
             <PresetAnswerView
-              key={`${a.provider}:${a.answer_id ?? "pending"}`}
-              answer={a}
+              answer={q.answers[0]}
               roomId={roomId}
-              singleProvider={q.answers.length === 1}
+              singleProvider={true}
             />
-          ))}
+          ) : null}
         </div>
       )}
+    </div>
+  );
+}
+
+function PresetAnswerTabs({
+  answers,
+  roomId,
+}: {
+  answers: PresetAnswer[];
+  roomId: number;
+}) {
+  // Default tab: prefer a complete answer; if multiple complete, prefer
+  // ToltIQ for continuity with the established baseline. If none
+  // complete, fall back to the first answer in the list.
+  const defaultProvider = useMemo(() => {
+    const completeT = answers.find(
+      (a) => a.provider === "toltiq" && a.answer_status === "complete",
+    );
+    if (completeT) return "toltiq" as const;
+    const completeC = answers.find(
+      (a) => a.provider === "claude" && a.answer_status === "complete",
+    );
+    if (completeC) return "claude" as const;
+    return answers[0].provider;
+  }, [answers]);
+
+  const [active, setActive] = useState<"toltiq" | "claude">(defaultProvider);
+
+  // If a new answer transitions to 'complete' (e.g. the user clicked
+  // expand mid-build and Claude just landed), prefer auto-switching
+  // the active tab to the freshly-arrived provider. We only do this
+  // if the currently active tab is NOT complete, so it doesn't yank
+  // the user out of an answer they're reading.
+  useEffect(() => {
+    const current = answers.find((a) => a.provider === active);
+    if (current && current.answer_status === "complete") return;
+    const fresh = answers.find((a) => a.answer_status === "complete");
+    if (fresh && fresh.provider !== active) setActive(fresh.provider);
+  }, [answers, active]);
+
+  // Render the tabs in a stable order (toltiq first, then claude) so
+  // the tab strip doesn't reflow when answers arrive in different
+  // orders across renders.
+  const ordered = useMemo(() => {
+    const out: PresetAnswer[] = [];
+    const t = answers.find((a) => a.provider === "toltiq");
+    const c = answers.find((a) => a.provider === "claude");
+    if (t) out.push(t);
+    if (c) out.push(c);
+    return out;
+  }, [answers]);
+
+  const activeAnswer =
+    ordered.find((a) => a.provider === active) ?? ordered[0];
+
+  return (
+    <div>
+      <div className="flex items-center gap-1 border-b border-slate-200 mb-3">
+        {ordered.map((a) => {
+          const isActive = a.provider === active;
+          const label = a.provider === "claude" ? "Claude" : "ToltIQ";
+          const statusGlyph =
+            a.answer_status === "complete"
+              ? "✓"
+              : a.answer_status === "failed"
+                ? "✗"
+                : "…";
+          const statusColor =
+            a.answer_status === "complete"
+              ? "text-emerald-600"
+              : a.answer_status === "failed"
+                ? "text-red-600"
+                : "text-amber-600";
+          return (
+            <button
+              key={a.provider}
+              type="button"
+              onClick={() => setActive(a.provider)}
+              className={
+                "px-3 py-1.5 text-xs border-b-2 -mb-px transition-colors " +
+                (isActive
+                  ? "border-slate-900 text-slate-900 font-medium"
+                  : "border-transparent text-slate-500 hover:text-slate-700")
+              }
+            >
+              {label}{" "}
+              <span className={statusColor + " ml-0.5"}>{statusGlyph}</span>
+            </button>
+          );
+        })}
+      </div>
+      <PresetAnswerView
+        key={`${activeAnswer.provider}:${activeAnswer.answer_id ?? "pending"}`}
+        answer={activeAnswer}
+        roomId={roomId}
+        singleProvider={true /* hide the provider chip inside; tab strip already shows it */}
+      />
     </div>
   );
 }

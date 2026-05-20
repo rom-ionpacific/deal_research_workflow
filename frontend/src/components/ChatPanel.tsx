@@ -54,6 +54,19 @@ export default function ChatPanel({
     (s) => s.webSearchEnabled[sessionId] ?? false,
   );
   const setWebSearchEnabled = useChat((s) => s.setWebSearchEnabled);
+  // Phase 4 A/B knob -- only meaningful when room.provider is 'both'.
+  // We expose it via the same uiContexts publishing path
+  // DataRoomViewPhase already uses.
+  const chatProviderMode = useChat(
+    (s) => s.chatProviderMode[sessionId] ?? "both",
+  );
+  const setChatProviderMode = useChat((s) => s.setChatProviderMode);
+  const roomProvider =
+    phase === "data_room_view"
+      ? ((uiContext?.room_provider as string | undefined) ?? null)
+      : null;
+  const showProviderToggle =
+    phase === "data_room_view" && roomProvider === "both";
   const startTurn = useChat((s) => s.startTurn);
   const endTurn = useChat((s) => s.endTurn);
   const resetTurn = useChat((s) => s.resetTurn);
@@ -92,6 +105,7 @@ export default function ChatPanel({
         parentId: parentVersionId,
         uiContext: ctxToSend,
         webSearchEnabled,
+        chatProviderMode: showProviderToggle ? chatProviderMode : "both",
         onEvent: (ev) => {
           switch (ev.type) {
             case "turn_start":
@@ -264,6 +278,55 @@ export default function ChatPanel({
             🌐 + Web
           </button>
         </div>
+
+        {/* Phase 4 A/B knob. Only meaningful when room.provider is
+            'both'; otherwise hidden. Lets the user pin the assistant
+            to a specific data-room provider for the next turn so they
+            can compare answer quality on the same question. */}
+        {showProviderToggle && (
+          <div
+            role="radiogroup"
+            aria-label="Data room provider for the assistant"
+            className="mb-2 inline-flex rounded-md border border-slate-300 overflow-hidden text-xs"
+          >
+            {(["both", "claude", "toltiq"] as const).map((m, i) => {
+              const label =
+                m === "both"
+                  ? "🤖 Both"
+                  : m === "claude"
+                    ? "Claude only"
+                    : "ToltIQ only";
+              const isActive = chatProviderMode === m;
+              return (
+                <button
+                  key={m}
+                  type="button"
+                  role="radio"
+                  aria-checked={isActive}
+                  onClick={() => setChatProviderMode(sessionId, m)}
+                  disabled={streaming}
+                  title={
+                    m === "both"
+                      ? "Assistant can use ask_toltiq and ask_claude_room."
+                      : m === "claude"
+                        ? "Assistant only uses ask_claude_room; ask_toltiq is hidden."
+                        : "Assistant only uses ask_toltiq; ask_claude_room is hidden."
+                  }
+                  className={
+                    "px-2 py-1 " +
+                    (i > 0 ? "border-l border-slate-300 " : "") +
+                    (isActive
+                      ? "bg-slate-900 text-white"
+                      : "bg-white text-slate-600 hover:bg-slate-50") +
+                    " disabled:opacity-50"
+                  }
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        )}
         <div className="flex gap-2">
           <input
             type="text"

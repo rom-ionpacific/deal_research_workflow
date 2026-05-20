@@ -543,6 +543,11 @@ export interface ChatStreamRequest {
   // (data-room-only). Frontend keeps the last choice sticky in the
   // chat store so flipping it sticks until the user flips back.
   webSearchEnabled?: boolean;
+  // Phase 4 A/B knob. 'both' (default) exposes ask_toltiq AND
+  // ask_claude_room; 'claude' strips ask_toltiq; 'toltiq' strips
+  // ask_claude_room. UI shows the toggle only on data_room_view
+  // rooms whose room.provider is 'both'.
+  chatProviderMode?: "both" | "claude" | "toltiq";
   onEvent: (ev: ChatEvent) => void;
 }
 
@@ -562,6 +567,7 @@ export async function streamChat(req: ChatStreamRequest): Promise<void> {
       parent_id: req.parentId,
       ui_context: req.uiContext ?? null,
       web_search_enabled: req.webSearchEnabled ?? false,
+      chat_provider_mode: req.chatProviderMode ?? "both",
     }),
     signal: req.signal,
   });
