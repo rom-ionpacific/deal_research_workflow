@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
+from .db import close_pool
 from .routes import (
     chat,
     data_rooms,
@@ -40,3 +41,8 @@ app.include_router(data_rooms.router, prefix="/api/v1")
 # verification is per-route, NOT global, so the /api/v1 routes still
 # use X-User-Email auth.
 app.include_router(slack.router)
+
+
+@app.on_event("shutdown")
+def _on_shutdown() -> None:
+    close_pool()

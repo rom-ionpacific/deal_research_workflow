@@ -6,6 +6,13 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str
+    # Connection pool size for psycopg2.pool.ThreadedConnectionPool. Default
+    # 10 covers normal SSE concurrency on a single Render API instance
+    # (each chat turn holds 1-3 conns briefly). Bump in env if SSE streams
+    # ever queue waiting for a conn.
+    db_pool_min: int = 1
+    db_pool_max: int = 10
+
     anthropic_api_key: str = ""
 
     azure_client_id: str = ""
