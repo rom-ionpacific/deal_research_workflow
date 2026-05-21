@@ -57,8 +57,15 @@ hits AS (
            'name'::text AS match_kind
     FROM dealcloud.organization o
     WHERE
+       -- WHERE only filters: exact (uses btree on lower(name)) +
+       -- trigram (uses GIN). The LIKE-prefix branch is intentionally
+       -- NOT in WHERE because dealcloud.organization's lower(name)
+       -- btree uses default text opclass, so it can't serve LIKE
+       -- prefix scans -- including it in the OR confused the planner
+       -- into Parallel Seq Scan on common-trigram queries like
+       -- 'palantir' (3.4s). Prefix matches still get the 0.85 score
+       -- via the CASE above when trigram passes them through.
        (lower(o.name) = lower((SELECT qtext FROM q))
-        OR lower(o.name) LIKE lower((SELECT qtext FROM q)) || '%%'
         OR o.name %% (SELECT qtext FROM q))
        AND o.superseded_by_org_id IS NULL
        AND EXISTS (SELECT 1 FROM dealcloud.organization_entity oe
@@ -76,7 +83,6 @@ hits AS (
     JOIN dealcloud.organization o ON o.id = oa.organization_id
     WHERE
        (lower(oa.alias) = lower((SELECT qtext FROM q))
-        OR lower(oa.alias) LIKE lower((SELECT qtext FROM q)) || '%%'
         OR oa.alias %% (SELECT qtext FROM q))
        AND o.superseded_by_org_id IS NULL
        AND EXISTS (SELECT 1 FROM dealcloud.organization_entity oe
