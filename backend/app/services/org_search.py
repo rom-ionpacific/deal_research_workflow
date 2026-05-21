@@ -160,22 +160,33 @@ def _row_to_dict(r: dict) -> dict:
 # enriched fields. WHERE clause keeps the shape consistent with the
 # trigram SQL: skip superseded orgs and orgs with no
 # organization_entity rows.
+#
+# CRITICAL: the query vector is passed INLINE as a parameter on the
+# ORDER BY clause, NOT pulled from a CTE subquery. pgvector's HNSW
+# planner only kicks in when the ORDER BY operand is a known
+# constant; routing it through `(SELECT qvec FROM q)` makes the
+# planner treat it as a variable and fall back to Parallel Seq Scan
+# on organization_embedding (~2.3s for 90k rows). With the inline
+# form the planner picks `Index Scan using organization_embedding_hnsw`
+# and the leg is ~40ms warm.
+#
+# We pass %s::public.vector twice (once for sim, once for ORDER BY)
+# because the parameter must be lexically present in the ORDER BY
+# expression for the planner to match it to the HNSW index opclass.
 _SEMANTIC_SQL = """
-WITH q AS (SELECT %s::public.vector AS qvec, %s::int AS lim),
-neighbors AS (
-    SELECT oe.org_id,
-           1 - (oe.embedding <=> (SELECT qvec FROM q)) AS sim
-      FROM dealcloud.organization_embedding oe
-     WHERE oe.model = %s
-     ORDER BY oe.embedding <=> (SELECT qvec FROM q)
-     LIMIT (SELECT lim FROM q)
-)
 SELECT o.id AS org_id, o.name, n.sim AS score,
        'semantic'::text AS match_kind, o.name AS hit_name,
        s.document_count, s.communication_count, s.latest_update_at,
        s.main_contact_email, s.main_contact_name,
        s.main_ion_email, s.main_ion_name
-  FROM neighbors n
+  FROM (
+    SELECT oe.org_id,
+           1 - (oe.embedding <=> %s::public.vector) AS sim
+      FROM dealcloud.organization_embedding oe
+     WHERE oe.model = %s
+     ORDER BY oe.embedding <=> %s::public.vector
+     LIMIT %s
+  ) n
   JOIN dealcloud.organization o ON o.id = n.org_id
   LEFT JOIN dealcloud.organization_summary s ON s.org_id = o.id
  WHERE o.superseded_by_org_id IS NULL
@@ -218,7 +229,15 @@ def _semantic_rows(query: str, limit: int) -> list[dict]:
     from .embed import MODEL as _MODEL
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(_SEMANTIC_SQL, (vec, limit, _MODEL))
+        # Bump HNSW recall above the 40 default. At 100 we still get
+        # ~40ms warm but catch most exact-name matches that ef=40
+        # missed (e.g. 'Lovable' was missing from top-30 at ef=40 even
+        # though its embedding sat at sim=0.5438 / rank 1 under exact
+        # NN). ef=200 catches the rest but costs ~2s/query, not worth
+        # it -- trigram already handles exact name lookups, and the
+        # RRF merge biases trigram-exact wins over semantic neighbors.
+        cur.execute("SET LOCAL hnsw.ef_search = 100")
+        cur.execute(_SEMANTIC_SQL, (vec, _MODEL, vec, limit))
         return list(cur.fetchall())
 
 
@@ -261,7 +280,26 @@ def _rrf_merge(
             s += 1.0 / (_RRF_K + entry["semantic_rank"])
         return s
 
-    ordered = sorted(by_id.values(), key=fused, reverse=True)[:limit]
+    # Exact-match bias. Plain RRF is rank-only and ignores raw scores,
+    # which causes pathologies on bare-name queries: "Lovable" with
+    # exact trigram match (score=1.0, rank 1) AND no semantic hit
+    # (HNSW approximate index sometimes misses the obvious neighbor)
+    # gets RRF=1/61=0.0164, while "Able" with trigram rank 5
+    # (score=0.21) + semantic rank 3 gets RRF=1/65+1/63=0.0313 and
+    # leapfrogs the literal exact match.
+    #
+    # Surface trigram exact-name hits (score>=1.0) and exact-alias
+    # hits (score>=0.95) as a first sort key so they always lead the
+    # result regardless of semantic-leg noise.
+    def sort_key(entry: dict) -> tuple:
+        r = entry["row"]
+        raw = float(r.get("score") or 0.0)
+        kind = r.get("match_kind")
+        exact_name = 1 if (kind == "name" and raw >= 1.0) else 0
+        exact_alias = 1 if (kind == "alias" and raw >= 0.95) else 0
+        return (exact_name, exact_alias, fused(entry))
+
+    ordered = sorted(by_id.values(), key=sort_key, reverse=True)[:limit]
     # Replace `score` with the fused RRF score so the FE can surface
     # something comparable across modes. Original trigram/semantic
     # scores aren't lost (we just don't expose them today).
