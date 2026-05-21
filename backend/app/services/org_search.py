@@ -59,7 +59,7 @@ hits AS (
     WHERE
        (lower(o.name) = lower((SELECT qtext FROM q))
         OR lower(o.name) LIKE lower((SELECT qtext FROM q)) || '%%'
-        OR dealcloud.similarity(o.name, (SELECT qtext FROM q)) > 0.3)
+        OR o.name %% (SELECT qtext FROM q))
        AND o.superseded_by_org_id IS NULL
        AND EXISTS (SELECT 1 FROM dealcloud.organization_entity oe
                    WHERE oe.organization_id = o.id)
@@ -77,7 +77,7 @@ hits AS (
     WHERE
        (lower(oa.alias) = lower((SELECT qtext FROM q))
         OR lower(oa.alias) LIKE lower((SELECT qtext FROM q)) || '%%'
-        OR dealcloud.similarity(oa.alias, (SELECT qtext FROM q)) > 0.3)
+        OR oa.alias %% (SELECT qtext FROM q))
        AND o.superseded_by_org_id IS NULL
        AND EXISTS (SELECT 1 FROM dealcloud.organization_entity oe
                    WHERE oe.organization_id = o.id)
