@@ -631,6 +631,107 @@ def preview_entities(inp: PreviewEntitiesInput, ctx: dict) -> ToolResult:
     )
 
 
+class SelectByRelationshipInput(BaseModel):
+    entity_type: _EntityTypeStr
+    relationship_types: list[str] = Field(
+        ...,
+        description=(
+            "List of organization_entity.relationship_type values to "
+            "INCLUDE. Valid values: target, portfolio_company, "
+            "investor, adviser, comparable, mentioned, other, unknown. "
+            "See summarize_entities_for_orgs.relationship_type_glossary "
+            "for descriptions. Use 'unknown' to match NULL "
+            "relationship_type values."
+        ),
+        min_length=1,
+        max_length=10,
+    )
+    cap: int = Field(
+        500,
+        ge=1,
+        le=2000,
+        description=(
+            "Max entities to add. Hard limit at 2000 to avoid runaway "
+            "selections; if the count is higher, narrow further."
+        ),
+    )
+
+
+@phase2_registry.tool(
+    "select_entities_by_relationship",
+    (
+        "Bulk-add all entities of `entity_type` whose "
+        "organization_entity.relationship_type is in "
+        "`relationship_types`, scoped to the session's selected orgs. "
+        "Use this AFTER summarize_entities_for_orgs to action a "
+        "recommendation like 'select all target + portfolio_company "
+        "documents' in one shot. Hard-capped at `cap` (default 500, "
+        "max 2000). Idempotent: already-selected ids are deduped. "
+        "Mutates state."
+    ),
+    SelectByRelationshipInput,
+    mutates_state=True,
+)
+def select_entities_by_relationship(
+    inp: SelectByRelationshipInput, ctx: dict
+) -> ToolResult:
+    matched_ids: list[int] = []
+
+    def mutate_with_phase(
+        cur, conn, session_row, current_version_row
+    ) -> tuple[str, dict, str | None]:
+        nonlocal matched_ids
+        cur_state = current_version_row["state"]
+        if isinstance(cur_state, str):
+            cur_state = json.loads(cur_state)
+        org_ids = _selected_org_ids_from_state(cur_state)
+        if not org_ids:
+            return current_version_row["phase"], cur_state, None
+
+        cur.execute(
+            """
+            SELECT DISTINCT entity_id
+              FROM dealcloud.organization_entity
+             WHERE organization_id = ANY(%s::int[])
+               AND entity_type = %s
+               AND COALESCE(relationship_type, 'unknown') = ANY(%s::text[])
+             LIMIT %s
+            """,
+            (org_ids, inp.entity_type, inp.relationship_types, inp.cap),
+        )
+        matched_ids = [int(r["entity_id"]) for r in cur.fetchall()]
+        if not matched_ids:
+            return current_version_row["phase"], cur_state, None
+
+        sel_map = dict(cur_state.get("selected_entity_ids") or {})
+        existing = list(sel_map.get(inp.entity_type) or [])
+        existing_set = set(existing)
+        added = [i for i in matched_ids if i not in existing_set]
+        if not added:
+            return current_version_row["phase"], cur_state, None
+
+        sel_map[inp.entity_type] = existing + added
+        new_state = dict(cur_state)
+        new_state["selected_entity_ids"] = sel_map
+        summary = (
+            f"Add {len(added)} {inp.entity_type} via relationship "
+            f"types {sorted(set(inp.relationship_types))}"
+        )
+        return current_version_row["phase"], new_state, summary
+
+    return _append_version_with_phase(
+        ctx,
+        mutate_with_phase,
+        no_op_message=(
+            f"No new {inp.entity_type} matched relationship_types "
+            f"{sorted(set(inp.relationship_types))} -- either none of "
+            "the selected orgs has entities in those buckets, or all "
+            "matches were already selected."
+        ),
+        extra_payload={"matched_count": len(matched_ids)},
+    )
+
+
 @phase2_registry.tool(
     "select_all_matching",
     (
