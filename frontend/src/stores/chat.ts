@@ -68,6 +68,12 @@ interface ChatState {
   // the other tool so the model has only one path. UI surfaces the
   // toggle only when room.provider === 'both'.
   chatProviderMode: Record<string, "both" | "claude" | "toltiq">;
+  // Per-(sessionId+phase) flag for "the auto-opener has fired in
+  // this browser session". Prevents re-firing on every messages
+  // refetch / re-render. Cleared when the page reloads (which is
+  // fine -- on reload, if any assistant message for the phase
+  // exists, the check below skips the opener anyway).
+  openerFired: Record<string, boolean>;
 
   setDraft: (sessionId: string, value: string) => void;
   startTurn: (sessionId: string) => void;
@@ -86,6 +92,7 @@ interface ChatState {
     sessionId: string,
     mode: "both" | "claude" | "toltiq",
   ) => void;
+  markOpenerFired: (sessionId: string, phase: string) => void;
 }
 
 const blankTurn = (): InFlightTurn => ({
@@ -101,6 +108,7 @@ export const useChat = create<ChatState>((set, get) => ({
   uiContexts: {},
   webSearchEnabled: {},
   chatProviderMode: {},
+  openerFired: {},
 
   setDraft: (sessionId, value) =>
     set((s) => ({ drafts: { ...s.drafts, [sessionId]: value } })),
@@ -149,5 +157,10 @@ export const useChat = create<ChatState>((set, get) => ({
   setChatProviderMode: (sessionId, mode) =>
     set((s) => ({
       chatProviderMode: { ...s.chatProviderMode, [sessionId]: mode },
+    })),
+
+  markOpenerFired: (sessionId, phase) =>
+    set((s) => ({
+      openerFired: { ...s.openerFired, [`${sessionId}:${phase}`]: true },
     })),
 }));

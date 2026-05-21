@@ -110,6 +110,115 @@ _WEB_SEARCH_GUIDE = (
 )
 
 
+# Phase-entry opener behaviour. The frontend auto-fires a message with
+# text exactly `__opener__` on the user's first entry to a phase (when
+# no assistant message exists yet for that phase). The model treats it
+# as a phase-entry signal and runs the phase-specific opener routine
+# below -- NOT as a literal user question. The FE filters the
+# `__opener__` user message out of the rendered chat history so the
+# user only sees the AI's response, making the AI appear proactive.
+_OPENER_INSTRUCTIONS: dict[str, str] = {
+    "org_select": (
+        "## OPENER (when the user's message is exactly `__opener__`)\n"
+        "This is a phase-entry signal -- the user just opened a fresh "
+        "research session. Don't echo the sentinel; behave as if you "
+        "just greeted them. DO NOT call any tools yet.\n"
+        "Reply with a short greeting + a question, e.g.:\n"
+        "  \"Hi! Which company would you like to research?\"\n"
+        "Then wait for the user's next message.\n"
+        "\n"
+        "## DISAMBIGUATION (when the user names a company)\n"
+        "1. Call `find_organizations(query=<name>)`.\n"
+        "2. If exactly one result has score >= 0.9 OR the user's "
+        "   intent is clearly unambiguous, confirm \"Looks like you "
+        "   mean <name> (#<id>) -- is that right?\" and offer to add.\n"
+        "3. If 2+ candidates look plausible (close scores, similar "
+        "   names, multiple subsidiaries/funds), call `get_org_dossier` "
+        "   on the top 2-3 to pull entity counts, top contacts, and "
+        "   deal stats. Then present them to the user with a one-line "
+        "   differentiator each:\n"
+        "     - 'Acme Capital (#123) -- VC fund; we have 12 docs and "
+        "       8 email threads with their team'\n"
+        "     - 'Acme Corp (#456) -- operating company; we have 3 "
+        "       docs, mostly market-comp references'\n"
+        "   and ask which one they meant.\n"
+        "4. Keep iterating with clarifying questions (geography, "
+        "   sector, fund vintage, contact name) until the user "
+        "   confirms.\n"
+        "5. Only then call `add_to_selection`. Don't pre-add.\n"
+        "6. Offer to look up more orgs OR to `advance_to_entity_select`.\n"
+    ),
+    "entity_select": (
+        "## OPENER (when the user's message is exactly `__opener__`)\n"
+        "Run the relevance overview routine:\n"
+        "1. Call `summarize_entities_for_orgs` (no args; uses the "
+        "   session's selected_org_ids). Returns per-entity-type "
+        "   totals + a breakdown by `relationship_type` and a glossary "
+        "   explaining what each type means.\n"
+        "2. Present the overview in plain English, translating the "
+        "   labels via the glossary. Example structure:\n"
+        "     - Documents (38 total): 24 are TARGET-type (analyses / "
+        "       IC memos about the company), 8 used the company as a "
+        "       COMPARABLE (peripheral), 4 just MENTIONED.\n"
+        "     - Emails (15 threads): 10 with the company as an "
+        "       INVESTOR / contact, 3 mentioned in passing.\n"
+        "3. Make a default recommendation: \"I'd suggest focusing on "
+        "   the target / portfolio_company / investor buckets and "
+        "   skipping comparable / mentioned for now -- those are "
+        "   peripheral references.\"\n"
+        "4. Ask the user: do they want to (a) accept the recommendation "
+        "   and let you select for them, (b) refine the filter further "
+        "   (date range, keyword, specific entity type), or (c) review "
+        "   item-by-item.\n"
+        "5. Based on the answer, use `count_entities_matching` / "
+        "   `preview_entities` / `select_all_matching` to take action. "
+        "   Confirm before bulk-selecting.\n"
+    ),
+    "data_room_setup": (
+        "## OPENER (when the user's message is exactly `__opener__`)\n"
+        "1. Call `list_preset_questions` to fetch the active default "
+        "   plan.\n"
+        "2. Show the questions as a numbered list: just `n. <label>` "
+        "   for each (don't recite the question_text -- it's verbose "
+        "   and the user can expand the cards). State the total count.\n"
+        "3. Ask: \"Want to keep these as-is, rephrase any, or add "
+        "   custom questions? Once you give the green light I'll "
+        "   build the data room.\"\n"
+        "4. If they want changes:\n"
+        "   - Rephrase an existing one -> `edit_custom_question` "
+        "     (only works on customs they own; defaults can't be "
+        "     edited, but you can add a custom that mirrors and "
+        "     `remove_preset_question` for the default).\n"
+        "   - Add a new question -> confirm wording, then "
+        "     `create_custom_question`.\n"
+        "5. When they confirm: call `build_data_room`. Tell them "
+        "   \"Build started -- ~10-15 min for ToltIQ. I'll summarise "
+        "   the answers once it's done.\"\n"
+    ),
+    "data_room_view": (
+        "## OPENER (when the user's message is exactly `__opener__`)\n"
+        "1. Call `get_data_room_state` to check the room status.\n"
+        "2. If status is NOT 'complete' yet (pending / uploading / "
+        "   extracting / querying):\n"
+        "   - Tell the user where we are in the build (use the status "
+        "     label + entity_progress counts).\n"
+        "   - Promise to summarise once it's ready.\n"
+        "   - DO NOT generate a summary from incomplete data.\n"
+        "3. If status IS 'complete':\n"
+        "   - Pick the 3-5 most material preset questions from the "
+        "     `preset_questions` list (typical priorities: business "
+        "     overview / model, key risks, financials / metrics, "
+        "     team & track record, recent milestones).\n"
+        "   - Call `get_preset_answer` for each to get the full text.\n"
+        "   - Synthesise a ONE-PAGER summary: 3-5 short paragraphs "
+        "     tying the answers together. Executive-summary tone.\n"
+        "   - Cite each claim with the question label and / or doc "
+        "     citations from the underlying answers.\n"
+        "   - End with: \"What else would you like to explore?\"\n"
+    ),
+}
+
+
 # Prepended to every phase's system prompt so the active phase is the
 # very first thing the model sees. Phase drift (model offering Phase 2
 # entity tools after the user has moved to Phase 3) was the symptom we
@@ -212,7 +321,14 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "- `back_to_entity_select()` -- nav back to Phase 2 if the "
         "  user wants to revise the entity selection. The existing "
         "  data room stays built.\n\n"
-        + CITATION_RULES +
+        + CITATION_RULES + "\n" +
+        # Per-phase opener instructions: how to behave when the user's
+        # message is exactly `__opener__` (the phase-entry signal from
+        # the FE). Per-phase so each opener can call the right tools.
+        # (We use a sentinel lookup string here; the actual block is
+        # spliced in after the dict is built -- see the assignment
+        # block below SYSTEM_PROMPTS.)
+        "##OPENER_PLACEHOLDER##\n" +
         "- Always cite the source for any factual claim. For ToltIQ "
         "  preset answers, cite the preset question label and quote "
         "  attachments if any.\n"
@@ -262,7 +378,14 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "- An empty preset_question_ids list is intentional shorthand "
         "  for \"all default presets\" -- the cron falls back to that. "
         "  Mention this if the user picks zero questions.\n\n"
-        + CITATION_RULES +
+        + CITATION_RULES + "\n" +
+        # Per-phase opener instructions: how to behave when the user's
+        # message is exactly `__opener__` (the phase-entry signal from
+        # the FE). Per-phase so each opener can call the right tools.
+        # (We use a sentinel lookup string here; the actual block is
+        # spliced in after the dict is built -- see the assignment
+        # block below SYSTEM_PROMPTS.)
+        "##OPENER_PLACEHOLDER##\n" +
         "\n"
         "Respond directly without preamble. Keep replies concise; the "
         "UI shows the question list and a Build button."
@@ -304,7 +427,14 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "  -- the user may have a different filter typed than what they "
         "  describe to you. Always pass the filter you want to evaluate "
         "  as tool arguments; don't assume you can read the form.\n\n"
-        + CITATION_RULES +
+        + CITATION_RULES + "\n" +
+        # Per-phase opener instructions: how to behave when the user's
+        # message is exactly `__opener__` (the phase-entry signal from
+        # the FE). Per-phase so each opener can call the right tools.
+        # (We use a sentinel lookup string here; the actual block is
+        # spliced in after the dict is built -- see the assignment
+        # block below SYSTEM_PROMPTS.)
+        "##OPENER_PLACEHOLDER##\n" +
         "\n"
         "Respond directly without preamble. Keep replies concise; the UI "
         "shows tabs and counts in a separate panel."
@@ -349,12 +479,30 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "- When the user is ready to proceed, call "
         "  `advance_to_entity_select`. It will refuse if the selection is "
         "  empty.\n\n"
-        + CITATION_RULES +
+        + CITATION_RULES + "\n" +
+        # Per-phase opener instructions: how to behave when the user's
+        # message is exactly `__opener__` (the phase-entry signal from
+        # the FE). Per-phase so each opener can call the right tools.
+        # (We use a sentinel lookup string here; the actual block is
+        # spliced in after the dict is built -- see the assignment
+        # block below SYSTEM_PROMPTS.)
+        "##OPENER_PLACEHOLDER##\n" +
         "\n"
         "Respond directly without preamble. Keep replies concise; the UI "
         "shows a separate panel with the current selection."
     ),
 }
+
+# Splice the per-phase opener instructions into each system prompt.
+# This is the post-build step that resolves the ##OPENER_PLACEHOLDER##
+# inside each prompt. Done in one place so the per-phase prompt
+# bodies stay readable, and so the opener behaviour stays in lockstep
+# with the dict above.
+for _phase, _opener_text in _OPENER_INSTRUCTIONS.items():
+    if _phase in SYSTEM_PROMPTS and "##OPENER_PLACEHOLDER##" in SYSTEM_PROMPTS[_phase]:
+        SYSTEM_PROMPTS[_phase] = SYSTEM_PROMPTS[_phase].replace(
+            "##OPENER_PLACEHOLDER##", _opener_text
+        )
 
 
 @dataclass

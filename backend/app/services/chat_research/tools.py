@@ -500,6 +500,93 @@ phase2_registry = ToolRegistry()
 
 
 @phase2_registry.tool(
+    "summarize_entities_for_orgs",
+    (
+        "Per-entity-type relevance breakdown for the session's selected "
+        "orgs. Reads dealcloud.organization_entity directly and buckets "
+        "by relationship_type so the assistant can distinguish "
+        "'documents ABOUT the company' (target / portfolio_company / "
+        "investor) from peripheral mentions (comparable / mentioned / "
+        "other). Returns per-entity-type totals + the count per "
+        "relationship_type. Call this at phase entry to give the user "
+        "an at-a-glance overview before they dive into filtering. "
+        "Read-only."
+    ),
+    NoArgs,
+)
+def summarize_entities_for_orgs(inp: NoArgs, ctx: dict) -> ToolResult:
+    state = _read_current_state(ctx)
+    org_ids = _selected_org_ids_from_state(state)
+    if not org_ids:
+        return ToolResult(
+            output="No selected_org_ids on this session yet."
+        )
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT entity_type,
+                   COALESCE(relationship_type, 'unknown') AS relationship_type,
+                   COUNT(DISTINCT entity_id) AS n
+              FROM dealcloud.organization_entity
+             WHERE organization_id = ANY(%s::int[])
+               AND entity_type IN ('document', 'email_thread',
+                                   'calendar_event', 'slack_message_group')
+             GROUP BY entity_type, COALESCE(relationship_type, 'unknown')
+            """,
+            (org_ids,),
+        )
+        rows = cur.fetchall()
+
+    summary: dict[str, dict] = {}
+    for r in rows:
+        et = r["entity_type"]
+        rt = r["relationship_type"]
+        n = int(r["n"])
+        bucket = summary.setdefault(
+            et,
+            {"total": 0, "by_relationship_type": {}},
+        )
+        bucket["total"] += n
+        bucket["by_relationship_type"][rt] = (
+            bucket["by_relationship_type"].get(rt, 0) + n
+        )
+    return ToolResult(
+        output={
+            "selected_org_ids": org_ids,
+            "entity_summary": summary,
+            "relationship_type_glossary": {
+                "target": (
+                    "the entity is ABOUT the company (analyses, IC "
+                    "memos, due-diligence materials). HIGHEST signal."
+                ),
+                "portfolio_company": (
+                    "we own / operate / fund the company. HIGH signal."
+                ),
+                "investor": (
+                    "the company is one of our LPs or co-investors. "
+                    "HIGH signal."
+                ),
+                "adviser": (
+                    "professional services relationship (banker, "
+                    "lawyer, consultant). MEDIUM signal."
+                ),
+                "comparable": (
+                    "used as a comp / benchmark for another deal. "
+                    "LOW signal (peripheral)."
+                ),
+                "mentioned": (
+                    "passing reference in a doc mainly about something "
+                    "else. LOWEST signal (peripheral)."
+                ),
+                "other": "unclassified non-peripheral linkage.",
+                "unknown": "no relationship_type recorded (older row).",
+            },
+        }
+    )
+
+
+@phase2_registry.tool(
     "count_entities_matching",
     (
         "Count entities of one type matching the filter, scoped to the "

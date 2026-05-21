@@ -85,6 +85,13 @@ export default function ChatPanel({
   const endTurn = useChat((s) => s.endTurn);
   const resetTurn = useChat((s) => s.resetTurn);
   const patchInFlight = useChat((s) => s.patchInFlight);
+  // Auto-opener state: per (session, phase). Prevents re-firing on
+  // every messages refetch / re-render in this browser session.
+  const openerFiredKey = `${sessionId}:${phase}`;
+  const openerAlreadyFired = useChat(
+    (s) => s.openerFired[openerFiredKey] ?? false,
+  );
+  const markOpenerFired = useChat((s) => s.markOpenerFired);
 
   // After a turn ends, watch for the messages refetch to bring in the
   // new canonical rows. Once message count exceeds the pre-turn count
@@ -98,10 +105,21 @@ export default function ChatPanel({
     lastSeenCountRef.current = n;
   }, [messages.data, streaming, inFlight, sessionId, resetTurn]);
 
-  const submit = async () => {
-    if (!draft.trim() || streaming) return;
-    const text = draft.trim();
-    startTurn(sessionId);
+  // Core turn-runner. Used by both the regular Send button and the
+  // auto-opener path. The opener-path passes isOpener=true so we
+  // skip the draft clear (there's no draft to clear -- the user
+  // just landed on the phase).
+  const runTurn = async (text: string, isOpener: boolean) => {
+    if (streaming) return;
+    if (isOpener) {
+      // Set streaming + in-flight without touching the draft.
+      // startTurn does both + clears draft; we replicate the in-
+      // flight init by calling startTurn anyway since draft is
+      // empty in this case (user hasn't typed yet on phase entry).
+      startTurn(sessionId);
+    } else {
+      startTurn(sessionId);
+    }
 
     try {
       // Phase guard: only forward the UI context if its phase tag
@@ -217,6 +235,36 @@ export default function ChatPanel({
     }
   };
 
+  const submit = async () => {
+    if (!draft.trim() || streaming) return;
+    await runTurn(draft.trim(), false);
+  };
+
+  // Auto-fire the phase opener once when the user first lands on a
+  // phase with no prior assistant turn. The orchestrator's per-phase
+  // system prompt handles the `__opener__` sentinel by running the
+  // phase-specific intro routine (greeting / overview / preset list /
+  // post-build summary). The sentinel user message is persisted to
+  // chat history but filtered out of rendered history below so the
+  // user only sees the AI's response.
+  useEffect(() => {
+    if (!messages.data) return;          // history not loaded yet
+    if (openerAlreadyFired) return;
+    if (streaming || inFlight) return;   // a turn is in flight; let it land
+    const hasAssistantForPhase = messages.data.some(
+      (m) => m.role === "assistant" && m.phase === phase,
+    );
+    if (hasAssistantForPhase) {
+      // The phase has been visited before in this session (or a
+      // prior browser session) -- don't re-fire the opener.
+      markOpenerFired(sessionId, phase);
+      return;
+    }
+    markOpenerFired(sessionId, phase);
+    void runTurn("__opener__", true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages.data, phase, openerAlreadyFired]);
+
   // min-h-0 on the flex root lets the flex-1 messages list below
   // shrink to its cell height instead of expanding to fit content
   // (the default in flex/grid is min-height: auto, which defeats
@@ -239,9 +287,19 @@ export default function ChatPanel({
             Could not load history: {(messages.error as Error).message}
           </div>
         )}
-        {messages.data?.map((m) => (
-          <PersistedMessage key={m.id} m={m} />
-        ))}
+        {messages.data
+          ?.filter((m) => {
+            // Hide the synthetic `__opener__` user messages from the
+            // rendered history -- they're invisible signals to the
+            // model, not real user input. The AI's reply to them is
+            // shown normally.
+            if (m.role !== "user") return true;
+            const text = (m.content?.text as string | undefined) ?? "";
+            return text.trim() !== "__opener__";
+          })
+          .map((m) => (
+            <PersistedMessage key={m.id} m={m} />
+          ))}
         {inFlight && <InFlightView turn={inFlight} streaming={streaming} />}
       </div>
 
