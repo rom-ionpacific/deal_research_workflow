@@ -247,6 +247,13 @@ export default function ChatPanel({
   // post-build summary). The sentinel user message is persisted to
   // chat history but filtered out of rendered history below so the
   // user only sees the AI's response.
+  //
+  // IMPORTANT: `streaming` and `inFlight` are in the dep array because
+  // when the user advances via tool call (e.g. advance_to_entity_select),
+  // the phase changes BEFORE inFlight clears. Without these deps, the
+  // effect runs once at phase change while inFlight is still set,
+  // returns early, and never re-fires once inFlight clears -- so the
+  // entity_select opener never runs after the advance.
   useEffect(() => {
     if (!messages.data) return;          // history not loaded yet
     if (openerAlreadyFired) return;
@@ -263,7 +270,7 @@ export default function ChatPanel({
     markOpenerFired(sessionId, phase);
     void runTurn("__opener__", true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages.data, phase, openerAlreadyFired]);
+  }, [messages.data, phase, openerAlreadyFired, streaming, inFlight]);
 
   // min-h-0 on the flex root lets the flex-1 messages list below
   // shrink to its cell height instead of expanding to fit content
