@@ -54,26 +54,34 @@ def _warmup_blocking() -> None:
     throwaway query (OpenAI client + httpx warm-up + Neon pgvector
     page cache for the org embedding HNSW). Without this, the first
     `find_organizations` call after deploy can spike to 60-90s before
-    settling to ~1s warm. Best-effort -- any failure logs and gives
-    up so the service stays live."""
+    settling to ~1s warm. Best-effort -- any failure prints and gives
+    up so the service stays live.
+
+    Uses print() (not logging) because uvicorn's default logger config
+    drops INFO from non-uvicorn loggers; the existing slack/events
+    breadcrumbs in this app use print() for the same reason.
+    """
+    import time as _time
+    t0 = _time.time()
     try:
         with get_conn() as conn:
             cur = conn.cursor()
             cur.execute("SELECT 1")
             cur.fetchone()
-        logger.info("warmup: db pool primed")
+        print(f"[warmup] db pool primed in {(_time.time()-t0)*1000:.0f}ms", flush=True)
     except Exception as e:
-        logger.warning("warmup: db ping failed: %s", e)
+        print(f"[warmup] db ping failed: {e}", flush=True)
 
+    t1 = _time.time()
     try:
         from .services.embed import embed_query, EmbedNotConfigured
         try:
             embed_query("warmup")
-            logger.info("warmup: openai embed primed")
+            print(f"[warmup] openai embed primed in {(_time.time()-t1)*1000:.0f}ms", flush=True)
         except EmbedNotConfigured:
-            pass  # local dev with no key; not worth warning
+            print("[warmup] openai embed skipped (key not set)", flush=True)
     except Exception as e:
-        logger.warning("warmup: openai embed failed: %s", e)
+        print(f"[warmup] openai embed failed: {e}", flush=True)
 
 
 @app.on_event("startup")
