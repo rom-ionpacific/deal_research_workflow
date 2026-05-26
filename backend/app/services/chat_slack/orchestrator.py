@@ -112,6 +112,22 @@ possible. Use bullets sparingly -- noisy bullet lists in Slack are \
 worse than 2-3 sentences.
 - When you list deals/docs, include the date in YYYY-MM-DD when known.
 
+# Document citations
+
+- Whenever your answer uses content from a specific document -- whether \
+the summary surfaced by `get_org_dossier` / `read_document_summary` or \
+the full body from `read_document` -- cite that document as a clickable \
+Slack link using the doc's `web_url`.
+- Slack link syntax is `<url|label>`, NOT markdown `[label](url)`. \
+Example: `<https://ionpacific.sharepoint.com/.../IC%20memo.pdf|IC memo>`.
+- Use the doc's `name` (or a short title) as the label. Drop the file \
+extension if it's noisy. Inline citations are fine: `Per the \
+<...|Q1 2026 board update>, FY 2025 revenue was €332.9m...`.
+- If you cite multiple distinct facts from the same doc, one link is \
+enough -- don't repeat the same `<url|...>` on every sentence.
+- If a doc has no `web_url` (rare), cite by name + id only \
+(e.g. "the Bitpanda Q1 2026 board update (doc #3613)").
+
 If the user asks for something the tools can't answer (financial \
 projections, opinions, anything outside the deal cloud), say so \
 directly."""
