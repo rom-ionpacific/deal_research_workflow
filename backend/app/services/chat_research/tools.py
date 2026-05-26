@@ -1439,6 +1439,75 @@ def read_document_summary_phase4(inp: DocumentIdInput, ctx: dict) -> ToolResult:
     return ToolResult(output=dict(row))
 
 
+class ReadDocumentInput(BaseModel):
+    document_id: int | None = Field(
+        None,
+        description=(
+            "dealcloud.document.id of the document. Preferred when "
+            "known (e.g. you just got it from get_org_dossier, "
+            "search_documents, or read_document_summary)."
+        ),
+    )
+    document_name: str | None = Field(
+        None,
+        description=(
+            "Partial filename (case-insensitive). Used only if "
+            "document_id is not provided. Returns the most-recently-"
+            "modified match."
+        ),
+    )
+    web_url: str | None = Field(
+        None,
+        description=(
+            "Document's SharePoint web_url. Used only if document_id "
+            "is not provided."
+        ),
+    )
+    max_chars: int = Field(
+        20_000, ge=500, le=200_000,
+        description=(
+            "Truncate the returned body beyond this many chars. "
+            "Default 20,000 (~5k tokens). Increase only if needed."
+        ),
+    )
+
+
+_READ_DOCUMENT_DESC = (
+    "Read the FULL TEXT BODY of a document (PDF / DOCX / PPTX / XLSX / "
+    "TXT). This is more expensive than read_document_summary -- prefer "
+    "the summary first, and only call this when the summary doesn't "
+    "answer the user's question and the full body is likely to. "
+    "Cached after first read, so subsequent calls on the same doc are "
+    "cheap. Returns body (possibly truncated to max_chars), "
+    "total_chars, truncated flag, plus name / path / web_url for "
+    "citing. If the body is too large, increase max_chars or ask the "
+    "user a more focused question first. Identify the doc by "
+    "document_id (preferred), document_name, or web_url."
+)
+
+
+def _read_document_handler(inp: ReadDocumentInput, ctx: dict) -> ToolResult:
+    from ..document_body import get_document_body, to_tool_output
+    result = get_document_body(
+        document_id=inp.document_id,
+        document_name=inp.document_name,
+        web_url=inp.web_url,
+        max_chars=inp.max_chars,
+    )
+    return ToolResult(output=to_tool_output(result))
+
+
+phase1_registry.tool("read_document", _READ_DOCUMENT_DESC, ReadDocumentInput)(
+    _read_document_handler
+)
+phase2_registry.tool("read_document", _READ_DOCUMENT_DESC, ReadDocumentInput)(
+    _read_document_handler
+)
+phase4_registry.tool("read_document", _READ_DOCUMENT_DESC, ReadDocumentInput)(
+    _read_document_handler
+)
+
+
 @phase4_registry.tool(
     "get_data_room_state",
     (

@@ -243,6 +243,60 @@ def read_document_summary(inp: DocumentIdInput, ctx: dict) -> ToolResult:
     )
 
 
+class ReadDocumentInput(BaseModel):
+    document_id: int | None = Field(
+        None,
+        description=(
+            "dealcloud.document.id. Preferred when known -- you usually "
+            "get it from get_org_dossier or read_document_summary first."
+        ),
+    )
+    document_name: str | None = Field(
+        None,
+        description=(
+            "Partial filename (case-insensitive). Used only if "
+            "document_id is not provided. Returns the most-recently-"
+            "modified match."
+        ),
+    )
+    web_url: str | None = Field(
+        None,
+        description=(
+            "Document's SharePoint web_url. Used only if document_id "
+            "is not provided."
+        ),
+    )
+    max_chars: int = Field(
+        20_000, ge=500, le=200_000,
+        description="Truncate the returned body beyond this many chars.",
+    )
+
+
+@slack_registry.tool(
+    "read_document",
+    (
+        "Read the FULL TEXT BODY of a document (PDF / DOCX / PPTX / "
+        "XLSX / TXT). More expensive than read_document_summary -- "
+        "prefer the summary first, only escalate to this when the "
+        "summary doesn't answer the user's question. Cached after "
+        "first read. Returns body (possibly truncated to max_chars), "
+        "total_chars, truncated flag, plus name / path / web_url for "
+        "citing back to the user in Slack. Identify the doc by "
+        "document_id (preferred), document_name, or web_url."
+    ),
+    ReadDocumentInput,
+)
+def read_document(inp: ReadDocumentInput, ctx: dict) -> ToolResult:
+    from ..document_body import get_document_body, to_tool_output
+    result = get_document_body(
+        document_id=inp.document_id,
+        document_name=inp.document_name,
+        web_url=inp.web_url,
+        max_chars=inp.max_chars,
+    )
+    return ToolResult(output=to_tool_output(result))
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

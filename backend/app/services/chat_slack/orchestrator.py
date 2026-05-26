@@ -84,6 +84,11 @@ counts, main contacts, recent docs / threads / events / slack groups, \
 deal stats. Best for "what's this org" or "what's the most recent thing"
 - `read_document_summary(document_id)` -- LLM summary of one document. \
 Use after get_org_dossier surfaces a relevant doc id.
+- `read_document(document_id | document_name | web_url, max_chars=20000)` \
+-- FULL TEXT BODY of a document. More expensive than the summary -- \
+only call this when the summary isn't conclusive and the user is \
+asking something the body can actually answer (specific number, \
+quote, page-level detail). Cached after first read.
 
 # Conversational rules
 

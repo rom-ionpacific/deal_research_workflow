@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     # "not configured" message rather than 500ing.
     gemini_api_key: str = ""
 
+    # deal_cloud_enhancer internal API -- shared secret + base URL for
+    # the /internal/document-body/{id} endpoint that triggers lazy
+    # extraction of a document's text body. Empty values cause
+    # read_document to surface a friendly "not configured" message.
+    dce_internal_url: str = ""
+    dce_internal_secret: str = ""
+
     @property
     def origin_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
