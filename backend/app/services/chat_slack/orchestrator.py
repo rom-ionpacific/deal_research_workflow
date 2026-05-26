@@ -407,11 +407,30 @@ def _save_history(conv_id: UUID, full_history: list[dict]) -> None:
 
 
 def _trim_history(messages: list[dict], cap: int) -> list[dict]:
-    """Keep the last <=cap messages, but ensure the first kept message
-    has role='user' so the prompt starts at a clean turn boundary."""
+    """Keep the last <=cap messages, snapping the front to a real user
+    text turn -- NOT a user-role tool_result wrapper. Anthropic wraps
+    tool_result blocks in role='user' messages, so checking role alone
+    can leave an orphan tool_result at the front whose originating
+    tool_use was just trimmed off; the API rejects with
+    'unexpected tool_use_id'."""
     if len(messages) <= cap:
         return messages
     sliced = messages[-cap:]
-    while sliced and sliced[0].get("role") != "user":
+    while sliced and not _is_user_text_turn(sliced[0]):
         sliced = sliced[1:]
     return sliced
+
+
+def _is_user_text_turn(msg: dict) -> bool:
+    """True when msg is a real user text turn (string content or a
+    content array whose first block is text). A user-role wrapper
+    around a tool_result block returns False -- those are not valid
+    conversation entry points."""
+    if msg.get("role") != "user":
+        return False
+    content = msg.get("content")
+    if isinstance(content, str):
+        return True
+    if isinstance(content, list) and content:
+        return content[0].get("type") != "tool_result"
+    return False
