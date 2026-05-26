@@ -412,10 +412,15 @@ def _trim_history(messages: list[dict], cap: int) -> list[dict]:
     tool_result blocks in role='user' messages, so checking role alone
     can leave an orphan tool_result at the front whose originating
     tool_use was just trimmed off; the API rejects with
-    'unexpected tool_use_id'."""
-    if len(messages) <= cap:
-        return messages
-    sliced = messages[-cap:]
+    'unexpected tool_use_id'.
+
+    The cap-tail-slice and the snap-front-to-user-text are independent
+    invariants -- both run on every call, regardless of length. (An
+    earlier version short-circuited when len(messages) <= cap and
+    skipped the snap entirely, which left orphan tool_results
+    at the front of pre-existing histories that landed exactly at the
+    cap boundary.)"""
+    sliced = messages[-cap:] if len(messages) > cap else list(messages)
     while sliced and not _is_user_text_turn(sliced[0]):
         sliced = sliced[1:]
     return sliced
