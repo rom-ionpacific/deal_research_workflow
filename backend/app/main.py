@@ -1,9 +1,12 @@
 """FastAPI app entrypoint."""
+import asyncio
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
-from .db import close_pool
+from .db import close_pool, get_conn
 from .routes import (
     chat,
     data_rooms,
@@ -14,6 +17,8 @@ from .routes import (
     slack,
     versions,
 )
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="deal_research_workflow API",
@@ -41,6 +46,45 @@ app.include_router(data_rooms.router, prefix="/api/v1")
 # verification is per-route, NOT global, so the /api/v1 routes still
 # use X-User-Email auth.
 app.include_router(slack.router)
+
+
+def _warmup_blocking() -> None:
+    """Cold-start work that the first user request would otherwise pay
+    for: open a DB connection (TLS to Neon + pool init), and embed a
+    throwaway query (OpenAI client + httpx warm-up + Neon pgvector
+    page cache for the org embedding HNSW). Without this, the first
+    `find_organizations` call after deploy can spike to 60-90s before
+    settling to ~1s warm. Best-effort -- any failure logs and gives
+    up so the service stays live."""
+    try:
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        logger.info("warmup: db pool primed")
+    except Exception as e:
+        logger.warning("warmup: db ping failed: %s", e)
+
+    try:
+        from .services.embed import embed_query, EmbedNotConfigured
+        try:
+            embed_query("warmup")
+            logger.info("warmup: openai embed primed")
+        except EmbedNotConfigured:
+            pass  # local dev with no key; not worth warning
+    except Exception as e:
+        logger.warning("warmup: openai embed failed: %s", e)
+
+
+@app.on_event("startup")
+async def _on_startup() -> None:
+    # Run the blocking warmup in a thread so /healthz responds
+    # immediately. The first user request that happens DURING warmup
+    # still pays cold-start; only requests after the ~1-2s warmup
+    # window benefit. That's fine — Render's healthz gate keeps the
+    # service marked "deploying" until it accepts traffic, and the
+    # first real Slack/chat request typically arrives seconds later.
+    asyncio.get_event_loop().run_in_executor(None, _warmup_blocking)
 
 
 @app.on_event("shutdown")
