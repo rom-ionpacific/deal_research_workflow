@@ -136,14 +136,68 @@ def _trigger_extraction_via_dce(document_id: int) -> dict:
         }
 
 
+def _filter_body_to_snippets(
+    body: str, query: str, max_chars: int, ctx_chars: int = 500,
+) -> str:
+    """Return the parts of `body` near case-insensitive occurrences of
+    `query`, with `ctx_chars` of context on each side, joined by
+    `\\n\\n---\\n\\n`, capped at `max_chars`. If the query is not
+    found at all, returns an empty string (caller surfaces that)."""
+    if not query:
+        return body[:max_chars]
+    needle = query.lower()
+    hay = body.lower()
+    if needle not in hay:
+        return ""
+    # Walk all match positions, build (start, end) spans with context.
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    while True:
+        i = hay.find(needle, pos)
+        if i < 0:
+            break
+        start = max(0, i - ctx_chars)
+        end = min(len(body), i + len(needle) + ctx_chars)
+        spans.append((start, end))
+        pos = i + len(needle)
+    # Merge overlapping spans (cheap because they're already sorted).
+    merged: list[tuple[int, int]] = []
+    for s, e in spans:
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    # Concatenate up to max_chars, marking gaps.
+    out_parts: list[str] = []
+    used = 0
+    sep = "\n\n---\n\n"
+    for s, e in merged:
+        snippet = body[s:e]
+        if used and used + len(sep) + len(snippet) > max_chars:
+            break
+        if out_parts:
+            out_parts.append(sep)
+            used += len(sep)
+        out_parts.append(snippet)
+        used += len(snippet)
+        if used >= max_chars:
+            break
+    return "".join(out_parts)[:max_chars]
+
+
 def get_document_body(
     *,
     document_id: Optional[int] = None,
     document_name: Optional[str] = None,
     web_url: Optional[str] = None,
     max_chars: int = 20_000,
+    query: Optional[str] = None,
 ) -> DocumentBodyResult:
-    """Return the document body, extracting on-demand if not cached."""
+    """Return the document body, extracting on-demand if not cached.
+
+    When `query` is given, the returned body is filtered to ~500 char
+    windows around each case-insensitive match. Use this for long docs
+    (PPM, LPA) where the user is asking about a specific topic."""
 
     doc_id = _resolve_document_id(document_id, document_name, web_url)
     if doc_id is None:
@@ -186,6 +240,30 @@ def get_document_body(
         )
 
     total = len(body)
+
+    if query:
+        snippets = _filter_body_to_snippets(body, query, max_chars=max_chars)
+        if snippets:
+            return DocumentBodyResult(
+                document_id=doc_id, ok=True, name=row["name"], path=row["path"],
+                web_url=row["web_url"],
+                modified_at=row["modified_at"].isoformat() if row["modified_at"] else None,
+                total_chars=total, returned_chars=len(snippets),
+                truncated=False, body=snippets, cached=cached, error=None,
+            )
+        # Query not found: fall through to the unfiltered head with an
+        # `error` hint so the model knows the query missed and can
+        # decide whether to read more or try a different query.
+        head = body[:max_chars]
+        return DocumentBodyResult(
+            document_id=doc_id, ok=True, name=row["name"], path=row["path"],
+            web_url=row["web_url"],
+            modified_at=row["modified_at"].isoformat() if row["modified_at"] else None,
+            total_chars=total, returned_chars=len(head),
+            truncated=total > max_chars, body=head, cached=cached,
+            error=f"query_not_found:{query!r}",
+        )
+
     truncated = total > max_chars
     returned = body[:max_chars] if truncated else body
 

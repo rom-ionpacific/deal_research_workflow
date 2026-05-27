@@ -1467,7 +1467,19 @@ class ReadDocumentInput(BaseModel):
         20_000, ge=500, le=200_000,
         description=(
             "Truncate the returned body beyond this many chars. "
-            "Default 20,000 (~5k tokens). Increase only if needed."
+            "Default 20,000 (~5k tokens). When the doc is long and "
+            "you need a specific section, prefer `query` over bumping "
+            "this -- much more token-efficient."
+        ),
+    )
+    query: str | None = Field(
+        None,
+        description=(
+            "Optional in-doc search: when given, the returned body "
+            "is filtered to paragraphs containing this query "
+            "(case-insensitive) plus ~500 chars of surrounding "
+            "context. Use this for long docs (PPM, LPA, IC memo) "
+            "where you only need a specific section."
         ),
     )
 
@@ -1493,6 +1505,7 @@ def _read_document_handler(inp: ReadDocumentInput, ctx: dict) -> ToolResult:
         document_name=inp.document_name,
         web_url=inp.web_url,
         max_chars=inp.max_chars,
+        query=inp.query,
     )
     return ToolResult(output=to_tool_output(result))
 

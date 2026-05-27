@@ -52,7 +52,10 @@ log = logging.getLogger(__name__)
 
 MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 2048
-MAX_ITERS = 6                # tool-loop cap
+MAX_ITERS = 12               # tool-loop cap. Doc-Q&A workflows can
+                             # legitimately chain find_organizations →
+                             # search_documents → 2-3 read_document calls
+                             # before answering; 6 was too tight.
 HISTORY_CAP = 40             # message dicts kept in slack_conversation
 SECTION_CHAR_LIMIT = 2800    # Slack section block max is 3000
 
@@ -83,12 +86,32 @@ breakdown, activity by quarter
 counts, main contacts, recent docs / threads / events / slack groups, \
 deal stats. Best for "what's this org" or "what's the most recent thing"
 - `read_document_summary(document_id)` -- LLM summary of one document. \
-Use after get_org_dossier surfaces a relevant doc id.
-- `read_document(document_id | document_name | web_url, max_chars=20000)` \
--- FULL TEXT BODY of a document. More expensive than the summary -- \
-only call this when the summary isn't conclusive and the user is \
-asking something the body can actually answer (specific number, \
-quote, page-level detail). Cached after first read.
+Use after get_org_dossier or search_documents surfaces a relevant doc id.
+- `search_documents(query, org_ids, limit=10)` -- find docs BY TOPIC \
+or filename, scoped to the canonical org_ids. Always prefer this over \
+spelunking the chronological dossier when the user asks about content \
+("GP commitment", "revenue", "investment thesis"). Returns ranked \
+candidates with summary previews. Pair with read_document_summary or \
+read_document.
+- `read_document(document_id | document_name | web_url, \
+max_chars=20000, query?)` -- FULL TEXT BODY of a document. Cached \
+after first read. For long docs (PPMs, LPAs, IC memos) pass `query` \
+to filter the body to ~500-char windows around your topic instead \
+of dumping the whole doc -- much more token-efficient. If \
+`error="query_not_found:..."` comes back, refine the query.
+
+# Workflow for content questions
+
+When the user asks something a doc would answer ("what's the GP \
+commitment to Stonecutter III", "what was Q3 revenue"), the order is:
+
+  1. find_organizations + bundle_via_supersede -> canonical org_ids
+  2. search_documents(query=<topic>, org_ids=...) -> pick the right doc
+  3. read_document(document_id=..., query=<topic>) -> get the answer
+  4. Answer with a Slack link to the doc
+
+Do NOT loop on read_document for random docs from get_org_dossier -- \
+that's how you blow through the tool budget without finding the answer.
 
 # Conversational rules
 

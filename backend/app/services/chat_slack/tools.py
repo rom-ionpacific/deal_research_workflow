@@ -243,12 +243,40 @@ def read_document_summary(inp: DocumentIdInput, ctx: dict) -> ToolResult:
     )
 
 
+class SearchDocumentsInput(BaseModel):
+    query: str = Field(
+        ...,
+        description=(
+            "What to find docs about. Topic phrase ('GP commitment'), "
+            "doc type ('limited partnership agreement', 'IC memo'), "
+            "or partial filename. Uses hybrid retrieval (filename "
+            "trigram + embedding cosine on doc name+summary)."
+        ),
+        min_length=1, max_length=200,
+    )
+    org_ids: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Restrict to docs attributed to these orgs (via "
+            "dealcloud.organization_entity). Pass the canonical org_id "
+            "list you got from bundle_via_supersede. Empty list means "
+            "search the whole corpus (use sparingly -- 280k docs)."
+        ),
+        max_length=20,
+    )
+    limit: int = Field(
+        10, ge=1, le=25,
+        description="Max documents to return.",
+    )
+
+
 class ReadDocumentInput(BaseModel):
     document_id: int | None = Field(
         None,
         description=(
             "dealcloud.document.id. Preferred when known -- you usually "
-            "get it from get_org_dossier or read_document_summary first."
+            "get it from get_org_dossier, search_documents, or "
+            "read_document_summary first."
         ),
     )
     document_name: str | None = Field(
@@ -268,8 +296,57 @@ class ReadDocumentInput(BaseModel):
     )
     max_chars: int = Field(
         20_000, ge=500, le=200_000,
-        description="Truncate the returned body beyond this many chars.",
+        description=(
+            "Truncate the returned body beyond this many chars. "
+            "When the doc is long and you need a specific section, "
+            "prefer passing `query` over bumping this -- much more "
+            "token-efficient."
+        ),
     )
+    query: str | None = Field(
+        None,
+        description=(
+            "Optional in-doc search: when given, the returned body "
+            "is filtered to paragraphs containing this query "
+            "(case-insensitive) plus ~500 chars of surrounding "
+            "context. Use this when the doc is long (e.g. a PPM or "
+            "LPA) and you only need the section about a specific "
+            "topic like 'GP commitment' or 'management fee'."
+        ),
+    )
+
+
+@slack_registry.tool(
+    "search_documents",
+    (
+        "Find documents BY TOPIC or filename, scoped to org_ids. "
+        "Use this BEFORE read_document whenever the user asks about "
+        "content (financials, fund terms, deal status, etc.) -- "
+        "spelunking the dossier's chronological doc list is slow "
+        "and often misses the right doc. Returns up to `limit` rows "
+        "ranked by hybrid retrieval (filename trigram + embedding "
+        "cosine over doc name+summary). Each row has document_id, "
+        "name, path, web_url, summary_preview, score. Pass the "
+        "canonical org_ids from bundle_via_supersede; empty list "
+        "searches the whole 280k-doc corpus (avoid unless org "
+        "search has failed). Read-only."
+    ),
+    SearchDocumentsInput,
+)
+def search_documents(inp: SearchDocumentsInput, ctx: dict) -> ToolResult:
+    from ..document_search import search_documents_for_orgs
+    rows = search_documents_for_orgs(
+        org_ids=inp.org_ids,
+        query=inp.query,
+        limit=inp.limit,
+        mode="hybrid",
+    )
+    return ToolResult(output={
+        "query": inp.query,
+        "org_ids": inp.org_ids,
+        "count": len(rows),
+        "results": rows,
+    })
 
 
 @slack_registry.tool(
@@ -282,7 +359,9 @@ class ReadDocumentInput(BaseModel):
         "first read. Returns body (possibly truncated to max_chars), "
         "total_chars, truncated flag, plus name / path / web_url for "
         "citing back to the user in Slack. Identify the doc by "
-        "document_id (preferred), document_name, or web_url."
+        "document_id (preferred), document_name, or web_url. "
+        "For long docs (PPM, LPA, IC memo) pass `query` to filter "
+        "the returned body to paragraphs about a specific topic."
     ),
     ReadDocumentInput,
 )
@@ -293,6 +372,7 @@ def read_document(inp: ReadDocumentInput, ctx: dict) -> ToolResult:
         document_name=inp.document_name,
         web_url=inp.web_url,
         max_chars=inp.max_chars,
+        query=inp.query,
     )
     return ToolResult(output=to_tool_output(result))
 

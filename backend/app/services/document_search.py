@@ -219,3 +219,139 @@ def search_documents(
     else:
         raise ValueError(f"unknown mode {mode!r}")
     return [_row_to_dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Org-scoped variant for Todd (no data room concept in Slack)
+# ---------------------------------------------------------------------------
+
+# Same trigram / semantic / RRF structure as the room-scoped path
+# above, but the scope filter is "documents tied to any of these
+# org_ids via document_organization_alias" rather than membership in
+# a historical_data_room_entity. EXISTS subquery in the WHERE clause
+# avoids fan-out from a JOIN when one doc has multiple alias rows for
+# the same org.
+_TRIGRAM_SQL_ORG = """
+WITH q AS (SELECT %s::text AS qtext, %s::int AS lim),
+hits AS (
+    SELECT d.id,
+           d.name,
+           d.path,
+           d.modified_at,
+           d.web_url,
+           LEFT(COALESCE(d.summary, ''), 200) AS summary_preview,
+           CASE
+             WHEN lower(d.name) = lower((SELECT qtext FROM q))                THEN 1.00
+             WHEN lower(d.name) LIKE lower((SELECT qtext FROM q)) || '%%'     THEN 0.85
+             WHEN lower(d.name) LIKE '%%' || lower((SELECT qtext FROM q)) || '%%' THEN 0.70
+             ELSE 0.60 * GREATEST(
+                 dealcloud.similarity(d.name, (SELECT qtext FROM q)),
+                 dealcloud.similarity(COALESCE(d.path, ''), (SELECT qtext FROM q))
+             )
+           END AS score,
+           'name'::text AS match_kind
+    FROM dealcloud.document d
+    WHERE
+       (
+         lower(d.name) = lower((SELECT qtext FROM q))
+         OR lower(d.name) LIKE '%%' || lower((SELECT qtext FROM q)) || '%%'
+         OR dealcloud.similarity(d.name, (SELECT qtext FROM q)) > 0.3
+         OR dealcloud.similarity(COALESCE(d.path, ''), (SELECT qtext FROM q)) > 0.3
+       )
+       AND (
+         COALESCE(array_length(%s::int[], 1), 0) = 0
+         OR EXISTS (
+           SELECT 1 FROM dealcloud.organization_entity oe
+            WHERE oe.entity_type = 'document'
+              AND oe.entity_id = d.id
+              AND oe.organization_id = ANY (%s::int[])
+         )
+       )
+)
+SELECT id, name, path, modified_at, web_url, summary_preview, score, match_kind
+  FROM hits
+ ORDER BY score DESC, name
+ LIMIT (SELECT lim FROM q)
+"""
+
+
+_SEMANTIC_SQL_ORG = """
+WITH q AS (SELECT %s::public.vector AS qvec, %s::int AS lim)
+SELECT d.id,
+       d.name,
+       d.path,
+       d.modified_at,
+       d.web_url,
+       LEFT(COALESCE(d.summary, ''), 200) AS summary_preview,
+       1 - (de.embedding <=> (SELECT qvec FROM q)) AS score,
+       'semantic'::text AS match_kind
+  FROM dealcloud.document_embedding de
+  JOIN dealcloud.document d ON d.id = de.document_id
+ WHERE de.model = %s
+   AND (
+     COALESCE(array_length(%s::int[], 1), 0) = 0
+     OR EXISTS (
+       SELECT 1 FROM dealcloud.organization_entity oe
+        WHERE oe.entity_type = 'document'
+          AND oe.entity_id = d.id
+          AND oe.organization_id = ANY (%s::int[])
+     )
+   )
+ ORDER BY de.embedding <=> (SELECT qvec FROM q)
+ LIMIT (SELECT lim FROM q)
+"""
+
+
+def _trigram_rows_org(org_ids: list[int], query: str, limit: int) -> list[dict]:
+    orgs = org_ids or []
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # orgs passed twice: once for the length guard, once for ANY()
+        cur.execute(_TRIGRAM_SQL_ORG, (query, limit, orgs, orgs))
+        return list(cur.fetchall())
+
+
+def _semantic_rows_org(org_ids: list[int], query: str, limit: int) -> list[dict]:
+    try:
+        emb = embed_query(query)
+    except EmbedNotConfigured:
+        return []
+    except EmbedError as e:
+        logger.warning("doc semantic search (org) fell back to trigram-only: %s", e)
+        return []
+    vec = vector_literal(emb)
+    orgs = org_ids or []
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(_SEMANTIC_SQL_ORG, (vec, limit, _EMBED_MODEL, orgs, orgs))
+        return list(cur.fetchall())
+
+
+def search_documents_for_orgs(
+    org_ids: list[int],
+    query: str,
+    limit: int = 10,
+    mode: SearchMode = "hybrid",
+) -> list[dict]:
+    """Top-N documents matching `query`, optionally scoped to
+    `org_ids`. Empty org_ids = global corpus search (use sparingly --
+    280k docs is a lot to RRF). Used by Todd (no data room concept in
+    Slack) to find topic-relevant docs without spelunking the
+    dossier's chronological-recent list."""
+    if mode == "trigram":
+        rows = _trigram_rows_org(org_ids, query, limit)
+    elif mode == "semantic":
+        rows = _semantic_rows_org(org_ids, query, limit)
+        if not rows:
+            rows = _trigram_rows_org(org_ids, query, limit)
+    elif mode == "hybrid":
+        pool = max(limit * 3, 30)
+        trigram = _trigram_rows_org(org_ids, query, pool)
+        semantic = _semantic_rows_org(org_ids, query, pool)
+        if not semantic:
+            rows = trigram[:limit]
+        else:
+            rows = _rrf_merge(trigram, semantic, limit)
+    else:
+        raise ValueError(f"unknown mode {mode!r}")
+    return [_row_to_dict(r) for r in rows]
