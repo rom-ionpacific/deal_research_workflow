@@ -314,6 +314,10 @@ def _post_section(channel: str, thread_ts: str | None, mrkdwn: str) -> None:
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": mrkdwn[:SECTION_CHAR_LIMIT]},
             }],
+            # Don't let Slack expand the one-pager's source links into
+            # preview cards -- with ~15 links it makes the message huge.
+            "unfurl_links": False,
+            "unfurl_media": False,
         }
         if thread_ts:
             kwargs["thread_ts"] = thread_ts
@@ -360,6 +364,8 @@ def _post_context(channel: str, thread_ts: str | None, mrkdwn: str) -> None:
                 "type": "context",
                 "elements": [{"type": "mrkdwn", "text": mrkdwn[:1500]}],
             }],
+            "unfurl_links": False,
+            "unfurl_media": False,
         }
         if thread_ts:
             kwargs["thread_ts"] = thread_ts
