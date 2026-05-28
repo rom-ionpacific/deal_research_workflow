@@ -378,6 +378,209 @@ def read_document(inp: ReadDocumentInput, ctx: dict) -> ToolResult:
 
 
 # ---------------------------------------------------------------------------
+# Deal one-pager (pre-built weekly by deal_cloud_enhancer; we only READ)
+# ---------------------------------------------------------------------------
+
+class DealNameInput(BaseModel):
+    deal_name: str = Field(
+        ...,
+        description=(
+            "The DEAL name / codename (e.g. 'Project Auto II', "
+            "'Project Ostrich V') -- NOT the company name. One company "
+            "can have several deals, so the one-pager is keyed by deal. "
+            "If the user gives you a company, call list_deals first to "
+            "find the deal name."
+        ),
+        min_length=1, max_length=120,
+    )
+
+
+class CompanyNameInput(BaseModel):
+    company: str = Field(
+        ...,
+        description="Company name to list deals for (e.g. 'Moove').",
+        min_length=1, max_length=120,
+    )
+
+
+def _match_deals(cur, deal_name: str) -> list[dict]:
+    cur.execute(
+        """
+        SELECT d.id, d.name, d.status, d.transaction_type,
+               o.name AS org_name
+          FROM dealcloud.deal d
+          LEFT JOIN dealcloud.organization o ON o.id = d.organization_id
+         WHERE d.name ILIKE %s
+            OR dealcloud.similarity(d.name, %s) > 0.35
+         ORDER BY (lower(d.name) = lower(%s)) DESC,
+                  dealcloud.similarity(d.name, %s) DESC
+         LIMIT 10
+        """,
+        (f"%{deal_name}%", deal_name, deal_name, deal_name),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def _deals_for_company(cur, company: str) -> list[dict]:
+    cur.execute(
+        """
+        SELECT d.id, d.name, d.status, d.transaction_type, o.name AS org_name
+          FROM dealcloud.deal d
+          JOIN dealcloud.organization o ON o.id = d.organization_id
+         WHERE o.name ILIKE %s
+            OR dealcloud.similarity(o.name, %s) > 0.4
+         ORDER BY o.name, d.status, d.name
+         LIMIT 25
+        """,
+        (f"%{company}%", company),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def _assemble_one_pager(cur, deal_id: int) -> dict | None:
+    """Read the latest complete/partial one-pager for a deal and return
+    its sections (structured content + rendered markdown) in order, plus
+    an assembled markdown blob. None if no one-pager has been built."""
+    cur.execute(
+        """
+        SELECT id, status, generated_at
+          FROM dealcloud.deal_one_pager
+         WHERE deal_id = %s AND status IN ('complete', 'partial')
+         ORDER BY generated_at DESC NULLS LAST
+         LIMIT 1
+        """,
+        (deal_id,),
+    )
+    pager = cur.fetchone()
+    if not pager:
+        return None
+    cur.execute(
+        """
+        SELECT s.title, r.section_key, r.status, r.content, r.content_markdown
+          FROM dealcloud.deal_one_pager_section_result r
+          JOIN dealcloud.deal_one_pager_section s ON s.id = r.section_id
+         WHERE r.one_pager_id = %s
+         ORDER BY s.sort_order, s.id
+        """,
+        (pager["id"],),
+    )
+    sections = [dict(r) for r in cur.fetchall()]
+    md = "\n\n".join(
+        f"## {s['title']}\n\n{s['content_markdown'] or '_(' + s['status'] + ')_'}"
+        for s in sections
+    )
+    return {
+        "one_pager_status": pager["status"],
+        "generated_at": pager["generated_at"],
+        "sections": sections,
+        "markdown": md,
+    }
+
+
+@slack_registry.tool(
+    "get_deal_one_pager",
+    (
+        "Fetch the pre-built one-pager for a DEAL (keyed by deal name / "
+        "codename, e.g. 'Project Auto II' -- NOT the company name). "
+        "One-pagers are rebuilt weekly (Sunday) for every live-pipeline "
+        "deal; this only READS the stored result, it does not generate. "
+        "Returns the assembled one-pager (Company Overview, Deal "
+        "Overview, Deal History, Contacts, News & Flags, Investors) with "
+        "source links. If the deal name matches several deals, you get a "
+        "disambiguation list -- ask the user which one. If the name is "
+        "actually a company, you get that company's deals to choose "
+        "from. If no one-pager exists yet for the matched deal, that's "
+        "reported too (it may be a non-pipeline deal that isn't built "
+        "weekly)."
+    ),
+    DealNameInput,
+)
+def get_deal_one_pager(inp: DealNameInput, ctx: dict) -> ToolResult:
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        matches = _match_deals(cur, inp.deal_name)
+
+        if not matches:
+            # Maybe the user gave a company name rather than a deal name.
+            company_deals = _deals_for_company(cur, inp.deal_name)
+            if company_deals:
+                return ToolResult(output={
+                    "matched": "company_not_deal",
+                    "note": (f"No deal is named '{inp.deal_name}', but it "
+                             f"looks like a company. Ask the user which of "
+                             f"these deals they mean, then call "
+                             f"get_deal_one_pager with that deal name."),
+                    "deals": company_deals,
+                })
+            return ToolResult(output={
+                "matched": "none",
+                "note": f"No deal found matching '{inp.deal_name}'.",
+            })
+
+        if len(matches) > 1:
+            # Exact-name hit wins outright; otherwise disambiguate.
+            exact = [m for m in matches if m["name"].lower() == inp.deal_name.lower()]
+            if len(exact) != 1:
+                return ToolResult(output={
+                    "matched": "ambiguous",
+                    "note": ("Several deals match -- ask the user which one, "
+                             "then call again with the exact deal name."),
+                    "candidates": matches,
+                })
+            matches = exact
+
+        deal = matches[0]
+        pager = _assemble_one_pager(cur, deal["id"])
+
+    if pager is None:
+        return ToolResult(output={
+            "matched": "deal_no_one_pager",
+            "deal": deal,
+            "note": (f"Deal '{deal['name']}' ({deal['status']}) has no "
+                     f"one-pager built yet. One-pagers are pre-built "
+                     f"weekly for live-pipeline deals; this deal may be "
+                     f"outside that set ({deal['status']})."),
+        })
+
+    return ToolResult(output={
+        "matched": "deal",
+        "deal_id": deal["id"],
+        "deal_name": deal["name"],
+        "deal_status": deal["status"],
+        "company": deal.get("org_name"),
+        "one_pager_status": pager["one_pager_status"],
+        "generated_at": pager["generated_at"],
+        "markdown": pager["markdown"],
+        "sections": [
+            {"title": s["title"], "section_key": s["section_key"],
+             "status": s["status"], "content_markdown": s["content_markdown"]}
+            for s in pager["sections"]
+        ],
+    })
+
+
+@slack_registry.tool(
+    "list_deals",
+    (
+        "List the deals we have for a COMPANY (so you can find the deal "
+        "name to pass to get_deal_one_pager). Use when the user names a "
+        "company rather than a specific deal. Returns each deal's name, "
+        "status, and type."
+    ),
+    CompanyNameInput,
+)
+def list_deals(inp: CompanyNameInput, ctx: dict) -> ToolResult:
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        deals = _deals_for_company(cur, inp.company)
+    return ToolResult(output={
+        "company_query": inp.company,
+        "count": len(deals),
+        "deals": deals,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

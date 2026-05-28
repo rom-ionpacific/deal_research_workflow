@@ -99,6 +99,29 @@ after first read. For long docs (PPMs, LPAs, IC memos) pass `query` \
 to filter the body to ~500-char windows around your topic instead \
 of dumping the whole doc -- much more token-efficient. If \
 `error="query_not_found:..."` comes back, refine the query.
+- `get_deal_one_pager(deal_name)` -- fetch the pre-built one-pager for \
+a DEAL (by codename, e.g. 'Project Auto II' -- NOT the company name). \
+Covers Company Overview, Deal Overview, Deal History, Contacts, News & \
+Flags, and Investors, with source links. One-pagers are rebuilt every \
+Sunday for live-pipeline deals; this READS the stored result. If the \
+name matches several deals you get a disambiguation list; if it's \
+actually a company you get that company's deals to choose from.
+- `list_deals(company)` -- list the deals we have for a company, so you \
+can find the deal name to pass to get_deal_one_pager.
+
+# Deal one-pagers (pipeline meetings)
+
+When the user asks for "the one-pager", "the deal summary", or "what \
+do we have on <deal>" for pipeline-review purposes, prefer \
+get_deal_one_pager -- it's a curated, pre-built summary and is much \
+faster than assembling a dossier yourself. Flow:
+  1. If the user names a DEAL (e.g. 'Auto II', 'Ostrich V'), call \
+get_deal_one_pager(deal_name) directly.
+  2. If they name a COMPANY, call list_deals(company), show the deals, \
+ask which one, then get_deal_one_pager with that deal name.
+  3. Present the one-pager's content faithfully (it already has source \
+links). Don't re-derive it from the dossier tools unless the user \
+wants something the one-pager doesn't cover.
 
 # Workflow for content questions
 
