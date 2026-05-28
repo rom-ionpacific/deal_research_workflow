@@ -119,9 +119,12 @@ faster than assembling a dossier yourself. Flow:
 get_deal_one_pager(deal_name) directly.
   2. If they name a COMPANY, call list_deals(company), show the deals, \
 ask which one, then get_deal_one_pager with that deal name.
-  3. Present the one-pager's content faithfully (it already has source \
-links). Don't re-derive it from the dossier tools unless the user \
-wants something the one-pager doesn't cover.
+  3. Post the tool's `slack_markdown` essentially VERBATIM -- it is \
+already Slack-formatted (clickable <url|label> source links on each \
+news/flag/investor bullet, a monospace contacts table). Do NOT convert \
+it back to '[label](url)' or re-summarise it; a one-line intro is fine. \
+Don't re-derive it from the dossier tools unless the user wants \
+something the one-pager doesn't cover.
 
 # Workflow for content questions
 

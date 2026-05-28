@@ -14,6 +14,7 @@ Reuses (don't reinvent):
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import psycopg2.extras
@@ -437,6 +438,73 @@ def _deals_for_company(cur, company: str) -> list[dict]:
     return [dict(r) for r in cur.fetchall()]
 
 
+_MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+_MD_BOLD = re.compile(r"\*\*([^*]+)\*\*")
+
+
+def _md_to_slack(text: str) -> str:
+    """Convert the one-pager's standard markdown into Slack mrkdwn so it
+    renders natively in Slack: `[label](url)` -> `<url|label>`,
+    `**bold**` -> `*bold*`, `## Heading` -> `*Heading*`, and `- ` / four-
+    space-`- ` bullets -> `•` / `◦`. (The stored content_markdown is
+    standard markdown -- right for a web view; Slack needs this.)"""
+    if not text:
+        return ""
+    out_lines = []
+    for line in text.split("\n"):
+        m = re.match(r"^(\s*)-\s+(.*)$", line)
+        if line.startswith("## "):
+            line = "*" + line[3:].strip() + "*"
+        elif m:
+            indent = m.group(1)
+            bullet = "◦" if len(indent) >= 4 else "•"
+            line = f"{indent}{bullet} {m.group(2)}"
+        out_lines.append(line)
+    text = "\n".join(out_lines)
+    text = _MD_BOLD.sub(r"*\1*", text)
+    text = _MD_LINK.sub(r"<\2|\1>", text)
+    return text
+
+
+def _contacts_slack_table(content: dict) -> str:
+    """Render the contacts section as a monospace Slack table: a row per
+    company contact with Name / Email / Role, plus the deal's main Ion
+    Pacific contact (with active-touch count) as a column."""
+    their = content.get("their_contacts") or []
+    poc = content.get("main_ion_contact") or {}
+    ion_label = "—"
+    if poc.get("name"):
+        ion_label = f"{poc['name']} ({poc.get('active_touches', 0)})"
+
+    rows = []
+    for c in their:
+        name = (c.get("name") or "").split("(")[0].strip() or "—"
+        email = c.get("email") or "—"
+        role = c.get("job_title") or c.get("relationship") or "—"
+        rows.append([name[:24], email[:30], role[:22], ion_label[:26]])
+    if not rows:
+        return "_No company contacts on record._"
+
+    headers = ["Name", "Email", "Role", "Ion Pacific contact (touches)"]
+    cols = list(zip(headers, *rows)) if rows else []
+    widths = [max(len(str(v)) for v in col) for col in zip(headers, *rows)]
+    def fmt(r):
+        return "  ".join(str(v).ljust(widths[i]) for i, v in enumerate(r))
+    table = "\n".join([fmt(headers), fmt(["-" * w for w in widths])]
+                      + [fmt(r) for r in rows])
+    return "```\n" + table + "\n```"
+
+
+def _section_slack(section_key: str, content: dict, content_markdown: str,
+                   status: str) -> str:
+    """Slack-native body for one section, rendered from the typed content
+    where it matters (contacts table), else by converting the stored
+    markdown to Slack mrkdwn."""
+    if section_key == "contacts" and content:
+        return _contacts_slack_table(content)
+    return _md_to_slack(content_markdown or f"_({status})_")
+
+
 def _assemble_one_pager(cur, deal_id: int) -> dict | None:
     """Read the latest complete/partial one-pager for a deal and return
     its sections (structured content + rendered markdown) in order, plus
@@ -469,11 +537,18 @@ def _assemble_one_pager(cur, deal_id: int) -> dict | None:
         f"## {s['title']}\n\n{s['content_markdown'] or '_(' + s['status'] + ')_'}"
         for s in sections
     )
+    slack_md = "\n\n".join(
+        f"*{s['title']}*\n"
+        + _section_slack(s["section_key"], s["content"],
+                         s["content_markdown"], s["status"])
+        for s in sections
+    )
     return {
         "one_pager_status": pager["status"],
         "generated_at": pager["generated_at"],
         "sections": sections,
         "markdown": md,
+        "slack_markdown": slack_md,
     }
 
 
@@ -550,12 +625,15 @@ def get_deal_one_pager(inp: DealNameInput, ctx: dict) -> ToolResult:
         "company": deal.get("org_name"),
         "one_pager_status": pager["one_pager_status"],
         "generated_at": pager["generated_at"],
-        "markdown": pager["markdown"],
-        "sections": [
-            {"title": s["title"], "section_key": s["section_key"],
-             "status": s["status"], "content_markdown": s["content_markdown"]}
-            for s in pager["sections"]
-        ],
+        # slack_ready: already formatted for Slack (mrkdwn links as
+        # <url|label>, contacts as a monospace table). Post it VERBATIM.
+        "slack_markdown": pager["slack_markdown"],
+        "present_instructions": (
+            "Post slack_markdown to the user essentially verbatim -- it is "
+            "already Slack-formatted (clickable <url|label> source links, "
+            "a contacts table). Do NOT convert it to '[label](url)' or "
+            "re-summarise it; you may add a one-line intro."
+        ),
     })
 
 
