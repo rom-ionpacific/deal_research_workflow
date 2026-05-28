@@ -467,32 +467,33 @@ def _md_to_slack(text: str) -> str:
 
 
 def _contacts_slack_table(content: dict) -> str:
-    """Render the contacts section as a monospace Slack table: a row per
-    company contact with Name / Email / Role, plus the deal's main Ion
-    Pacific contact (with active-touch count) as a column."""
+    """Render the contacts section as a caption line for the deal's main
+    Ion Pacific contact, plus a monospace Slack table with a row per
+    company contact (Name / Email / Role)."""
     their = content.get("their_contacts") or []
     poc = content.get("main_ion_contact") or {}
-    ion_label = "—"
+
+    caption = "*Ion Pacific contact:* —"
     if poc.get("name"):
-        ion_label = f"{poc['name']} ({poc.get('active_touches', 0)})"
+        caption = (f"*Ion Pacific contact:* {poc['name']} "
+                   f"({poc.get('active_touches', 0)} active touches)")
 
     rows = []
     for c in their:
         name = (c.get("name") or "").split("(")[0].strip() or "—"
         email = c.get("email") or "—"
         role = c.get("job_title") or c.get("relationship") or "—"
-        rows.append([name[:24], email[:30], role[:22], ion_label[:26]])
+        rows.append([name[:26], email[:32], role[:24]])
     if not rows:
-        return "_No company contacts on record._"
+        return caption + "\n_No company contacts on record._"
 
-    headers = ["Name", "Email", "Role", "Ion Pacific contact (touches)"]
-    cols = list(zip(headers, *rows)) if rows else []
+    headers = ["Name", "Email", "Role"]
     widths = [max(len(str(v)) for v in col) for col in zip(headers, *rows)]
     def fmt(r):
         return "  ".join(str(v).ljust(widths[i]) for i, v in enumerate(r))
     table = "\n".join([fmt(headers), fmt(["-" * w for w in widths])]
                       + [fmt(r) for r in rows])
-    return "```\n" + table + "\n```"
+    return caption + "\n```\n" + table + "\n```"
 
 
 def _section_slack(section_key: str, content: dict, content_markdown: str,
