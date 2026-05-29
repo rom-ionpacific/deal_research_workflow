@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "deal-research": {
+      "command": "python",
+      "args": ["-m", "app.mcp"],
+      "cwd": "C:/Users/rom/ion_git/deal_research_workflow/backend"
+    }
+  }
+}

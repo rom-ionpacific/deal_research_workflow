@@ -9,3 +9,7 @@ sse-starlette>=2.1
 python-multipart>=0.0.12
 slack-sdk>=3.31
 google-genai>=0.3
+# MCP server framework (+ future PII scrubber) — shared infra repo.
+# Local dev: pip install -e ../../claude_enterprise_utils  (pulls mcp transitively)
+# Render: once the repo is pushed (private -> needs a deploy key), enable:
+#   claude_enterprise_utils @ git+https://github.com/rom-ionpacific/claude_enterprise_utils.git@main
