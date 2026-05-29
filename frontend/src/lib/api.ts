@@ -274,6 +274,61 @@ export interface DataRoomDetail {
   followup_questions: FollowupQA[];
 }
 
+// ----- deal one-pagers -----
+
+export interface DealListItem {
+  deal_id: number;
+  name: string;
+  status: string;
+  company: string | null;
+  has_one_pager: boolean;
+  one_pager_status: string | null;
+  generated_at: string | null;
+}
+
+export interface OnePagerSection {
+  section_key: string;
+  title: string;
+  status: string;
+  content: unknown | null;
+  content_markdown: string;
+}
+
+export interface OnePager {
+  one_pager_id: number;
+  status: string;
+  generated_at: string | null;
+  sections: OnePagerSection[];
+}
+
+export interface BuildState {
+  // 'idle' | 'running' | 'stale' (a 'running' row older than the
+  // ~10-min stale window, i.e. the dce build dyno likely died).
+  state: "idle" | "running" | "stale";
+  running_pager_id: number | null;
+  started_at: string | null;
+}
+
+export interface DealInfo {
+  deal_id: number;
+  name: string;
+  status: string;
+  transaction_type: string | null;
+  company: string | null;
+}
+
+export interface DealOnePagerResp {
+  deal: DealInfo;
+  one_pager: OnePager | null;
+  build: BuildState;
+}
+
+export interface BuildOnePagerResp {
+  deal_id: number;
+  building: boolean;
+  already_running: boolean;
+}
+
 // ----- chat -----
 
 export interface ChatMessage {
@@ -510,6 +565,30 @@ export const api = {
     request<ChatMessage[]>(
       `/api/v1/sessions/${sessionId}/messages?limit=${limit}`
     ),
+
+  // ---- deal one-pagers ----
+  // No q -> the live-pipeline deals (the weekly-baked set). With q ->
+  // search any deal by name or company.
+  listDeals: (q?: string, limit = 25) => {
+    const params = new URLSearchParams();
+    if (q && q.trim()) params.set("q", q.trim());
+    params.set("limit", String(limit));
+    return request<DealListItem[]>(`/api/v1/deals?${params.toString()}`);
+  },
+
+  // Latest complete/partial one-pager + current build state. Polled
+  // while build.state === 'running'.
+  getDealOnePager: (dealId: number) =>
+    request<DealOnePagerResp>(`/api/v1/deals/${dealId}/one-pager`),
+
+  // Trigger a (re)build in dce. Returns 202; poll getDealOnePager to
+  // see the new row land. Idempotent unless force (a build already
+  // running for the deal is reused).
+  buildDealOnePager: (dealId: number, force = false) =>
+    request<BuildOnePagerResp>(`/api/v1/deals/${dealId}/one-pager/build`, {
+      method: "POST",
+      body: JSON.stringify({ force }),
+    }),
 };
 
 // -- SSE chat stream --------------------------------------------------------

@@ -1,17 +1,51 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { Navigate, Route, Routes, Link, useNavigate } from "react-router-dom";
+import {
+  Navigate,
+  Route,
+  Routes,
+  Link,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
 
+import DealOnePagerPage from "./routes/DealOnePagerPage";
+import OnePagersListPage from "./routes/OnePagersListPage";
 import ResearchPage from "./routes/ResearchPage";
 import SessionsListPage from "./routes/SessionsListPage";
 import { useUI } from "./stores/ui";
 
+/** Segmented-control tab: the active tab is a raised white block on the
+ * gray track so the current section reads at a glance. */
+function tabClass(active: boolean): string {
+  return (
+    "px-3 py-1.5 rounded-md text-sm transition-colors " +
+    (active
+      ? "bg-white shadow-sm text-slate-900 font-semibold"
+      : "text-slate-500 hover:text-slate-800")
+  );
+}
+
 export default function App() {
+  const { pathname } = useLocation();
+  const researchActive = pathname === "/" || pathname.startsWith("/research");
+  const onePagersActive = pathname.startsWith("/one-pagers");
+
   return (
     <div className="h-full flex flex-col">
       <header className="border-b border-slate-200 px-6 py-3 flex items-center justify-between gap-4">
-        <Link to="/" className="font-semibold text-slate-800 shrink-0">
-          deal_research_workflow
-        </Link>
+        <div className="flex items-center gap-5 min-w-0">
+          <Link to="/" className="font-semibold text-slate-800 shrink-0">
+            deal_research_workflow
+          </Link>
+          <nav className="flex items-center gap-1 bg-slate-100 rounded-lg p-1">
+            <Link to="/" className={tabClass(researchActive)}>
+              Research
+            </Link>
+            <Link to="/one-pagers" className={tabClass(onePagersActive)}>
+              One-pagers
+            </Link>
+          </nav>
+        </div>
         <UserStrip />
       </header>
       {/* min-h-0 + overflow-hidden lets nested scrollers (the chat
@@ -26,6 +60,8 @@ export default function App() {
             path="/research/:sessionId/v/:versionId"
             element={<ResearchPage />}
           />
+          <Route path="/one-pagers" element={<OnePagersListPage />} />
+          <Route path="/one-pagers/:dealId" element={<DealOnePagerPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
