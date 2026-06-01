@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from claude_enterprise_utils.mcp import build_server
 from claude_enterprise_utils.mcp import build_http_app as _build_http_app
+from claude_enterprise_utils.mcp import oauth_config_from_env
 from claude_enterprise_utils.mcp import run_stdio as _run_stdio
 from claude_enterprise_utils.scrubber import make_response_filter
 
@@ -41,5 +42,18 @@ async def run_stdio() -> None:
 
 
 def build_http_app(json_response: bool = True):
-    """Starlette ASGI app exposing the server over streamable HTTP."""
-    return _build_http_app(build_default_server(), json_response=json_response)
+    """Starlette ASGI app exposing the server over streamable HTTP.
+
+    Auth posture is chosen from the environment:
+      * If OAuth env vars are set (MCP_PUBLIC_URL + MCP_OAUTH_AUDIENCE +
+        MCP_OAUTH_TENANT_ID/ISSUER), enforce OAuth as a Resource Server
+        validating Entra-issued JWTs — the posture for an org-wide
+        Claude connector.
+      * Otherwise fall back to the interim MCP_BEARER_TOKEN gate (or open,
+        for local dev).
+    """
+    return _build_http_app(
+        build_default_server(),
+        json_response=json_response,
+        auth=oauth_config_from_env(),
+    )
