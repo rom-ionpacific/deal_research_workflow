@@ -26,17 +26,28 @@ registry). Install the library for local dev:
 
 All are read-only and ignore session/ctx state.
 
-## ⚠️ Security — read before broad exposure
+## Security — PII scrubbing
 
 `read_document` (and `read_document_summary`) can return **raw document
-and email body text**, which may contain PII (SSNs, bank/account numbers,
-etc.). This server does **not** scrub PII yet.
+and email body text**, which may contain PII. Every tool's output is run
+through the `claude_enterprise_utils` PII scrubber (enabled by default in
+`build_default_server`), which masks high-harm **structured** identifiers
+— SSN, ITIN, EIN, payment cards, IBAN, bank routing/account numbers, US
+passport — wherever they appear in the result. Business contact
+names/emails are intentionally preserved (they're the product). On Team
+plans (no audit logs) this scrubber is the **primary technical control**.
 
+Limitations / before broad exposure:
+
+- The scrubber is **deterministic** — it does not catch person names,
+  free-form addresses, or DOB-in-prose. That's by design (those aren't
+  the target), but means it's not a substitute for access control.
+- The HTTP transport still needs **OAuth** (replacing the
+  `MCP_BEARER_TOKEN` placeholder) before being published as an org-wide
+  connector.
 - **Today:** suitable for the **trusted technical tier** over stdio
-  (Claude Code), with humans who already have data-room access.
-- **Before claude.ai Enterprise / broad exposure:** must sit behind the
-  PII-scrubbing middleware (the next rollout deliverable). See the
-  `claude_enterprise_rollout` plan.
+  (Claude Code). See the `claude_enterprise_rollout` plan for the
+  org-wide gate.
 
 ## Run
 
