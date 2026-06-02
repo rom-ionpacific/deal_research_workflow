@@ -44,14 +44,25 @@ async def run_stdio() -> None:
 def build_http_app(json_response: bool = True):
     """Starlette ASGI app exposing the server over streamable HTTP.
 
-    Auth posture is chosen from the environment:
-      * If OAuth env vars are set (MCP_PUBLIC_URL + MCP_OAUTH_AUDIENCE +
-        MCP_OAUTH_TENANT_ID/ISSUER), enforce OAuth as a Resource Server
-        validating Entra-issued JWTs — the posture for an org-wide
-        Claude connector.
-      * Otherwise fall back to the interim MCP_BEARER_TOKEN gate (or open,
-        for local dev).
+    Auth posture is chosen from the environment, in priority order:
+      1. **Broker** — if MCP_ENTRA_CLIENT_ID/SECRET (+ MCP_PUBLIC_URL +
+         tenant) are set, run as our own OAuth Authorization Server that
+         federates sign-in to Entra (the posture that works with Claude's
+         custom-connector flow). Tokens + clients persist in Neon.
+      2. **Resource Server** — if MCP_OAUTH_* are set, validate
+         Entra-issued JWTs directly (works only where the client doesn't
+         send an RFC 8707 resource indicator).
+      3. **Bearer / open** — interim MCP_BEARER_TOKEN gate (or open dev).
     """
+    from claude_enterprise_utils.broker import (
+        broker_config_from_env,
+        build_broker_http_app,
+    )
+
+    broker_cfg = broker_config_from_env()
+    if broker_cfg is not None:
+        return build_broker_http_app(build_default_server(), broker_cfg)
+
     return _build_http_app(
         build_default_server(),
         json_response=json_response,
