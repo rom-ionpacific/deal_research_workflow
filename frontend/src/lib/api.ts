@@ -276,6 +276,42 @@ export interface DataRoomDetail {
 
 // ----- deal one-pagers -----
 
+// Typed shape of the portfolio_relationship section's `content`. The
+// web view special-cases this section to render as a banner above the
+// rest (see DealOnePagerPage.tsx).
+export interface PortfolioDirectPosition {
+  deal_id: number;
+  deal_name: string;
+  deal_status: string;
+  is_co_invest: boolean;
+  fund_id: number | null;
+  fund_name: string | null;
+  invested_capital: number | null;
+  deal_size: number | null;
+  fair_value: number | null;
+  realized_capital: number | null;
+  total_value_to_invested: number | null;
+}
+
+export interface PortfolioIndirectPosition {
+  deal_id: number;
+  deal_name: string;
+  deal_status: string;
+  via_org_id: number;
+  via_org_name: string | null;
+  ion_fund_id: number | null;
+  ion_fund_name: string | null;
+}
+
+export interface PortfolioRelationshipContent {
+  in_portfolio: boolean;
+  direct_positions: PortfolioDirectPosition[];
+  indirect_positions: PortfolioIndirectPosition[];
+  total_invested_direct: number;
+  total_fair_value_direct: number;
+  summary: string;
+}
+
 export interface DealListItem {
   deal_id: number;
   name: string;

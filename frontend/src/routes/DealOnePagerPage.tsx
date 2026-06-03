@@ -3,8 +3,15 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import Markdown from "../components/Markdown";
-import { api, type DealOnePagerResp } from "../lib/api";
+import {
+  api,
+  type DealOnePagerResp,
+  type PortfolioDirectPosition,
+  type PortfolioRelationshipContent,
+} from "../lib/api";
 import { useUI } from "../stores/ui";
+
+const PORTFOLIO_SECTION_KEY = "portfolio_relationship";
 
 /** One deal's one-pager: renders the stored sections (standard markdown)
  * and a Refresh/Create button that triggers a rebuild in dce. While a
@@ -167,22 +174,29 @@ export default function DealOnePagerPage() {
           </div>
         ) : (
           <div>
-            {onePager?.sections.map((s) => (
-              <section key={s.section_key} className="mb-6">
-                <h2 className="text-base font-semibold border-b border-slate-200 pb-1 mb-2">
-                  {s.title}
-                </h2>
-                {s.content_markdown.trim() ? (
-                  <div className="text-sm text-slate-700">
-                    <Markdown>{s.content_markdown}</Markdown>
-                  </div>
-                ) : (
-                  <div className="text-sm text-slate-400 italic">
-                    ({s.status})
-                  </div>
-                )}
-              </section>
-            ))}
+            <PortfolioBanner
+              section={onePager?.sections.find(
+                (s) => s.section_key === PORTFOLIO_SECTION_KEY
+              )}
+            />
+            {onePager?.sections
+              .filter((s) => s.section_key !== PORTFOLIO_SECTION_KEY)
+              .map((s) => (
+                <section key={s.section_key} className="mb-6">
+                  <h2 className="text-base font-semibold border-b border-slate-200 pb-1 mb-2">
+                    {s.title}
+                  </h2>
+                  {s.content_markdown.trim() ? (
+                    <div className="text-sm text-slate-700">
+                      <Markdown>{s.content_markdown}</Markdown>
+                    </div>
+                  ) : (
+                    <div className="text-sm text-slate-400 italic">
+                      ({s.status})
+                    </div>
+                  )}
+                </section>
+              ))}
           </div>
         )}
       </div>
@@ -198,4 +212,90 @@ function CenteredNote({ children }: { children: React.ReactNode }) {
       </div>
     </div>
   );
+}
+
+/** Banner-style render of the portfolio_relationship section. We
+ * special-case this above the regular sections loop so the user sees
+ * the company's standing immediately under the page header rather than
+ * buried in section 6 of 7. Typed content from the section is the
+ * source of truth; the section's stored content_markdown is the Slack
+ * / Todd / fallback render. */
+function PortfolioBanner({
+  section,
+}: {
+  section: { content: unknown } | undefined;
+}) {
+  if (!section) return null;
+  const content = section.content as PortfolioRelationshipContent | null;
+  if (!content) return null;
+
+  if (!content.in_portfolio) {
+    return (
+      <div className="mb-5">
+        <span className="inline-flex items-center px-3 py-1.5 rounded-full bg-slate-100 border border-slate-200 text-sm text-slate-600">
+          Not in portfolio
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mb-5 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3">
+      <div className="flex items-center justify-between gap-3 mb-2">
+        <span className="text-sm font-semibold text-emerald-900">
+          In Portfolio
+        </span>
+        {content.summary && (
+          <span className="text-xs text-emerald-800/80 text-right">
+            {content.summary}
+          </span>
+        )}
+      </div>
+      <ul className="space-y-1.5 text-sm text-slate-800">
+        {content.direct_positions.map((p, i) => (
+          <li key={`d-${i}`}>
+            <span className="font-medium">
+              {p.is_co_invest ? "Co-invest" : "Fund"}
+              {": "}
+              {p.fund_name ?? "(unallocated)"}
+            </span>
+            <span className="text-slate-600"> — {p.deal_name}</span>
+            <PositionMoneyTail p={p} />
+          </li>
+        ))}
+        {content.indirect_positions.map((p, i) => (
+          <li key={`i-${i}`}>
+            <span className="font-medium">
+              Indirect via {p.via_org_name ?? "(unknown GP)"}
+            </span>
+            <span className="text-slate-600">
+              {" "}— through Ion fund{" "}
+              <em>{p.ion_fund_name ?? "(unallocated)"}</em>{" "}
+              <span className="text-slate-500">(deal: {p.deal_name})</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function PositionMoneyTail({ p }: { p: PortfolioDirectPosition }) {
+  const bits: string[] = [];
+  if (p.invested_capital != null && p.invested_capital !== 0)
+    bits.push(`invested ${fmtUSD(p.invested_capital)}`);
+  if (p.fair_value != null && p.fair_value !== 0)
+    bits.push(`fair value ${fmtUSD(p.fair_value)}`);
+  if (p.total_value_to_invested != null)
+    bits.push(`${p.total_value_to_invested.toFixed(2)}x TVI`);
+  if (bits.length === 0) return null;
+  return <span className="text-slate-600"> — {bits.join(" · ")}</span>;
+}
+
+function fmtUSD(n: number): string {
+  const a = Math.abs(n);
+  if (a >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
+  if (a >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
+  if (a >= 1e3) return `$${(n / 1e3).toFixed(0)}K`;
+  return `$${n.toFixed(0)}`;
 }
