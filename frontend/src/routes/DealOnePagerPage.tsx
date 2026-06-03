@@ -7,6 +7,7 @@ import {
   api,
   type DealOnePagerResp,
   type PortfolioDirectPosition,
+  type PortfolioFund,
   type PortfolioRelationshipContent,
 } from "../lib/api";
 import { useUI } from "../stores/ui";
@@ -251,16 +252,19 @@ function PortfolioBanner({
           </span>
         )}
       </div>
-      <ul className="space-y-1.5 text-sm text-slate-800">
+      <ul className="space-y-2 text-sm text-slate-800">
         {content.direct_positions.map((p, i) => (
           <li key={`d-${i}`}>
-            <span className="font-medium">
-              {p.is_co_invest ? "Co-invest" : "Fund"}
-              {": "}
-              {p.fund_name ?? "(unallocated)"}
-            </span>
-            <span className="text-slate-600"> — {p.deal_name}</span>
-            <PositionMoneyTail p={p} />
+            <div>
+              <span className="font-semibold">{p.deal_name}</span>
+              {p.is_co_invest && (
+                <span className="ml-2 text-[10px] uppercase tracking-wide rounded px-1.5 py-0.5 bg-amber-100 text-amber-800 border border-amber-200">
+                  Co-invest
+                </span>
+              )}
+              <PositionMoneyTail p={p} />
+            </div>
+            <FundList funds={p.funds ?? []} />
           </li>
         ))}
         {content.indirect_positions.map((p, i) => (
@@ -277,6 +281,51 @@ function PortfolioBanner({
         ))}
       </ul>
     </div>
+  );
+}
+
+function FundList({ funds }: { funds: PortfolioFund[] }) {
+  if (!funds || funds.length === 0) {
+    return (
+      <div className="ml-3 mt-0.5 text-xs text-slate-500 italic">
+        No fund vehicle on record.
+      </div>
+    );
+  }
+  return (
+    <div className="ml-3 mt-0.5 flex flex-wrap gap-1.5 items-center text-xs">
+      <span className="text-slate-500">Funds:</span>
+      {funds.map((f, i) => (
+        <FundChip key={`${f.fund_id}-${i}`} fund={f} />
+      ))}
+    </div>
+  );
+}
+
+function FundChip({ fund }: { fund: PortfolioFund }) {
+  const label = fund.fund_type_label || "Other";
+  // SPV (deal-specific vehicle) vs Blind Pool (commingled) vs SMA vs
+  // Other. Distinct colors so a glance separates the "is this our
+  // single-deal SPV?" vs "is this the parent commingled fund?" cases.
+  const styles =
+    label === "SPV"
+      ? "bg-purple-50 border-purple-200 text-purple-800"
+      : label === "Blind Pool"
+        ? "bg-blue-50 border-blue-200 text-blue-800"
+        : label === "SMA"
+          ? "bg-teal-50 border-teal-200 text-teal-800"
+          : "bg-slate-100 border-slate-200 text-slate-700";
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 bg-white">
+      <span className="font-medium text-slate-800">
+        {fund.fund_name ?? `#${fund.fund_id}`}
+      </span>
+      <span
+        className={`text-[10px] uppercase tracking-wide rounded px-1.5 py-0.5 border ${styles}`}
+      >
+        {label}
+      </span>
+    </span>
   );
 }
 

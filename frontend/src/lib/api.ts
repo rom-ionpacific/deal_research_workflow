@@ -279,13 +279,25 @@ export interface DataRoomDetail {
 // Typed shape of the portfolio_relationship section's `content`. The
 // web view special-cases this section to render as a banner above the
 // rest (see DealOnePagerPage.tsx).
+
+// One fund holding a position. A single deal can be held by multiple
+// funds -- typically the deal-specific SPV plus the parent blind-pool
+// fund it rolls up into. `fund_type` is the raw DC value ('Single Deal',
+// 'Blind-Pool', 'SMA', ...); `fund_type_label` is the UI-friendly form
+// ('SPV', 'Blind Pool', 'SMA', 'Other').
+export interface PortfolioFund {
+  fund_id: number;
+  fund_name: string | null;
+  fund_type: string | null;
+  fund_type_label: string;
+}
+
 export interface PortfolioDirectPosition {
   deal_id: number;
   deal_name: string;
   deal_status: string;
   is_co_invest: boolean;
-  fund_id: number | null;
-  fund_name: string | null;
+  funds: PortfolioFund[];
   invested_capital: number | null;
   deal_size: number | null;
   fair_value: number | null;
