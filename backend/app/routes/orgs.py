@@ -19,6 +19,7 @@ from typing import Any, Literal
 from ..auth import UserCtx, require_user
 from ..services.org_dossier import get_org_dossier
 from ..services.org_search import (
+    find_comparable_organizations,
     get_organizations_by_ids,
     search_organizations,
 )
@@ -90,6 +91,34 @@ def orgs_by_ids(
             detail="cannot request more than 50 ids at once",
         )
     rows = get_organizations_by_ids(id_list)
+    return [OrgSearchResult(**r) for r in rows]
+
+
+@router.get("/orgs/{org_id}/comparables", response_model=list[OrgSearchResult])
+def orgs_comparables(
+    org_id: int,
+    limit: int = Query(10, ge=1, le=50),
+    require_internal_data: bool = Query(
+        True,
+        description=(
+            "When true (default) only return comps with >=1 document or "
+            "communication -- companies we actually hold material on. "
+            "Set false to widen to any linked org."
+        ),
+    ),
+    user: UserCtx = Depends(require_user),
+) -> list[OrgSearchResult]:
+    """Companies whose business is semantically nearest to `org_id`.
+
+    Seeds the cosine-NN search from the org's already-indexed embedding
+    (zero OpenAI cost in the common case), so it answers "find comps for
+    this company, and show what internal data we have on each". Returns []
+    if the org is unknown or has no resolvable embedding."""
+    rows = find_comparable_organizations(
+        seed_org_id=org_id,
+        limit=limit,
+        require_internal_data=require_internal_data,
+    )
     return [OrgSearchResult(**r) for r in rows]
 
 

@@ -134,7 +134,14 @@ def _row_to_dict(r: dict) -> dict:
         "why_match": (
             f"alias '{r['hit_name']}'"
             if r.get("match_kind") == "alias"
-            else ("name match" if r.get("match_kind") == "name" else None)
+            else "name match"
+            if r.get("match_kind") == "name"
+            else (
+                f"similar business (similarity {float(r['score']):.2f})"
+                if r.get("match_kind") == "comparable"
+                and r.get("score") is not None
+                else None
+            )
         ),
         "sample_evidence": [],  # populated in V1
         # enriched fields from organization_summary; missing if the org
@@ -309,6 +316,166 @@ def _rrf_merge(
         r["score"] = fused(entry)
         out.append(r)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Comparable-company ("find comps") search.
+#
+# Unlike search_organizations (which embeds a query *string*), this seeds
+# the cosine NN from an existing company -- reusing that org's already-
+# indexed embedding so the common case costs ZERO OpenAI calls -- or from a
+# pasted business description. Results default to companies we actually hold
+# internal material on (>=1 document or communication) so the answer is
+# "here are comps AND here's what we have on them".
+# ---------------------------------------------------------------------------
+
+# Same inline-vector discipline as _SEMANTIC_SQL (the ORDER BY operand must
+# be a lexical parameter for the HNSW index to engage). The inner scan
+# excludes the seed org(s) and over-fetches a pool; the outer query applies
+# the linkage / internal-data filters and trims to `limit`. `{internal_filter}`
+# is interpolated server-side from a fixed string (never user input).
+_COMPARABLES_SQL = """
+SELECT o.id AS org_id, o.name, n.sim AS score,
+       'comparable'::text AS match_kind, o.name AS hit_name,
+       s.document_count, s.communication_count, s.latest_update_at,
+       s.main_contact_email, s.main_contact_name,
+       s.main_ion_email, s.main_ion_name
+  FROM (
+    SELECT oe.org_id,
+           1 - (oe.embedding <=> %s::public.vector) AS sim
+      FROM dealcloud.organization_embedding oe
+     WHERE oe.model = %s
+       AND oe.org_id <> ALL(%s::int[])
+     ORDER BY oe.embedding <=> %s::public.vector
+     LIMIT %s
+  ) n
+  JOIN dealcloud.organization o ON o.id = n.org_id
+  LEFT JOIN dealcloud.organization_summary s ON s.org_id = o.id
+ WHERE o.superseded_by_org_id IS NULL
+   AND EXISTS (SELECT 1 FROM dealcloud.organization_entity oe
+               WHERE oe.organization_id = o.id)
+   {internal_filter}
+ ORDER BY n.sim DESC, o.name
+ LIMIT %s
+"""
+
+
+def _seed_vector_for_org(org_id: int) -> tuple[str | None, int | None]:
+    """Return (pgvector_text_literal, canonical_org_id) to seed a comp
+    search from an existing company.
+
+    Resolves `org_id` to its canonical head (following superseded_by_org_id)
+    and reuses that head's stored embedding -- zero OpenAI cost in the common
+    case. Falls back to embedding the org's name + description on the fly if
+    no stored embedding exists yet (newly-synced org the embed cron hasn't
+    reached). Returns (None, canonical_id) when the org exists but we can't
+    produce a vector, or (None, None) when the org_id is unknown.
+    """
+    from .embed import MODEL as _MODEL
+
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            WITH head AS (
+                SELECT COALESCE(o.superseded_by_org_id, o.id) AS cid,
+                       o.name, o.description
+                  FROM dealcloud.organization o
+                 WHERE o.id = %s
+            )
+            SELECT h.cid, h.name, h.description, e.embedding::text AS vec
+              FROM head h
+              LEFT JOIN dealcloud.organization_embedding e
+                ON e.org_id = h.cid AND e.model = %s
+            """,
+            (org_id, _MODEL),
+        )
+        row = cur.fetchone()
+
+    if not row:
+        return None, None
+    if row["vec"]:
+        # pgvector's text form ("[0.1,0.2,...]") is exactly what
+        # %s::public.vector accepts back -- no float round-trip needed.
+        return row["vec"], row["cid"]
+
+    # No stored embedding: embed name + description live so the seed still
+    # works. May raise EmbedError/EmbedNotConfigured -- caller handles.
+    text = (row["name"] or "").strip()
+    if row["description"] and row["description"].strip():
+        text = f"{text}\n\n{row['description'].strip()}"
+    if not text:
+        return None, row["cid"]
+    emb = embed_query(text)
+    return vector_literal(emb), row["cid"]
+
+
+def find_comparable_organizations(
+    *,
+    seed_org_id: int | None = None,
+    query_text: str | None = None,
+    limit: int = 10,
+    require_internal_data: bool = True,
+    exclude_org_ids: list[int] | None = None,
+) -> list[dict]:
+    """Companies whose business is semantically nearest to a seed.
+
+    Seed by `seed_org_id` (reuses that company's indexed embedding) OR by
+    `query_text` (a pasted business description, embedded at query time).
+    Exactly one is required; `seed_org_id` wins if both are given.
+
+    `require_internal_data` (default True) restricts results to orgs with at
+    least one document or communication -- i.e. comps we actually hold
+    material on. Set False to widen to any linked org.
+
+    Returns the same enriched shape as search_organizations (doc/comm counts,
+    contacts), with `why_match` describing the similarity. Returns [] if the
+    seed can't be resolved or the query embedding is unavailable (no
+    OPENAI_API_KEY / OpenAI down) -- there is no trigram fallback for comps.
+    """
+    if seed_org_id is None and not (query_text and query_text.strip()):
+        raise ValueError("provide seed_org_id or query_text")
+
+    exclude: set[int] = set(exclude_org_ids or [])
+
+    if seed_org_id is not None:
+        try:
+            vec, canonical_id = _seed_vector_for_org(seed_org_id)
+        except (EmbedNotConfigured, EmbedError) as e:
+            logger.warning("comp seed embed failed for org %s: %s", seed_org_id, e)
+            return []
+        if vec is None:
+            return []
+        exclude.add(seed_org_id)
+        if canonical_id is not None:
+            exclude.add(canonical_id)
+    else:
+        try:
+            emb = embed_query(query_text)
+        except (EmbedNotConfigured, EmbedError) as e:
+            logger.warning("comp query embed failed: %s", e)
+            return []
+        vec = vector_literal(emb)
+
+    # Over-fetch from the index so the outer linkage / internal-data filters
+    # still leave `limit` rows. 8x (capped 40..200) is comfortable headroom.
+    pool = min(max(limit * 8, 40), 200)
+    internal_filter = (
+        "AND (COALESCE(s.document_count, 0) >= 1 "
+        "OR COALESCE(s.communication_count, 0) >= 1)"
+        if require_internal_data
+        else ""
+    )
+    sql = _COMPARABLES_SQL.format(internal_filter=internal_filter)
+    exclude_list = sorted(exclude) or [0]
+
+    from .embed import MODEL as _MODEL
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SET LOCAL hnsw.ef_search = 100")
+        cur.execute(sql, (vec, _MODEL, exclude_list, vec, pool, limit))
+        rows = cur.fetchall()
+    return [_row_to_dict(r) for r in rows]
 
 
 def search_organizations(

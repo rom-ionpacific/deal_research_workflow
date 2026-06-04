@@ -47,7 +47,7 @@ from pydantic import BaseModel, Field
 
 from ..chat_lib import ToolRegistry, ToolResult
 from ..org_dossier import get_org_dossier as _get_org_dossier
-from ..org_search import search_organizations
+from ..org_search import find_comparable_organizations, search_organizations
 from ..session_title import maybe_auto_rename_after_version as _maybe_auto_rename
 from ...db import get_conn
 
@@ -59,8 +59,12 @@ class FindOrganizationsInput(BaseModel):
     query: str = Field(
         ...,
         description=(
-            "Free-text company description or name. Matched against canonical "
-            "org names and aliases via trigram + prefix + exact."
+            "Either an exact company name/alias OR a free-text description "
+            "of what kind of company you're looking for (sector, business "
+            "model, geography). Examples: 'Snyk', 'short-term rental "
+            "marketplace', 'Singapore family office investing in AI'. "
+            "Runs hybrid trigram + semantic-embedding search, so concept "
+            "queries that don't name a specific company still work."
         ),
         min_length=1,
         max_length=200,
@@ -92,10 +96,18 @@ phase1_registry = ToolRegistry()
 @phase1_registry.tool(
     "find_organizations",
     (
-        "Search the deal cloud organization database. Returns up to `limit` "
-        "candidate orgs ranked by name/alias similarity. Use this whenever "
-        "the user mentions a company by name or describes one. Read-only -- "
-        "calling this does NOT add anything to the user's selection."
+        "Search the deal cloud organization database by company name OR by a "
+        "description of the kind of company you want. Runs HYBRID search: an "
+        "exact/trigram leg over names+aliases AND a semantic-embedding leg "
+        "over each org's business description, fused together. So it does two "
+        "jobs: (1) look up a company the user names, and (2) discover "
+        "companies by meaning/sector -- e.g. 'short-term rental marketplaces' "
+        "or 'companies like Airbnb' returns businesses in that space even "
+        "when the user names none of them. Use this whenever the user "
+        "mentions a company by name OR asks to find companies matching a "
+        "theme/sector. Read-only -- calling this does NOT add anything to the "
+        "user's selection. (To find companies similar to one already in the "
+        "selection or database, prefer `find_comparable_orgs`.)"
     ),
     FindOrganizationsInput,
 )
@@ -107,6 +119,72 @@ def find_organizations(inp: FindOrganizationsInput, ctx: dict) -> ToolResult:
     # results.
     rows = search_organizations(inp.query, inp.limit, mode="hybrid")
     return ToolResult(output={"query": inp.query, "results": rows})
+
+
+class FindComparableOrgsInput(BaseModel):
+    org_id: int | None = Field(
+        None,
+        description=(
+            "dealcloud.organization.id of the company to find comps FOR. "
+            "Reuses that company's stored business embedding (preferred -- "
+            "use find_organizations first to resolve a name to an id)."
+        ),
+    )
+    description: str | None = Field(
+        None,
+        description=(
+            "Alternative to org_id: a free-text business description to find "
+            "comps for (e.g. 'short-term rental marketplace for urban "
+            "apartments'). Use when the company isn't in our database yet. "
+            "Provide org_id OR description -- org_id wins if both are given."
+        ),
+        max_length=2000,
+    )
+    limit: int = Field(10, description="Max comps to return.", ge=1, le=25)
+    require_internal_data: bool = Field(
+        True,
+        description=(
+            "When true (default) only return comps we hold internal material "
+            "on (>=1 document or communication). Set false to widen to any "
+            "linked org."
+        ),
+    )
+
+
+@phase1_registry.tool(
+    "find_comparable_orgs",
+    (
+        "Find companies in the deal cloud whose BUSINESS is most similar to a "
+        "given company (comparable companies / 'comps'). Seeds from an "
+        "existing company by `org_id` (reusing its business embedding) or "
+        "from a free-text `description`. Use this for 'find comps for X', "
+        "'what companies like X do we have', or 'do we have internal data on "
+        "anyone in this space'. By default returns only comps we actually "
+        "hold material on (>=1 document or communication), each with its "
+        "document/communication counts and main contacts. Read-only -- does "
+        "NOT change the selection. Prefer this over find_organizations when "
+        "the user has a reference company and wants similar ones."
+    ),
+    FindComparableOrgsInput,
+)
+def find_comparable_orgs(inp: FindComparableOrgsInput, ctx: dict) -> ToolResult:
+    if inp.org_id is None and not (inp.description and inp.description.strip()):
+        return ToolResult(output={
+            "error": "provide either org_id or description",
+            "results": [],
+        })
+    rows = find_comparable_organizations(
+        seed_org_id=inp.org_id,
+        query_text=inp.description,
+        limit=inp.limit,
+        require_internal_data=inp.require_internal_data,
+    )
+    return ToolResult(output={
+        "seed_org_id": inp.org_id,
+        "seed_description": inp.description if inp.org_id is None else None,
+        "require_internal_data": inp.require_internal_data,
+        "results": rows,
+    })
 
 
 @phase1_registry.tool(
@@ -1343,6 +1421,9 @@ class AskToltIQInput(BaseModel):
 # Phase 4 chat doesn't need a separate copy of the implementation).
 phase4_registry._tools["find_organizations"] = phase1_registry._tools[
     "find_organizations"
+]
+phase4_registry._tools["find_comparable_orgs"] = phase1_registry._tools[
+    "find_comparable_orgs"
 ]
 phase4_registry._tools["get_organization_detail"] = phase1_registry._tools[
     "get_organization_detail"
