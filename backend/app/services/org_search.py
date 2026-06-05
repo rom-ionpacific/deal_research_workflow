@@ -39,9 +39,14 @@ logger = logging.getLogger(__name__)
 
 SearchMode = Literal["trigram", "semantic", "hybrid"]
 
-# pg_trgm is available in Neon by default (CREATE EXTENSION IF NOT EXISTS in
-# the migration). If it's missing, the trigram clause errors -- fail loudly
-# rather than silently degrade.
+# pg_trgm lives in the `dealcloud` schema. We invoke its `%` operator as
+# OPERATOR(dealcloud.%) -- schema-qualified, NOT bare -- because the bare
+# infix `%` resolves only via search_path, and the MCP server connects over
+# Neon's POOLED endpoint (PgBouncer transaction mode) where the per-checkout
+# `SET search_path` in db.py is discarded at commit before the query runs
+# (see neon_pooler_search_path_drift). Qualifying the operator (like we
+# already qualify dealcloud.similarity / public.vector) makes the trigram
+# leg immune to search_path entirely. similarity() is qualified below too.
 
 _SEARCH_SQL = """
 WITH q AS (SELECT %s::text AS qtext, %s::int AS lim),
@@ -66,7 +71,7 @@ hits AS (
        -- 'palantir' (3.4s). Prefix matches still get the 0.85 score
        -- via the CASE above when trigram passes them through.
        (lower(o.name) = lower((SELECT qtext FROM q))
-        OR o.name %% (SELECT qtext FROM q))
+        OR o.name OPERATOR(dealcloud.%%) (SELECT qtext FROM q))
        AND o.superseded_by_org_id IS NULL
        AND EXISTS (SELECT 1 FROM dealcloud.organization_entity oe
                    WHERE oe.organization_id = o.id)
@@ -83,7 +88,7 @@ hits AS (
     JOIN dealcloud.organization o ON o.id = oa.organization_id
     WHERE
        (lower(oa.alias) = lower((SELECT qtext FROM q))
-        OR oa.alias %% (SELECT qtext FROM q))
+        OR oa.alias OPERATOR(dealcloud.%%) (SELECT qtext FROM q))
        AND o.superseded_by_org_id IS NULL
        AND EXISTS (SELECT 1 FROM dealcloud.organization_entity oe
                    WHERE oe.organization_id = o.id)
