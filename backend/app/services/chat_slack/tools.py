@@ -798,13 +798,20 @@ doc_orgcount AS (
 duc AS (
     SELECT u.organization_id, o.name,
            u.connection_source, u.is_value_driver, u.is_underlying,
-           u.derived_n_docs
+           u.derived_n_docs,
+           u.nav_pct_estimate, u.nav_estimate_confidence,
+           u.nav_estimate_basis, u.nav_estimate_source_document_id,
+           u.nav_estimated_at
       FROM dealcloud.deal_underlying_company u
       JOIN dealcloud.organization o ON o.id = u.organization_id
      WHERE u.deal_id = %s
 )
 SELECT duc.organization_id, duc.name, duc.connection_source,
        duc.is_value_driver, duc.is_underlying, duc.derived_n_docs,
+       duc.nav_pct_estimate, duc.nav_estimate_confidence,
+       duc.nav_estimate_basis, duc.nav_estimated_at,
+       navdoc.id AS nav_doc_id, navdoc.name AS nav_doc_name,
+       navdoc.web_url AS nav_doc_url,
        (SELECT count(*) FROM doc_orgcount dc
           JOIN dealcloud.organization_entity oe
             ON oe.entity_type = 'document' AND oe.entity_id = dc.doc_id
@@ -813,6 +820,8 @@ SELECT duc.organization_id, duc.name, duc.connection_source,
        ev.document_id AS ev_doc_id, ev.ev_name AS ev_doc_name,
        ev.web_url AS ev_doc_url
   FROM duc
+  LEFT JOIN dealcloud.document navdoc
+         ON navdoc.id = duc.nav_estimate_source_document_id
   LEFT JOIN LATERAL (
       SELECT doc.id AS document_id, doc.name AS ev_name, doc.web_url
         FROM doc_orgcount dc
@@ -966,8 +975,33 @@ def deal_underlying_companies(inp: DealUnderlyingCompaniesInput, ctx: dict) -> T
         cur.execute(_DUC_SQL, (deal["id"], deal["id"]))
         rows = [dict(r) for r in cur.fetchall()]
 
-        nav = (_ic_memo_allocation(cur, deal["id"])
-               if inp.include_nav_allocation else None)
+        # NAV split is precomputed per company by build_underlying_nav_estimates
+        # (best-effort IC-memo read, refreshed periodically). Serve that
+        # structured + fast. Only fall back to a live memo read if NOTHING is
+        # precomputed yet for this deal (cron hasn't reached it).
+        _conf_rows = [r for r in rows if r["connection_source"] != "llm_derived"]
+        _has_precomputed = any(r["nav_estimated_at"] for r in _conf_rows)
+        if _has_precomputed:
+            _src = next(({"document_id": r["nav_doc_id"], "name": r["nav_doc_name"],
+                          "web_url": r["nav_doc_url"]}
+                         for r in _conf_rows if r["nav_doc_id"]), None)
+            _est_at = max((r["nav_estimated_at"] for r in _conf_rows
+                           if r["nav_estimated_at"]), default=None)
+            nav = {
+                "source": "precomputed",
+                "ic_memo": _src,
+                "estimated_at": _est_at.isoformat() if _est_at else None,
+                "method": ("Per-company NAV share, best-effort extracted from the "
+                           "deal's IC memo and refreshed periodically. Per-company "
+                           "percentages are on each confirmed company's `nav` "
+                           "field; a null nav_pct means the memo didn't state that "
+                           "company's size. Estimates, not exact figures."),
+            }
+        elif inp.include_nav_allocation:
+            nav = _ic_memo_allocation(cur, deal["id"])
+            nav["source"] = "live_read_fallback"
+        else:
+            nav = None
 
     confirmed, derived = [], []
     for r in rows:
@@ -980,10 +1014,23 @@ def deal_underlying_companies(inp: DealUnderlyingCompaniesInput, ctx: dict) -> T
         return ({"document_id": r["ev_doc_id"], "name": r["ev_doc_name"],
                  "web_url": r["ev_doc_url"]} if r["ev_doc_id"] else None)
 
+    def _nav(r):
+        if r["nav_estimated_at"] is None:
+            return None  # not yet estimated by the periodic job
+        return {
+            "nav_pct_estimate": r["nav_pct_estimate"],
+            "confidence": r["nav_estimate_confidence"],
+            "basis": r["nav_estimate_basis"],
+            "source_document": (
+                {"document_id": r["nav_doc_id"], "name": r["nav_doc_name"],
+                 "web_url": r["nav_doc_url"]} if r["nav_doc_id"] else None),
+        }
+
     confirmed_out = [{
         "org_id": r["organization_id"], "name": r["name"], "confidence": "high",
         "source": r["connection_source"],
         "is_value_driver": bool(r["is_value_driver"]),
+        "nav": _nav(r),
     } for r in confirmed]
     # value drivers first, then alphabetical (SQL already ordered so)
 
@@ -1051,11 +1098,12 @@ def deal_underlying_companies(inp: DealUnderlyingCompaniesInput, ctx: dict) -> T
             "confidence document mentions: low-confidence ones are almost "
             "certainly market-map / comparable / customer noise, not holdings "
             "-- if you mention them, say so and link the evidence_document. "
-            "For per-company NAV %, use ONLY figures explicitly stated in "
-            "`nav_allocation.allocation_excerpt`; if it isn't there, say the "
-            "split isn't stated in the memo text (it may be in an image/table "
-            "we can't read) and give the deal-level NAV. Never invent "
-            "percentages."
+            "For per-company NAV %, use each confirmed company's `nav` field "
+            "(precomputed from the deal's IC memo, with a confidence + basis + "
+            "source_document): report nav_pct_estimate where present and cite "
+            "its basis; where `nav` is null or nav_pct_estimate is null, say the "
+            "memo doesn't state that company's size rather than guessing. These "
+            "are estimates -- never invent percentages."
         ),
     }
     return ToolResult(output=out)
