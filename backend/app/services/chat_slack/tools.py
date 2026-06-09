@@ -739,6 +739,329 @@ def list_deals(inp: CompanyNameInput, ctx: dict) -> ToolResult:
 
 
 # ---------------------------------------------------------------------------
+# Deal underlying companies (confidence-tiered)
+# ---------------------------------------------------------------------------
+
+class DealUnderlyingCompaniesInput(BaseModel):
+    deal_name: str = Field(
+        ...,
+        description=(
+            "The DEAL name / codename (e.g. 'Project Lego'). If you pass a "
+            "company name instead, the tool returns that company's deals to "
+            "choose from."
+        ),
+        min_length=1, max_length=120,
+    )
+    include_derived: bool = Field(
+        True,
+        description=(
+            "Include the lower-confidence DERIVED companies (pulled from "
+            "document mentions, NOT confirmed in DealCloud). They're returned "
+            "clearly tiered + flagged. Set False to get only the high-"
+            "confidence DealCloud-backed holdings."
+        ),
+    )
+    derived_limit: int = Field(
+        25, ge=1, le=100,
+        description="Max derived companies to return (there can be dozens of "
+                    "low-confidence document mentions).",
+    )
+    include_nav_allocation: bool = Field(
+        True,
+        description=(
+            "Read the deal's IC memo at query time to surface any stated "
+            "per-company NAV / value-driver allocation passage. Adds one "
+            "document read; set False to skip for speed."
+        ),
+    )
+
+
+# Single query: every deal_underlying_company row for the deal, with the
+# count of *focused* deal documents (<=10 distinct orgs -- i.e. deal-specific,
+# not a firm-level market-map/overview deck) that map each org, plus the most
+# relevant evidence document for the connection. Fully schema-qualified and
+# no bare trigram operator -- safe on the pooled Neon endpoint the MCP server
+# uses (see neon_pooler_search_path_drift).
+_DUC_SQL = """
+WITH deal_docs AS (
+    SELECT dd.document_id AS doc_id
+      FROM dealcloud.document_deal dd
+     WHERE dd.deal_id = %s
+),
+doc_orgcount AS (
+    SELECT d.doc_id,
+           (SELECT count(DISTINCT oe.organization_id)
+              FROM dealcloud.organization_entity oe
+             WHERE oe.entity_type = 'document' AND oe.entity_id = d.doc_id) AS n_orgs
+      FROM deal_docs d
+),
+duc AS (
+    SELECT u.organization_id, o.name,
+           u.connection_source, u.is_value_driver, u.is_underlying,
+           u.derived_n_docs
+      FROM dealcloud.deal_underlying_company u
+      JOIN dealcloud.organization o ON o.id = u.organization_id
+     WHERE u.deal_id = %s
+)
+SELECT duc.organization_id, duc.name, duc.connection_source,
+       duc.is_value_driver, duc.is_underlying, duc.derived_n_docs,
+       (SELECT count(*) FROM doc_orgcount dc
+          JOIN dealcloud.organization_entity oe
+            ON oe.entity_type = 'document' AND oe.entity_id = dc.doc_id
+         WHERE oe.organization_id = duc.organization_id
+           AND dc.n_orgs <= 10) AS focused_docs,
+       ev.document_id AS ev_doc_id, ev.ev_name AS ev_doc_name,
+       ev.web_url AS ev_doc_url
+  FROM duc
+  LEFT JOIN LATERAL (
+      SELECT doc.id AS document_id, doc.name AS ev_name, doc.web_url
+        FROM doc_orgcount dc
+        JOIN dealcloud.organization_entity oe
+          ON oe.entity_type = 'document' AND oe.entity_id = dc.doc_id
+        JOIN dealcloud.document doc ON doc.id = dc.doc_id
+       WHERE oe.organization_id = duc.organization_id
+       ORDER BY (dc.n_orgs <= 10) DESC, doc.modified_at DESC NULLS LAST
+       LIMIT 1
+  ) ev ON TRUE
+ ORDER BY duc.is_value_driver DESC, duc.name
+"""
+
+
+def _derived_tier(focused_docs: int) -> str:
+    """Confidence that an llm_derived org is genuinely part of the deal,
+    from how many *deal-specific* (<=10-org) documents corroborate it.
+    Mentions that only show up in broad market-map/overview decks score 0
+    -> low (the dominant noise case)."""
+    if focused_docs >= 3:
+        return "high"
+    if focused_docs >= 1:
+        return "medium"
+    return "low"
+
+
+def _ic_memo_allocation(cur, deal_id: int) -> dict:
+    """Find the deal's IC memo and pull the passage most likely to state a
+    per-company NAV / value-driver allocation. Returns the doc ref + an
+    excerpt (or a not-found note). Per-company % is NOT in structured data,
+    so this best-effort reads the memo text at query time."""
+    cur.execute(
+        """
+        SELECT doc.id, doc.name, doc.web_url
+          FROM dealcloud.document_deal dd
+          JOIN dealcloud.document doc ON doc.id = dd.document_id
+         WHERE dd.deal_id = %s
+           AND (doc.name ILIKE %s OR doc.name ILIKE %s OR doc.name ILIKE %s)
+         ORDER BY (doc.name ILIKE %s) DESC, doc.modified_at DESC NULLS LAST
+         LIMIT 1
+        """,
+        (deal_id, "%IC %", "%IC_%", "%Investment Committee%", "%.pdf"),
+    )
+    memo = cur.fetchone()
+    if not memo:
+        return {"ic_memo": None, "allocation_excerpt": None,
+                "note": "No IC-memo-shaped document is linked to this deal."}
+
+    from ..document_body import get_document_body
+    # Try the terms Ion memos use for the holdings split, in priority order;
+    # take the first that actually matches a passage. get_document_body
+    # returns the document head (with a query_not_found error) when a term is
+    # absent, so a miss is distinguishable from a hit.
+    res = None
+    for term in ("value driver", "allocation", "% of NAV", "fair value"):
+        r = get_document_body(document_id=memo["id"], query=term, max_chars=6000)
+        if not r.ok:
+            res = r  # body genuinely unavailable -- stop, report it
+            break
+        res = r
+        if not (r.error and str(r.error).startswith("query_not_found")):
+            break  # real hit on this term
+
+    excerpt = res.body if res.ok else None
+    note = None
+    if res.ok and res.error and str(res.error).startswith("query_not_found"):
+        note = ("No explicit per-company allocation passage matched in the "
+                "memo text; returned the document head. The per-company split "
+                "may be in a table or image we can't extract -- do NOT infer "
+                "percentages that aren't present in this text.")
+    elif not res.ok:
+        note = f"IC memo body unavailable ({res.error})."
+    return {
+        "ic_memo": {"document_id": memo["id"], "name": memo["name"],
+                    "web_url": memo["web_url"]},
+        "allocation_excerpt": excerpt,
+        "note": note,
+    }
+
+
+@slack_registry.tool(
+    "deal_underlying_companies",
+    (
+        "Authoritative, confidence-tiered list of a DEAL's UNDERLYING "
+        "PORTFOLIO COMPANIES. Use this whenever the user asks what companies "
+        "are under / inside / part of / held by a deal (especially fund or GP "
+        "stakes). It deterministically separates the real holdings from "
+        "document noise, which free-text document reading does NOT: "
+        "(1) `confirmed_companies` -- DealCloud-backed, HIGH confidence, with "
+        "`is_value_driver` flags -- THESE are the actual underlying companies; "
+        "(2) `derived_companies` -- pulled from document mentions and NOT "
+        "confirmed in DealCloud, each tiered high/medium/LOW with an evidence "
+        "document link. MOST are LOW-confidence market-map / comparable / "
+        "customer mentions, NOT holdings -- never present a low/medium derived "
+        "company as a portfolio company without saying so and citing its "
+        "evidence doc; (3) `deal_financials` (deal-level NAV/invested) and "
+        "`nav_allocation` (the IC-memo passage to read any per-company split "
+        "from -- there is NO structured per-company allocation, so only report "
+        "percentages actually stated in that excerpt). Read-only. Prefer this "
+        "over guessing underlying companies from raw documents."
+    ),
+    DealUnderlyingCompaniesInput,
+)
+def deal_underlying_companies(inp: DealUnderlyingCompaniesInput, ctx: dict) -> ToolResult:
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        matches = _match_deals(cur, inp.deal_name)
+
+        if not matches:
+            company_deals = _deals_for_company(cur, inp.deal_name)
+            if company_deals:
+                return ToolResult(output={
+                    "matched": "company_not_deal",
+                    "note": (f"No deal is named '{inp.deal_name}', but it looks "
+                             f"like a company. Ask the user which deal, then "
+                             f"call again with that deal name."),
+                    "deals": company_deals,
+                })
+            return ToolResult(output={
+                "matched": "none",
+                "note": f"No deal found matching '{inp.deal_name}'.",
+            })
+        if len(matches) > 1:
+            exact = [m for m in matches if m["name"].lower() == inp.deal_name.lower()]
+            if len(exact) != 1:
+                return ToolResult(output={
+                    "matched": "ambiguous",
+                    "note": ("Several deals match -- ask the user which one, "
+                             "then call again with the exact deal name."),
+                    "candidates": matches,
+                })
+            matches = exact
+        deal = matches[0]
+
+        # Deal-level financials (NO per-company allocation exists in source).
+        cur.execute(
+            """
+            SELECT d.id, d.name, d.status, d.transaction_type,
+                   d.organization_id AS counterparty_org_id,
+                   o.name AS counterparty_name,
+                   d.invested_capital, d.deal_size, d.fair_value,
+                   d.realized_capital, d.total_value_to_invested, d.co_invest
+              FROM dealcloud.deal d
+              LEFT JOIN dealcloud.organization o ON o.id = d.organization_id
+             WHERE d.id = %s
+            """,
+            (deal["id"],),
+        )
+        d = cur.fetchone()
+
+        cur.execute(_DUC_SQL, (deal["id"], deal["id"]))
+        rows = [dict(r) for r in cur.fetchall()]
+
+        nav = (_ic_memo_allocation(cur, deal["id"])
+               if inp.include_nav_allocation else None)
+
+    confirmed, derived = [], []
+    for r in rows:
+        if r["connection_source"] == "llm_derived":
+            derived.append(r)
+        else:
+            confirmed.append(r)
+
+    def _ev(r):
+        return ({"document_id": r["ev_doc_id"], "name": r["ev_doc_name"],
+                 "web_url": r["ev_doc_url"]} if r["ev_doc_id"] else None)
+
+    confirmed_out = [{
+        "org_id": r["organization_id"], "name": r["name"], "confidence": "high",
+        "source": r["connection_source"],
+        "is_value_driver": bool(r["is_value_driver"]),
+    } for r in confirmed]
+    # value drivers first, then alphabetical (SQL already ordered so)
+
+    derived_sorted = sorted(
+        derived, key=lambda r: (-(r["focused_docs"] or 0),
+                                -(r["derived_n_docs"] or 0), r["name"])
+    )
+    derived_out = []
+    for r in derived_sorted[:inp.derived_limit]:
+        tier = _derived_tier(r["focused_docs"] or 0)
+        derived_out.append({
+            "org_id": r["organization_id"], "name": r["name"],
+            "confidence": tier,
+            "deal_specific_doc_count": r["focused_docs"] or 0,
+            "total_mention_doc_count": r["derived_n_docs"],
+            "assessment": (
+                "Corroborated by deal-specific documents."
+                if tier == "high" else
+                "Appears in a deal-specific document; verify before treating "
+                "as a holding." if tier == "medium" else
+                "Only appears in broad market-map / overview documents -- "
+                "most likely a comparable / customer / market mention, NOT a "
+                "portfolio company."
+            ),
+            "evidence_document": _ev(r),
+        })
+
+    inv = d["invested_capital"]
+    out = {
+        "matched": "deal",
+        "deal": {
+            "deal_id": d["id"], "deal_name": d["name"], "status": d["status"],
+            "transaction_type": d["transaction_type"],
+            "counterparty_org_id": d["counterparty_org_id"],
+            "counterparty_name": d["counterparty_name"],
+        },
+        "deal_financials": {
+            "invested_capital": abs(inv) if inv is not None else None,
+            "deal_size": d["deal_size"],
+            "fair_value_nav": d["fair_value"],
+            "realized_capital": d["realized_capital"],
+            "total_value_to_invested": d["total_value_to_invested"],
+            "co_invest": d["co_invest"],
+            "note": ("Deal/fund-level only. There is NO per-underlying-company "
+                     "allocation in the source data; any per-company % must "
+                     "come from the IC-memo excerpt in `nav_allocation`."),
+        },
+        "confirmed_companies": confirmed_out,
+        "value_drivers": [c["name"] for c in confirmed_out if c["is_value_driver"]],
+        "derived_summary": {
+            "total": len(derived),
+            "shown": len(derived_out),
+            "omitted": max(0, len(derived) - len(derived_out)),
+            "by_confidence": {
+                t: sum(1 for r in derived if _derived_tier(r["focused_docs"] or 0) == t)
+                for t in ("high", "medium", "low")
+            },
+        },
+        "derived_companies": derived_out if inp.include_derived else [],
+        "nav_allocation": nav,
+        "present_instructions": (
+            "Lead with `confirmed_companies` -- these ARE the deal's underlying "
+            "portfolio companies (DealCloud-backed); call out `value_drivers`. "
+            "Present `derived_companies` separately and clearly as LOWER-"
+            "confidence document mentions: low-confidence ones are almost "
+            "certainly market-map / comparable / customer noise, not holdings "
+            "-- if you mention them, say so and link the evidence_document. "
+            "For per-company NAV %, use ONLY figures explicitly stated in "
+            "`nav_allocation.allocation_excerpt`; if it isn't there, say the "
+            "split isn't stated in the memo text (it may be in an image/table "
+            "we can't read) and give the deal-level NAV. Never invent "
+            "percentages."
+        ),
+    }
+    return ToolResult(output=out)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
