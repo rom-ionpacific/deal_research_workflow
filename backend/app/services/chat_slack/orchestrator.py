@@ -360,27 +360,95 @@ def _post_section(channel: str, thread_ts: str | None, mrkdwn: str) -> None:
 
 
 def _post_long_section(channel: str, thread_ts: str | None, mrkdwn: str) -> None:
-    """Post a long mrkdwn body, splitting on paragraph boundaries when it
-    exceeds Slack's section block char cap. Splits chosen so the user
-    doesn't see broken sentences mid-paragraph."""
-    if len(mrkdwn) <= SECTION_CHAR_LIMIT:
-        _post_section(channel, thread_ts, mrkdwn)
-        return
-    chunks: list[str] = []
-    remaining = mrkdwn
-    while len(remaining) > SECTION_CHAR_LIMIT:
-        head = remaining[:SECTION_CHAR_LIMIT]
-        # Prefer to split at the last paragraph break, then sentence,
-        # then word; fall back to hard cut.
-        split = max(head.rfind("\n\n"), head.rfind(". "), head.rfind(" "))
-        if split < SECTION_CHAR_LIMIT // 2:
-            split = SECTION_CHAR_LIMIT
-        chunks.append(remaining[:split].rstrip())
+    """Post a long mrkdwn body, splitting when it exceeds Slack's section
+    char cap. Breaks on paragraph boundaries and keeps fenced code blocks
+    (```...``` -- e.g. the one-pager's monospace contacts table) intact,
+    so a table never gets cut across two messages with broken fences."""
+    for chunk in _split_for_slack(mrkdwn, SECTION_CHAR_LIMIT):
+        _post_section(channel, thread_ts, chunk)
+
+
+def _segment_markdown(text: str) -> list[str]:
+    """Break text into atomic blocks: paragraphs (separated by blank
+    lines) plus whole fenced code blocks. A blank line inside a ``` fence
+    does NOT split, so a code block stays one block."""
+    segs: list[str] = []
+    cur: list[str] = []
+    in_fence = False
+    for line in text.split("\n"):
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
+            cur.append(line)
+            continue
+        if line.strip() == "" and not in_fence:
+            if cur:
+                segs.append("\n".join(cur))
+                cur = []
+        else:
+            cur.append(line)
+    if cur:
+        segs.append("\n".join(cur))
+    return segs
+
+
+def _hard_split_block(segment: str, limit: int) -> list[str]:
+    """Last resort for a single block bigger than the cap. A fenced code
+    block is split row-wise and each piece re-fenced (so every chunk is
+    valid monospace); plain prose is split on sentence/word boundaries."""
+    if segment.lstrip().startswith("```"):
+        lines = segment.split("\n")
+        fence = lines[0].strip() or "```"          # preserve e.g. ```text
+        rows = [l for l in lines if l.strip() != "```"]
+        out: list[str] = []
+        cur: list[str] = [fence]
+        cur_len = len(fence) + 5                    # room for closing fence
+        for row in rows:
+            if cur_len + len(row) + 1 > limit and len(cur) > 1:
+                cur.append("```")
+                out.append("\n".join(cur))
+                cur, cur_len = [fence], len(fence) + 5
+            cur.append(row)
+            cur_len += len(row) + 1
+        cur.append("```")
+        out.append("\n".join(cur))
+        return out
+    out, remaining = [], segment
+    while len(remaining) > limit:
+        head = remaining[:limit]
+        split = max(head.rfind(". "), head.rfind(" "))
+        if split < limit // 2:
+            split = limit
+        out.append(remaining[:split].rstrip())
         remaining = remaining[split:].lstrip()
     if remaining:
-        chunks.append(remaining)
-    for c in chunks:
-        _post_section(channel, thread_ts, c)
+        out.append(remaining)
+    return out
+
+
+def _split_for_slack(text: str, limit: int) -> list[str]:
+    """Pack atomic blocks greedily into <=limit chunks. Every chunk keeps
+    its ``` fences balanced (each block is either fence-free prose or a
+    whole or re-fenced code block)."""
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    cur = ""
+    for seg in _segment_markdown(text):
+        if len(seg) > limit:
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            chunks.extend(_hard_split_block(seg, limit))
+        elif not cur:
+            cur = seg
+        elif len(cur) + 2 + len(seg) <= limit:
+            cur += "\n\n" + seg
+        else:
+            chunks.append(cur)
+            cur = seg
+    if cur:
+        chunks.append(cur)
+    return chunks
 
 
 def _post_context(channel: str, thread_ts: str | None, mrkdwn: str) -> None:
