@@ -698,24 +698,35 @@ def get_deal_one_pager(inp: DealNameInput, ctx: dict) -> ToolResult:
                      f"outside that set ({deal['status']})."),
         })
 
-    return ToolResult(output={
-        "matched": "deal",
-        "deal_id": deal["id"],
-        "deal_name": deal["name"],
-        "deal_status": deal["status"],
-        "company": deal.get("org_name"),
-        "one_pager_status": pager["one_pager_status"],
-        "generated_at": pager["generated_at"],
-        # slack_ready: already formatted for Slack (mrkdwn links as
-        # <url|label>, contacts as a monospace table). Post it VERBATIM.
-        "slack_markdown": pager["slack_markdown"],
-        "present_instructions": (
-            "Post slack_markdown to the user essentially verbatim -- it is "
-            "already Slack-formatted (clickable <url|label> source links, "
-            "a contacts table). Do NOT convert it to '[label](url)' or "
-            "re-summarise it; you may add a one-line intro."
-        ),
-    })
+    # The one-pager's slack_markdown is large (often >3k tokens) and
+    # already Slack-formatted, so DON'T hand it to the model to echo --
+    # that's slow to stream and gets truncated at MAX_TOKENS. Instead
+    # post it directly via a side_event and tell the model it's done.
+    header = f"*One-pager — {deal['name']}*  _({deal['status']})_"
+    return ToolResult(
+        output={
+            "matched": "deal",
+            "deal_id": deal["id"],
+            "deal_name": deal["name"],
+            "deal_status": deal["status"],
+            "company": deal.get("org_name"),
+            "one_pager_status": pager["one_pager_status"],
+            "generated_at": pager["generated_at"],
+            "posted": True,
+            "note": (
+                f"The full one-pager for '{deal['name']}' has ALREADY been "
+                "posted to the user directly (it's pre-formatted for Slack). "
+                "Do NOT repost or re-summarise it. If you're fetching several "
+                "one-pagers, add at most a brief one-line wrap-up after the "
+                "last one; for a single one-pager, add nothing further."
+            ),
+        },
+        side_events=[{
+            "type": "post_markdown",
+            "header": header,
+            "markdown": pager["slack_markdown"],
+        }],
+    )
 
 
 @slack_registry.tool(

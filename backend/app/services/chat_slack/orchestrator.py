@@ -136,12 +136,13 @@ faster than assembling a dossier yourself. Flow:
 get_deal_one_pager(deal_name) directly.
   2. If they name a COMPANY, call list_deals(company), show the deals, \
 ask which one, then get_deal_one_pager with that deal name.
-  3. Post the tool's `slack_markdown` essentially VERBATIM -- it is \
-already Slack-formatted (clickable <url|label> source links on each \
-news/flag/investor bullet, a monospace contacts table). Do NOT convert \
-it back to '[label](url)' or re-summarise it; a one-line intro is fine. \
-Don't re-derive it from the dossier tools unless the user wants \
-something the one-pager doesn't cover.
+  3. get_deal_one_pager POSTS the one-pager to the user directly (it's \
+pre-formatted for Slack). You do NOT need to repost or re-summarise it \
+-- in fact you must not, it's already on screen. For a single deal, just \
+let it stand (say nothing more, or one short line). When you fetch \
+several (e.g. all the new deals), a brief one-line wrap-up after the last \
+one is fine. Don't re-derive a one-pager from the dossier tools unless \
+the user wants something it doesn't cover.
 
 # Workflow for content questions
 
@@ -284,6 +285,20 @@ async def _run_loop(
             text_buffer.clear()
             if full:
                 _post_long_section(channel_id, thread_ts, full)
+        elif ev_type == "post_markdown":
+            # A tool (e.g. get_deal_one_pager) handed us pre-formatted
+            # Slack mrkdwn to post directly, bypassing the model so a
+            # large blob doesn't get slow-streamed / truncated. Flush any
+            # buffered model text first so ordering reads naturally.
+            buffered = "".join(text_buffer).strip()
+            text_buffer.clear()
+            if buffered:
+                _post_long_section(channel_id, thread_ts, buffered)
+            header = ev.get("header")
+            md = ev.get("markdown") or ""
+            body = f"{header}\n\n{md}" if header else md
+            if body.strip():
+                _post_long_section(channel_id, thread_ts, body)
         elif ev_type == "turn_failed":
             _post_section(
                 channel_id, thread_ts,
