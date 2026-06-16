@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from ..chat_lib import ToolRegistry, ToolResult
 from ..org_dossier import get_org_dossier as _get_org_dossier
 from ..org_search import find_comparable_organizations, search_organizations
+from .deals_tracker import compute_new_deals_to_discuss, TrackerError
 from ...db import get_conn
 
 
@@ -736,6 +737,55 @@ def list_deals(inp: CompanyNameInput, ctx: dict) -> ToolResult:
         "count": len(deals),
         "deals": deals,
     })
+
+
+# ---------------------------------------------------------------------------
+# New deals to discuss (Deals Tracker diff)
+# ---------------------------------------------------------------------------
+
+class NewDealsToDiscussInput(BaseModel):
+    as_of_date: str | None = Field(
+        None,
+        description=(
+            "Optional meeting week as an ISO date 'YYYY-MM-DD'. The tool "
+            "compares the latest 'Deals Tracker' posted on or before this "
+            "date against the one before it. Omit to use the two most "
+            "recent trackers -- the usual 'what's new this week' case."
+        ),
+    )
+
+
+@slack_registry.tool(
+    "find_new_deals_to_discuss",
+    (
+        "List the deals NEWLY up for discussion at a pipeline meeting. "
+        "Reads the weekly 'Deals Tracker <date>.xlsx' files posted in "
+        "#existing_pipeline, diffs the latest one (or the one for a given "
+        "week via as_of_date) against the previous week's, and returns "
+        "deals that are 'to be discussed' (any status EXCEPT 'Warming "
+        "Station') now but weren't last week -- i.e. absent last week, or "
+        "only 'Warming Station' before. Each returned deal_name is a deal "
+        "codename matching get_deal_one_pager, so call that for each one if "
+        "the user asks to see the one-pagers."
+    ),
+    NewDealsToDiscussInput,
+)
+def find_new_deals_to_discuss(inp: NewDealsToDiscussInput, ctx: dict) -> ToolResult:
+    from datetime import date
+
+    as_of = None
+    if inp.as_of_date:
+        try:
+            as_of = date.fromisoformat(inp.as_of_date.strip())
+        except ValueError:
+            return ToolResult(output={
+                "error": (f"Couldn't parse as_of_date '{inp.as_of_date}'. "
+                          "Use an ISO date like 2026-06-15."),
+            })
+    try:
+        return ToolResult(output=compute_new_deals_to_discuss(as_of))
+    except TrackerError as e:
+        return ToolResult(output={"error": str(e)})
 
 
 # ---------------------------------------------------------------------------

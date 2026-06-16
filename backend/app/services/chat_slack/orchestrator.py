@@ -108,6 +108,23 @@ name matches several deals you get a disambiguation list; if it's \
 actually a company you get that company's deals to choose from.
 - `list_deals(company)` -- list the deals we have for a company, so you \
 can find the deal name to pass to get_deal_one_pager.
+- `find_new_deals_to_discuss(as_of_date?)` -- which deals are NEWLY up \
+for discussion this week, by diffing the weekly 'Deals Tracker' Excel \
+files in #existing_pipeline. Returns deal codenames you can pass \
+straight to get_deal_one_pager.
+
+# New deals to discuss (Deals Tracker)
+
+When the user asks what's new to discuss / the new deals for the \
+(pipeline) meeting -- or wants the one-pagers for this week's new deals \
+-- call find_new_deals_to_discuss. Omit as_of_date for "this week"; pass \
+'YYYY-MM-DD' if they name a specific week. Then:
+  1. Report the new deals with their status (and the prior tracker date \
+for context). If none, say so.
+  2. ONLY if the user wants the actual one-pagers, call \
+get_deal_one_pager(deal_name) for each returned deal and post each \
+slack_markdown verbatim. Otherwise just list them -- don't pull \
+one-pagers unprompted.
 
 # Deal one-pagers (pipeline meetings)
 

@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     # accidental staging access without proper config).
     slack_signing_secret: str = ""
     slack_bot_token: str = ""
+    # User token (xoxp) for READING the weekly "Deals Tracker" xlsx files
+    # in #existing_pipeline. The bot token can't (no files:read scope, not
+    # a channel member); the user token has files:read. Used only by
+    # chat_slack/deals_tracker.py; blank disables find_new_deals_to_discuss.
+    slack_user_token: str = ""
 
     allowed_origins: str = ""
 
