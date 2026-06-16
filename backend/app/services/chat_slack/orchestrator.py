@@ -108,6 +108,11 @@ name matches several deals you get a disambiguation list; if it's \
 actually a company you get that company's deals to choose from.
 - `list_deals(company)` -- list the deals we have for a company, so you \
 can find the deal name to pass to get_deal_one_pager.
+- `list_all_deals(status?, company?, limit?, offset?)` -- the whole deal \
+book: each deal's counterpart company + current status, most-active \
+first, with a status_counts summary. Use for "list all deals", "what \
+are all the active deals", status overviews. Filter by status (e.g. \
+['Active Pipeline']) -- there are ~1,450 deals and most are 'Passed/Dead'.
 - `find_new_deals_to_discuss(as_of_date?)` -- which deals are NEWLY up \
 for discussion this week, by diffing the weekly 'Deals Tracker' Excel \
 files in #existing_pipeline. Returns deal codenames you can pass \

@@ -800,6 +800,124 @@ def find_new_deals_to_discuss(inp: NewDealsToDiscussInput, ctx: dict) -> ToolRes
 
 
 # ---------------------------------------------------------------------------
+# List all deals (book overview: deal -> counterpart company -> status)
+# ---------------------------------------------------------------------------
+
+# Most-active statuses first so a capped page still shows the deals people
+# usually care about; everything else (incl. the ~1,300 'Passed/Dead')
+# sorts last. Unknown/new statuses fall after this list.
+_STATUS_PRIORITY = (
+    "Active Pipeline", "Under Observation", "Early Discussions",
+    "Pre-Pipeline", "Warming Station", "Partnership", "Portfolio Company",
+    "Passed/Dead",
+)
+
+
+class ListAllDealsInput(BaseModel):
+    status: list[str] | None = Field(
+        None,
+        description=(
+            "Optional: only deals whose current status is one of these "
+            "(exact match, case-insensitive). Known statuses: 'Active "
+            "Pipeline', 'Under Observation', 'Early Discussions', "
+            "'Pre-Pipeline', 'Warming Station', 'Partnership', 'Portfolio "
+            "Company', 'Passed/Dead'. Omit for all statuses. Use this to "
+            "answer 'all active deals' etc. -- the book is ~1,450 deals and "
+            "most are 'Passed/Dead'."
+        ),
+    )
+    company: str | None = Field(
+        None,
+        description=("Optional substring filter on the counterpart company "
+                     "name OR the deal name/codename (case-insensitive)."),
+        max_length=120,
+    )
+    limit: int = Field(
+        500,
+        description=("Max deals to return, most-active statuses first. "
+                     "Default 500 covers every live/portfolio deal; raise "
+                     "(up to 2000) to include 'Passed/Dead' history."),
+        ge=1, le=2000,
+    )
+    offset: int = Field(0, description="Skip this many rows (paging).", ge=0)
+
+
+@slack_registry.tool(
+    "list_all_deals",
+    (
+        "List deals across the whole book with each deal's counterpart "
+        "company and current status -- the all-deals companion to "
+        "list_deals (which is scoped to one company). Returns a "
+        "status_counts summary over the entire book plus a page of "
+        "{deal_name, company, status, transaction_type}, ordered "
+        "most-active status first. Filter with `status` (e.g. ['Active "
+        "Pipeline']) and/or `company`; page with limit/offset. There are "
+        "~1,450 deals total and ~1,300 are 'Passed/Dead', so prefer a "
+        "status filter unless the user really wants the full history."
+    ),
+    ListAllDealsInput,
+)
+def list_all_deals(inp: ListAllDealsInput, ctx: dict) -> ToolResult:
+    where: list[str] = []
+    params: list[Any] = []
+    if inp.status:
+        where.append("lower(d.status) = ANY(%s)")
+        params.append([s.strip().lower() for s in inp.status])
+    if inp.company:
+        where.append("(o.name ILIKE %s OR d.name ILIKE %s)")
+        params += [f"%{inp.company}%", f"%{inp.company}%"]
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+    prio_case = ("CASE d.status "
+                 + " ".join(f"WHEN %s THEN {i}"
+                            for i in range(len(_STATUS_PRIORITY)))
+                 + f" ELSE {len(_STATUS_PRIORITY)} END")
+
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # Status breakdown over the WHOLE book (cheap, always useful).
+        cur.execute(
+            "SELECT status, COUNT(*) AS n FROM dealcloud.deal "
+            "GROUP BY status ORDER BY n DESC"
+        )
+        status_counts = {(r["status"] or "(unknown)"): r["n"]
+                         for r in cur.fetchall()}
+        # Total matching the filters (so the caller knows if it's truncated).
+        cur.execute(
+            f"SELECT COUNT(*) AS n FROM dealcloud.deal d "
+            f"LEFT JOIN dealcloud.organization o ON o.id = d.organization_id "
+            f"{where_sql}",
+            params,
+        )
+        total = cur.fetchone()["n"]
+        # The page. Param order follows the SQL text: WHERE, then ORDER BY
+        # CASE, then LIMIT/OFFSET.
+        cur.execute(
+            f"""
+            SELECT d.name AS deal_name, o.name AS company, d.status,
+                   d.transaction_type
+              FROM dealcloud.deal d
+              LEFT JOIN dealcloud.organization o ON o.id = d.organization_id
+              {where_sql}
+             ORDER BY {prio_case}, lower(o.name) NULLS LAST, lower(d.name)
+             LIMIT %s OFFSET %s
+            """,
+            params + list(_STATUS_PRIORITY) + [inp.limit, inp.offset],
+        )
+        deals = [dict(r) for r in cur.fetchall()]
+
+    return ToolResult(output={
+        "total_matching": total,
+        "returned": len(deals),
+        "offset": inp.offset,
+        "truncated": inp.offset + len(deals) < total,
+        "status_counts": status_counts,
+        "filters": {"status": inp.status, "company": inp.company},
+        "deals": deals,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Deal underlying companies (confidence-tiered)
 # ---------------------------------------------------------------------------
 
