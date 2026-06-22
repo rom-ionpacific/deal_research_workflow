@@ -1341,10 +1341,16 @@ class FundraisingSummaryInput(BaseModel):
     FundraisingSummaryInput,
 )
 def get_fundraising_summary(inp: FundraisingSummaryInput, ctx: dict) -> ToolResult:
+    # DealCloud usage note (discovered from live data):
+    # - actual_commitment_amount is almost never filled (<1% of rows).
+    # - probability_adjusted WHERE stage='5. Committed' is the real committed
+    #   capital and exactly matches fund.sum_of_lp_capital for closed funds.
+    # - 'transferred' tracks LP-to-LP ownership transfers, not money wired.
+    # - created_date = when the record was entered in DC (used as year proxy).
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-        # 1. Resolve matching funds
+        # 1. Fund-level summary
         fund_params: list[Any] = []
         if inp.fund_name:
             fund_where = (
@@ -1355,12 +1361,13 @@ def get_fundraising_summary(inp: FundraisingSummaryInput, ctx: dict) -> ToolResu
         else:
             fund_where = ""
 
-        # Year filter expression used in aggregate FILTER clauses
+        # Year filter on created_date (proxy for when the commitment was entered).
+        # Note: DC has no explicit "commitment close date" field, so this is
+        # approximate. fund.sum_of_lp_capital is authoritative for all-time totals.
         year_filter = (
             "AND EXTRACT(YEAR FROM c.created_date) = %s"
             if inp.year else ""
         )
-        # Build a flat param list: [fund_name, fund_name (opt), year (x4)]
         agg_year_params: list[Any] = [inp.year] if inp.year else []
 
         cur.execute(
@@ -1382,20 +1389,24 @@ def get_fundraising_summary(inp: FundraisingSummaryInput, ctx: dict) -> ToolResu
                 f.first_close_date,
                 f.final_close_date,
                 f.next_close_date,
+                -- Committed (stage 5): the real LP capital figure
                 COUNT(c.id)
-                    FILTER (WHERE TRUE {year_filter})
-                    AS commitment_count,
-                SUM(c.actual_commitment_amount)
-                    FILTER (WHERE TRUE {year_filter})
-                    AS total_committed,
-                SUM(c.actual_commitment_amount)
-                    FILTER (WHERE TRUE {year_filter}
-                            AND lower(c.transferred) = 'yes')
-                    AS total_transferred,
-                SUM(c.actual_commitment_amount)
-                    FILTER (WHERE TRUE {year_filter}
-                            AND lower(c.transferred) != 'yes')
-                    AS total_pending_transfer
+                    FILTER (WHERE c.stage = '5. Committed' {year_filter})
+                    AS committed_lp_count,
+                SUM(c.probability_adjusted)
+                    FILTER (WHERE c.stage = '5. Committed' {year_filter})
+                    AS committed_lp_total,
+                -- Active pipeline (stages 2-4)
+                SUM(c.probability_adjusted)
+                    FILTER (WHERE c.stage IN (
+                        '2. Low probability','3. Medium probability','4. High probability')
+                        {year_filter})
+                    AS pipeline_total,
+                COUNT(c.id)
+                    FILTER (WHERE c.stage IN (
+                        '2. Low probability','3. Medium probability','4. High probability')
+                        {year_filter})
+                    AS pipeline_count
             FROM dealcloud.fund f
             LEFT JOIN dealcloud.commitment c ON c.fund_dc_id = f.dc_id
             {fund_where}
@@ -1419,7 +1430,7 @@ def get_fundraising_summary(inp: FundraisingSummaryInput, ctx: dict) -> ToolResu
                 ),
             })
 
-        # 2. Per-LP detail (optional; one batch query for all matched funds)
+        # 2. Per-LP detail — committed only (stage 5) unless year filter narrows scope
         lp_by_fund: dict[int, list[dict]] = {}
         if inp.include_lp_detail:
             fund_dc_ids = [f["fund_dc_id"] for f in funds_raw]
@@ -1433,26 +1444,23 @@ def get_fundraising_summary(inp: FundraisingSummaryInput, ctx: dict) -> ToolResu
                 f"""
                 SELECT
                     c.fund_dc_id,
-                    c.fund_name             AS commitment_fund_name,
                     COALESCE(o.name, c.investor_name) AS investor,
                     o.id                    AS investor_org_id,
                     c.investor_type,
-                    c.actual_commitment_amount,
-                    c.probability_adjusted,
+                    c.probability_adjusted  AS commitment_amount,
                     c.commitment_potential,
                     c.stage,
                     c.status,
                     c.fundraising_status,
-                    c.potential_commitment_status,
-                    c.transferred,
-                    c.transfer_date,
                     c.created_date
                 FROM dealcloud.commitment c
                 LEFT JOIN dealcloud.organization o ON o.id = c.investor_org_id
                 WHERE c.fund_dc_id = ANY(%s::int[])
+                  AND c.stage NOT IN ('6. Declined or lost', '1. Target')
                   {lp_year_clause}
                 ORDER BY c.fund_dc_id,
-                         c.actual_commitment_amount DESC NULLS LAST
+                         (c.stage = '5. Committed') DESC,
+                         c.probability_adjusted DESC NULLS LAST
                 """,
                 lp_params,
             )
@@ -1467,37 +1475,38 @@ def get_fundraising_summary(inp: FundraisingSummaryInput, ctx: dict) -> ToolResu
     def _fmt_fund(f: dict) -> dict:
         lps = lp_by_fund.get(f["fund_dc_id"], []) if inp.include_lp_detail else None
         return {
-            "fund_id":          f["fund_id"],
-            "fund_name":        f["fund_name"],
-            "short_name":       f["short_name"],
-            "fund_type":        f["fund_type"],
-            "fund_status":      f["fund_status"],
-            "vintage_year":     f["vintage_year"],
-            "fund_size":        f["fund_size"],
-            "fundraise_target": f["fundraise_target"],
+            "fund_id":           f["fund_id"],
+            "fund_name":         f["fund_name"],
+            "short_name":        f["short_name"],
+            "fund_type":         f["fund_type"],
+            "fund_status":       f["fund_status"],
+            "vintage_year":      f["vintage_year"],
+            # Authoritative fund-level capital (DealCloud's own aggregates)
+            "fund_size":         f["fund_size"],
+            "fundraise_target":  f["fundraise_target"],
             "sum_of_lp_capital": f["sum_of_lp_capital"],
-            "gp_commit_amount": f["gp_commit_amount"],
-            "gp_commit_pct":    f["gp_commit_pct"],
-            "count_of_lps":     f["count_of_lps"],
-            "first_close_date": (f["first_close_date"].date().isoformat()
-                                 if f["first_close_date"] else None),
-            "final_close_date": (f["final_close_date"].date().isoformat()
-                                 if f["final_close_date"] else None),
-            "next_close_date":  (f["next_close_date"].date().isoformat()
-                                 if f["next_close_date"] else None),
+            "gp_commit_amount":  f["gp_commit_amount"],
+            "gp_commit_pct":     f["gp_commit_pct"],
+            "count_of_lps":      f["count_of_lps"],
+            "first_close_date":  (f["first_close_date"].date().isoformat()
+                                  if f["first_close_date"] else None),
+            "final_close_date":  (f["final_close_date"].date().isoformat()
+                                  if f["final_close_date"] else None),
+            "next_close_date":   (f["next_close_date"].date().isoformat()
+                                  if f["next_close_date"] else None),
+            # From commitment rows (filtered by year if set)
             "commitment_stats": {
                 "year_filter": inp.year,
-                "lp_rows":          f["commitment_count"] or 0,
-                "total_committed":  f["total_committed"],
-                "total_transferred": f["total_transferred"],
-                "total_pending_transfer": f["total_pending_transfer"],
-                "note": (
-                    "total_committed = sum of actual_commitment_amount for "
-                    "all LP rows (filtered by year if set). "
-                    "total_transferred = subset where funds have been "
-                    "wired/closed. sum_of_lp_capital is DealCloud's own "
-                    "pre-aggregated figure and may differ slightly."
-                ),
+                "year_filter_note": (
+                    "Filtered by created_date (when the record was entered in "
+                    "DealCloud -- approximate proxy for commitment date since "
+                    "no explicit commitment-close-date field exists). "
+                    "sum_of_lp_capital above is the authoritative all-time total."
+                ) if inp.year else None,
+                "committed_lp_count": f["committed_lp_count"] or 0,
+                "committed_lp_total": f["committed_lp_total"],
+                "pipeline_count":     f["pipeline_count"] or 0,
+                "pipeline_total":     f["pipeline_total"],
             },
             **({"lp_commitments": lps} if inp.include_lp_detail else {}),
         }
@@ -1507,6 +1516,13 @@ def get_fundraising_summary(inp: FundraisingSummaryInput, ctx: dict) -> ToolResu
         "year_filter":     inp.year,
         "fund_count":      len(funds_raw),
         "funds":           [_fmt_fund(f) for f in funds_raw],
+        "data_note": (
+            "commitment_amount uses probability_adjusted (the field DealCloud "
+            "actually populates). stage='5. Committed' rows are the real LP "
+            "capital; stages 2-4 are active pipeline. sum_of_lp_capital on "
+            "each fund is DealCloud's own pre-aggregated LP total (authoritative "
+            "for all-time figures)."
+        ),
     })
 
 
