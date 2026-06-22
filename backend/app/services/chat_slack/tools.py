@@ -1406,7 +1406,7 @@ def get_fundraising_summary(inp: FundraisingSummaryInput, ctx: dict) -> ToolResu
                      f.first_close_date, f.final_close_date, f.next_close_date
             ORDER BY f.fund_size DESC NULLS LAST, f.name
             """,
-            agg_year_params * 3 + fund_params,
+            agg_year_params * 4 + fund_params,
         )
         funds_raw = [dict(r) for r in cur.fetchall()]
 
