@@ -54,6 +54,10 @@ async def _run(query: str) -> int:
                 "search_documents",
                 "read_document",
                 "get_deal_one_pager",
+                # Write tools -- confirm they're registered, but never
+                # call them here (this smoke test must stay read-only).
+                "draft_research_activity",
+                "create_research_activity",
             }
             missing = expected - set(names)
             if missing:

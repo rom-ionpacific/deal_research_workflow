@@ -1,14 +1,19 @@
 # deal_research_workflow MCP server
 
 Exposes the existing **read-only** tool surface (org search, dossiers,
-document search/read, deal one-pagers — the same 13 tools Todd uses) over
-the Model Context Protocol, so Claude clients can reach Ion's DealCloud /
-SharePoint-indexed data directly.
+document search/read, deal one-pagers — the same 13 tools Todd uses) PLUS
+two **write** tools for logging a Claude research session as a DealCloud
+Activity, over the Model Context Protocol, so Claude clients can reach
+(and, for those two tools, update) Ion's DealCloud / SharePoint-indexed
+data directly.
 
 This is **tier-1 of the Claude Enterprise rollout**: the curated-app
 connector. It reuses `app/services/chat_slack/tools.py::slack_registry`
 and derives MCP tool schemas from the same Pydantic models the web app
-and Todd already use — so schemas never drift.
+and Todd already use — so schemas never drift. The two write tools live
+on a separate clone (`chat_mcp_tools.py::mcp_registry`), NOT on
+`slack_registry` itself, so Todd's Slack bot never gains DealCloud-write
+access — only this MCP connector does.
 
 The generic machinery (registry→MCP adapter, stdio + HTTP transports)
 lives in the shared **`claude_enterprise_utils`** library; this package
@@ -18,13 +23,37 @@ registry). Install the library for local dev:
 
 ## Tools exposed
 
-`find_organizations`, `bundle_via_supersede`, `get_org_portfolio_status`,
-`get_org_deal_history`, `get_org_ion_contacts`, `get_org_their_contacts`,
-`get_org_communication_timeline`, `get_org_dossier`,
-`read_document_summary`, `search_documents`, `read_document`,
-`get_deal_one_pager`, `list_deals`.
+Read-only (13): `find_organizations`, `bundle_via_supersede`,
+`get_org_portfolio_status`, `get_org_deal_history`, `get_org_ion_contacts`,
+`get_org_their_contacts`, `get_org_communication_timeline`,
+`get_org_dossier`, `read_document_summary`, `search_documents`,
+`read_document`, `get_deal_one_pager`, `list_deals`. These ignore
+session/ctx state.
 
-All are read-only and ignore session/ctx state.
+Write (2) — logging a Claude research session as a DealCloud Activity
+(the "Interaction" entity, entry type 5341):
+
+- `draft_research_activity` — resolves `org_ids` / `deal_id` /
+  `requester_emails` and returns the exact preview of what would be
+  submitted (Subject, Type, Date, Notes, Internal Attendees, Related
+  Organizations, Deal). **Zero DealCloud writes.** Always call this first
+  and show the user the preview; re-call it as they request changes.
+- `create_research_activity` — same inputs + `confirm: bool`. Only
+  `confirm=true` actually writes to DealCloud; `confirm=false` (default)
+  just returns the same preview. Only call with `confirm=true` after the
+  user has explicitly approved the draft.
+
+Both call `deal_cloud_enhancer`'s `/internal/activities*` endpoints (same
+shared-secret pattern as `read_document`'s dce call), since that's where
+the actual DealCloud API credentials live.
+
+**Known limitation, ship-now decision:** DealCloud's Interaction.Type
+picklist has no "Research Session" value yet (only Meeting / Call / Email
+/ Other / IP Event) — our data-scope API token can't add picklist values
+(a schema change), so these tools use `Other` until someone adds
+"Research Session" in DealCloud Admin (Platform Builder). Swapping to the
+real value once it exists is a one-line change
+(`activity_writer.TYPE_CHOICE_ID_OTHER` in `deal_cloud_enhancer`).
 
 ## Security — PII scrubbing
 
@@ -107,9 +136,12 @@ python -m app.mcp.smoke                  # against live Neon
 python -m app.mcp.smoke --query "Moove"
 ```
 
-Validates: initialize, list_tools (expects 13), a live
-`find_organizations` + `get_org_dossier`, and the bad-argument path.
-Exits non-zero on failure.
+Validates: initialize, list_tools (expects the 13 read tools plus
+`draft_research_activity`/`create_research_activity`), a live
+`find_organizations` + `get_org_dossier`, and the bad-argument path. Never
+calls the write tools (they're only checked for presence in the tool
+list) so this is safe to run against production. Exits non-zero on
+failure.
 
 ## Deploying the HTTP transport (later — Enterprise connector)
 

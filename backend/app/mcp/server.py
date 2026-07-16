@@ -16,7 +16,11 @@ SERVER_NAME = "deal-research-workflow"
 
 
 def build_default_server():
-    """Build the MCP server from our read-only Slack/Todd tool registry.
+    """Build the MCP server from our tool registry: Todd's read-only
+    Slack/dossier tools, plus two DealCloud-write tools
+    (draft_research_activity / create_research_activity) that exist ONLY
+    on this MCP-facing registry — not on slack_registry itself, so Todd's
+    Slack bot never gains write access. See chat_mcp_tools.py.
 
     Every tool's text output is run through the PII scrubber, which masks
     high-harm structured identifiers (SSNs, bank/account/routing numbers,
@@ -29,10 +33,10 @@ def build_default_server():
     quick CLI ``--help``) doesn't force a settings load / DB pool
     creation.
     """
-    from ..services.chat_slack.tools import slack_registry
+    from ..services.chat_mcp_tools import mcp_registry
 
     return build_server(
-        slack_registry, SERVER_NAME, response_filter=make_response_filter()
+        mcp_registry, SERVER_NAME, response_filter=make_response_filter()
     )
 
 
