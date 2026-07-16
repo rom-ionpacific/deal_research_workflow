@@ -273,7 +273,13 @@ class CreateResearchActivityInput(ResearchActivityInput):
         "draft_research_activity and explicitly confirmed the org(s), "
         "deal, subject, notes, and attendee(s). confirm=false (or "
         "omitted) just returns the same preview and writes nothing -- use "
-        "that if you need to double check the resolved values first."
+        "that if you need to double check the resolved values first. Every "
+        "successful create is logged in DealCloud's audit trail "
+        "(dealcloud.activity_log) and can be undone by an admin running a "
+        "script -- if the user asks to undo/delete one, tell them to ask "
+        "an admin to run manual_helper_scripts/undo_research_activity.py "
+        "with the returned entry_id or log_id; there is no chat-facing "
+        "undo tool by design."
     ),
     CreateResearchActivityInput,
     mutates_state=True,
@@ -297,5 +303,9 @@ def create_research_activity(inp: CreateResearchActivityInput, ctx: dict) -> Too
     })
 
     if resp.get("ok"):
-        return ToolResult(output={**preview, "created": True, "entry_id": resp.get("entry_id")})
+        return ToolResult(output={
+            **preview, "created": True,
+            "entry_id": resp.get("entry_id"),
+            "log_id": resp.get("log_id"),
+        })
     return ToolResult(output={**preview, "created": False, "error": resp.get("error", "create_failed")})
