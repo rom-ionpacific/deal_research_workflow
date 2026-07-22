@@ -7,7 +7,7 @@ underlying business/product direction, not an exit path. Exit-eventuality
 modeling (mapping each strategy to upside/base/downside/failure outcomes)
 is a later, separate phase and out of scope here.
 
-Reads (`list_org_strategy_documents`, `get_company_strategy_context`) go
+Reads (`list_org_recent_documents`, `get_company_strategy_context`) go
 straight through drw's own DB connection, same as every other dossier/search
 tool in this package -- `scenario_agent` is a plain schema in the same
 shared Neon DB. Writes (`save_strategy_draft`, `finalize_strategy_agreement`)
@@ -18,6 +18,10 @@ the validation/normalization logic (probability renormalization, citation
 cleaning, base-value retire-and-replace) in ONE place rather than
 duplicating it a second time the way deal_scenario_modeler's backend.py
 already had to (a documented pain point).
+
+`_resolve_deal_org`/`_resolve_org_scope` and `CitationInput` are also
+imported by `chat_base_value_tools.py` for its own (unrelated) base-value
+agent -- shared org/deal resolution, not shared strategy logic.
 
 Registered directly onto `chat_mcp_tools.mcp_registry` (imported for its
 side effect by mcp/server.py), the same technique chat_mcp_tools.py itself
@@ -39,7 +43,7 @@ from .document_search import list_recent_documents_for_orgs
 class CitationInput(BaseModel):
     type: Literal["document", "web"]
     document_id: int | None = Field(
-        None, description="Required when type='document': a dealcloud.document.id from list_org_strategy_documents/search_documents/read_document.",
+        None, description="Required when type='document': a dealcloud.document.id from list_org_recent_documents/search_documents/read_document.",
     )
     url: str | None = Field(None, description="Required when type='web': the source URL.")
     title: str | None = Field(None, description="Optional, e.g. the article/page title.")
@@ -68,14 +72,38 @@ def _resolve_deal_org(deal_id: int) -> tuple[int | None, str | None, str]:
     return row["organization_id"], row["org_name"], ""
 
 
+def _resolve_org_scope(
+    org_ids: list[int] | None, deal_id: int | None,
+) -> tuple[int | None, list[int], dict | None, str | None]:
+    """Shared org resolution for any tool that accepts EITHER org_ids or a
+    deal_id (get_company_strategy_context, get_base_value_context): resolves
+    deal_id -> its counterparty org via _resolve_deal_org, merges with any
+    org_ids given, and splits into a single anchor_org_id (first entry --
+    what every write is scoped to) + related_org_ids (the rest --
+    descriptive only). Returns (anchor_org_id, related_org_ids, deal_info,
+    error); anchor_org_id is None iff error is set."""
+    resolved = list(org_ids or [])
+    deal_info = None
+    if deal_id is not None:
+        org_id, org_name, err = _resolve_deal_org(deal_id)
+        if err:
+            return None, [], None, err
+        deal_info = {"deal_id": deal_id, "organization_id": org_id, "organization_name": org_name}
+        if org_id not in resolved:
+            resolved.insert(0, org_id)
+    if not resolved:
+        return None, [], None, "provide org_ids and/or deal_id"
+    return resolved[0], resolved[1:], deal_info, None
+
+
 # ---------------------------------------------------------------------------
 # Reads
 # ---------------------------------------------------------------------------
 
-class ListOrgStrategyDocumentsInput(BaseModel):
+class ListOrgRecentDocumentsInput(BaseModel):
     org_ids: list[int] = Field(
         ..., min_length=1, max_length=10,
-        description="dealcloud.organization.id values to survey documents for (the anchor company plus any related orgs, e.g. subsidiaries, from get_company_strategy_context).",
+        description="dealcloud.organization.id values to survey documents for (the anchor company plus any related orgs, e.g. subsidiaries, from get_company_strategy_context/get_base_value_context).",
     )
     limit: int = Field(
         30, ge=1, le=100,
@@ -84,25 +112,24 @@ class ListOrgStrategyDocumentsInput(BaseModel):
 
 
 @mcp_registry.tool(
-    "list_org_strategy_documents",
+    "list_org_recent_documents",
     (
         "List a company's internal documents newest-modified FIRST, with no "
         "topic filter and no 5-doc cap (unlike get_org_dossier). This is the "
-        "PRIMARY way to survey a company's material when identifying its "
-        "business strategies -- give materially more weight to "
-        "recently-modified documents when forming a view; a 3-month-old "
-        "board deck should usually beat a 2-year-old one on the same topic. "
-        "Excludes firm/fund marketing decks (noise for strategy work "
-        "regardless of recency). Once you have a lead from here, use "
-        "search_documents for topic-targeted digging and "
-        "read_document/read_document_summary to actually read one, or use "
-        "your own web search for external sources (news, the company's own "
-        "site) -- either kind can be cited in save_strategy_draft. "
-        "Read-only."
+        "PRIMARY way to survey a company's material for either the business-"
+        "strategy agent or the base-value agent -- give materially more "
+        "weight to recently-modified documents when forming a view; a "
+        "3-month-old board deck should usually beat a 2-year-old one on the "
+        "same topic. Excludes firm/fund marketing decks (noise regardless "
+        "of recency). Once you have a lead from here, use search_documents "
+        "for topic-targeted digging and read_document/read_document_summary "
+        "to actually read one, or use your own web search for external "
+        "sources (news, the company's own site) -- either kind can be "
+        "cited in save_strategy_draft or set_base_value. Read-only."
     ),
-    ListOrgStrategyDocumentsInput,
+    ListOrgRecentDocumentsInput,
 )
-def list_org_strategy_documents(inp: ListOrgStrategyDocumentsInput, ctx: dict) -> ToolResult:
+def list_org_recent_documents(inp: ListOrgRecentDocumentsInput, ctx: dict) -> ToolResult:
     rows = list_recent_documents_for_orgs(inp.org_ids, limit=inp.limit)
     return ToolResult(output={"org_ids": inp.org_ids, "count": len(rows), "documents": rows})
 
@@ -139,19 +166,9 @@ class GetCompanyStrategyContextInput(BaseModel):
     GetCompanyStrategyContextInput,
 )
 def get_company_strategy_context(inp: GetCompanyStrategyContextInput, ctx: dict) -> ToolResult:
-    resolved = list(inp.org_ids or [])
-    deal_info = None
-    if inp.deal_id is not None:
-        org_id, org_name, err = _resolve_deal_org(inp.deal_id)
-        if err:
-            return ToolResult(output={"error": err})
-        deal_info = {"deal_id": inp.deal_id, "organization_id": org_id, "organization_name": org_name}
-        if org_id not in resolved:
-            resolved.insert(0, org_id)
-    if not resolved:
-        return ToolResult(output={"error": "provide org_ids and/or deal_id"})
-
-    anchor_org_id, related_org_ids = resolved[0], resolved[1:]
+    anchor_org_id, related_org_ids, deal_info, err = _resolve_org_scope(inp.org_ids, inp.deal_id)
+    if err:
+        return ToolResult(output={"error": err})
 
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -216,7 +233,7 @@ class StrategyInput(BaseModel):
     )
     citations: list[CitationInput] = Field(
         default_factory=list,
-        description="Documents (from list_org_strategy_documents/search_documents/read_document) or external web sources that support this strategy.",
+        description="Documents (from list_org_recent_documents/search_documents/read_document) or external web sources that support this strategy.",
     )
     primary_citation: CitationInput | None = Field(
         None, description="The single most important citation from the list above, or null.",
@@ -266,7 +283,7 @@ class SaveStrategyDraftInput(BaseModel):
         "this again mid-negotiation edits in place rather than piling up "
         "duplicates -- call it as many times as the conversation needs. "
         "Before your FIRST call: gather documents via "
-        "list_org_strategy_documents (recency-weighted) plus your own web "
+        "list_org_recent_documents (recency-weighted) plus your own web "
         "search where useful, and get_company_strategy_context (existing "
         "state); cite the specific document(s)/URL(s) each strategy draws "
         "from, and be CRITICAL of any probability the analyst proposes that "
