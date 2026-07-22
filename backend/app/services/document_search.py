@@ -355,3 +355,83 @@ def search_documents_for_orgs(
     else:
         raise ValueError(f"unknown mode {mode!r}")
     return [_row_to_dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Recency-first listing for the scenario-strategy agent -- "what's the
+# newest material we have on this company", not topic search. get_org_dossier
+# caps at 5 recent docs (a general-purpose snapshot); this has no such cap
+# and excludes firm/fund marketing decks, which are noise for strategy work
+# regardless of how recent they are. Deliberately duplicates a subset of
+# deal_cloud_enhancer's _FIRM_DECK_PATTERNS (scenario_agent_extractor.py,
+# pre-2026-07-21 version) -- same cross-repo duplication tradeoff already
+# accepted for deal_scenario_modeler's backend.py.
+# ---------------------------------------------------------------------------
+
+_FIRM_DECK_PATTERNS = (
+    "/marketing pack/", "/for lps/", "firm overview", "fund overview",
+    "lp update", "subscription agreement", "subagreement", "sub agreement",
+    "limited partnership agreement", "side letter", "subscription booklet",
+)
+
+# LP-facing fund decks get linked to every portfolio company they mention
+# (e.g. "Ion Pacific Growth I presentation Q226.pdf" turns up on each
+# company in that fund), so an exact-phrase check like "ion pacific q226"
+# misses real filenames where a fund/vehicle name sits in between --
+# verified against a real 7605 (Metropolis) doc list during smoke testing,
+# where "Ion Pacific Stonecutter presentation Q226.pdf" slipped through an
+# earlier "ion pacific q" substring check. Broadened to "mentions the firm
+# AND reads like a periodic LP deck" instead.
+_FIRM_DECK_LP_KEYWORDS = ("presentation", "overview", "update", "quarterly", "track record", "agm")
+_FIRM_NAME_HINTS = ("ion pacific", "ionpac")
+
+
+def _is_firm_deck(name: str, path: str | None) -> bool:
+    blob = f"{name} {path or ''}".lower()
+    if any(p in blob for p in _FIRM_DECK_PATTERNS):
+        return True
+    return any(f in blob for f in _FIRM_NAME_HINTS) and any(k in blob for k in _FIRM_DECK_LP_KEYWORDS)
+
+
+_RECENT_DOCS_SQL = """
+SELECT d.id, d.name, d.path, d.modified_at, d.web_url,
+       LEFT(COALESCE(d.summary, ''), 200) AS summary_preview
+  FROM dealcloud.document d
+  JOIN dealcloud.organization_entity oe
+    ON oe.entity_type = 'document' AND oe.entity_id = d.id
+ WHERE oe.organization_id = ANY(%s::int[])
+ ORDER BY d.modified_at DESC NULLS LAST
+ LIMIT %s
+"""
+
+
+def list_recent_documents_for_orgs(
+    org_ids: list[int],
+    limit: int = 30,
+    exclude_firm_decks: bool = True,
+) -> list[dict]:
+    """Documents linked to `org_ids`, newest-modified first, with no topic
+    filter -- the primary way the strategy-agreement agent should survey a
+    company's material before forming a view, so the most recent board
+    deck/IC memo/investor update always surfaces regardless of whether its
+    wording happens to match a search query. Over-fetches (3x limit, capped
+    at 200) before excluding firm decks so the returned count still roughly
+    matches `limit`."""
+    if not org_ids:
+        return []
+    fetch_n = min(max(limit * 3, limit), 200) if exclude_firm_decks else limit
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(_RECENT_DOCS_SQL, (org_ids, fetch_n))
+        rows = list(cur.fetchall())
+    if exclude_firm_decks:
+        rows = [r for r in rows if not _is_firm_deck(r["name"], r.get("path"))]
+    rows = rows[:limit]
+    return [{
+        "document_id": r["id"],
+        "name": r["name"],
+        "path": r.get("path"),
+        "modified_at": r.get("modified_at"),
+        "web_url": r.get("web_url"),
+        "summary_preview": r.get("summary_preview") or "",
+    } for r in rows]
