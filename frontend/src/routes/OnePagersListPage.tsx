@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -41,13 +41,16 @@ export default function OnePagersListPage() {
   return (
     <div className="h-full overflow-y-auto">
       <div className="max-w-3xl mx-auto p-6">
-        <div className="mb-4">
-          <h1 className="text-xl font-semibold">Deal one-pagers</h1>
-          <p className="text-sm text-slate-500 mt-1">
-            {debouncedQ
-              ? "Search results across all deals."
-              : "Live-pipeline deals. Search to find any deal."}
-          </p>
+        <div className="mb-4 flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-xl font-semibold">Deal one-pagers</h1>
+            <p className="text-sm text-slate-500 mt-1">
+              {debouncedQ
+                ? "Search results across all deals."
+                : "Live-pipeline deals. Search to find any deal."}
+            </p>
+          </div>
+          <DealcloudSyncButton />
         </div>
 
         <input
@@ -99,6 +102,63 @@ function DealRow({ deal }: { deal: DealListItem }) {
         <OnePagerBadge deal={deal} />
       </Link>
     </li>
+  );
+}
+
+/** Manual "Sync DealCloud data" trigger. A new deal created in DealCloud
+ * doesn't otherwise show up here until the next scheduled sync (daily,
+ * full on Sundays) -- this lets an analyst pull it in immediately. Polls
+ * dce's sync status while a run is in flight so the button reflects
+ * progress even across a page refresh. */
+function DealcloudSyncButton() {
+  // True from the moment we click sync until the polled status leaves
+  // 'running' -- covers the race where dce returns 202 before its
+  // in-memory state flips to 'running'.
+  const [pending, setPending] = useState(false);
+
+  const statusQuery = useQuery({
+    queryKey: ["dealcloud-sync-status"],
+    queryFn: () => api.getDealcloudSyncStatus(),
+    refetchInterval: (q) => {
+      if (pending) return 4000;
+      const d = q.state.data;
+      return d?.status === "running" ? 4000 : false;
+    },
+  });
+
+  const sync = useMutation({
+    mutationFn: () => api.triggerDealcloudSync(),
+    onMutate: () => setPending(true),
+    onSuccess: () => statusQuery.refetch(),
+    onError: () => setPending(false),
+  });
+
+  const remoteStatus = statusQuery.data?.status;
+  useEffect(() => {
+    if (!pending) return;
+    if (remoteStatus === "running" || remoteStatus === undefined) return;
+    setPending(false);
+  }, [pending, remoteStatus]);
+
+  const isRunning = pending || remoteStatus === "running";
+
+  return (
+    <div className="shrink-0 flex flex-col items-end gap-1">
+      <button
+        type="button"
+        disabled={isRunning}
+        onClick={() => sync.mutate()}
+        className="text-sm px-3 py-2 rounded-md border border-slate-300 text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+      >
+        {isRunning ? "Syncing..." : "Sync DealCloud data"}
+      </button>
+      {!isRunning && remoteStatus === "complete" && (
+        <span className="text-xs text-emerald-600">Synced</span>
+      )}
+      {!isRunning && (remoteStatus === "failed" || sync.isError) && (
+        <span className="text-xs text-red-600">Sync failed</span>
+      )}
+    </div>
   );
 }
 

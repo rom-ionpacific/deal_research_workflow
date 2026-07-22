@@ -11,6 +11,7 @@ from .routes import (
     chat,
     data_rooms,
     deals,
+    dealcloud_sync,
     entities,
     health,
     orgs,
@@ -44,6 +45,7 @@ app.include_router(chat.router, prefix="/api/v1")
 app.include_router(entities.router, prefix="/api/v1")
 app.include_router(data_rooms.router, prefix="/api/v1")
 app.include_router(deals.router, prefix="/api/v1")
+app.include_router(dealcloud_sync.router, prefix="/api/v1")
 # Slack endpoints (Todd the Walrus). Mounted at /slack -- signature
 # verification is per-route, NOT global, so the /api/v1 routes still
 # use X-User-Email auth.

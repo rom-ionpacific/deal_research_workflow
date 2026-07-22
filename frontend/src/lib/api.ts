@@ -377,6 +377,25 @@ export interface BuildOnePagerResp {
   already_running: boolean;
 }
 
+// ----- manual DealCloud sync -----
+
+export interface DealcloudSyncStatus {
+  // 'idle' (no sync since the dce dyno last started) | 'running' |
+  // 'complete' | 'failed' | 'stale' (a 'running' state older than dce's
+  // stale window -- the sync likely died mid-run).
+  status: "idle" | "running" | "complete" | "failed" | "stale";
+  full: boolean;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+}
+
+export interface TriggerSyncResp {
+  ok: boolean;
+  already_running: boolean;
+  status: DealcloudSyncStatus;
+}
+
 // ----- chat -----
 
 export interface ChatMessage {
@@ -636,6 +655,20 @@ export const api = {
     request<BuildOnePagerResp>(`/api/v1/deals/${dealId}/one-pager/build`, {
       method: "POST",
       body: JSON.stringify({ force }),
+    }),
+
+  // ---- manual DealCloud sync ----
+  // Current state of the manual sync trigger. Polled while status ===
+  // 'running'.
+  getDealcloudSyncStatus: () =>
+    request<DealcloudSyncStatus>("/api/v1/dealcloud-sync/status"),
+
+  // Trigger a sync in dce. Returns 202; poll getDealcloudSyncStatus to see
+  // it land. Idempotent unless force (a sync already running is reused).
+  triggerDealcloudSync: (full = false, force = false) =>
+    request<TriggerSyncResp>("/api/v1/dealcloud-sync", {
+      method: "POST",
+      body: JSON.stringify({ full, force }),
     }),
 };
 
