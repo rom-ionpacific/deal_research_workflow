@@ -3,23 +3,31 @@ services:
   # pushes don't auto-deploy; trigger manually from dashboard or API. Keeps
   # pipeline-minute usage proportional to actual work.
   - type: web
-    name: deal-research-workflow-api
+    # Renamed from `deal-research-workflow-api` 2026-07-23 -- that slug's
+    # Render routing/edge layer got into a broken state that caused
+    # sporadic net::ERR_CONNECTION_RESET / ERR_CONNECTION_CLOSED /
+    # ERR_QUIC_PROTOCOL_ERROR on every request, reproducible from two
+    # completely independent clients (browser + an unrelated sandboxed
+    # shell) against a freshly recreated, health-check-verified-healthy
+    # origin -- ruling out our code, DB, and client network as the cause.
+    # A second throwaway service under a different name on the same
+    # account/region/code worked flawlessly, isolating the problem to
+    # that specific hostname's routing state. Cut over to this new slug
+    # (frontend VITE_API_BASE_URL + Slack app event/command/interactivity
+    # URLs updated accordingly) rather than wait on a support fix. The
+    # old service was deleted; if this recurs, suspect the SAME failure
+    # mode on this slug rather than assuming it's new.
+    name: deal-research-workflow-api-v2
     runtime: python
     autoDeploy: false
     rootDir: backend
     buildCommand: pip install -r requirements.txt
-    # --timeout-keep-alive: uvicorn's default is 5s, well under the idle
-    # window Render's edge (Cloudflare) uses when reusing a pooled
-    # edge-to-origin connection. Once a connection sits idle for >5s,
-    # uvicorn closes its end while the edge still thinks it's live --
-    # the client's next request on that stale connection dies with
-    # net::ERR_CONNECTION_RESET / ERR_CONNECTION_CLOSED (occasionally
-    # ERR_QUIC_PROTOCOL_ERROR on the first hop). Root-caused 2026-07-23
-    # from sporadic "Failed to fetch" on the one-pager web view -- the
-    # same errors were reproducible from a second, unrelated client,
-    # ruling out a client-side network cause. 75s comfortably exceeds
-    # typical CDN/proxy keep-alive reuse windows (matches nginx's classic
-    # default).
+    healthCheckPath: /healthz
+    # --timeout-keep-alive: uvicorn's default is 5s. Cheap insurance
+    # against any reverse-proxy/CDN reusing idle edge-to-origin
+    # connections longer than that (harmless here even though this
+    # host isn't Cloudflare-fronted -- see rename note above for the
+    # actual root cause of the 2026-07-23 outage).
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --timeout-keep-alive 75
     envVars:
       - key: DATABASE_URL
