@@ -8,7 +8,19 @@ services:
     autoDeploy: false
     rootDir: backend
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    # --timeout-keep-alive: uvicorn's default is 5s, well under the idle
+    # window Render's edge (Cloudflare) uses when reusing a pooled
+    # edge-to-origin connection. Once a connection sits idle for >5s,
+    # uvicorn closes its end while the edge still thinks it's live --
+    # the client's next request on that stale connection dies with
+    # net::ERR_CONNECTION_RESET / ERR_CONNECTION_CLOSED (occasionally
+    # ERR_QUIC_PROTOCOL_ERROR on the first hop). Root-caused 2026-07-23
+    # from sporadic "Failed to fetch" on the one-pager web view -- the
+    # same errors were reproducible from a second, unrelated client,
+    # ruling out a client-side network cause. 75s comfortably exceeds
+    # typical CDN/proxy keep-alive reuse windows (matches nginx's classic
+    # default).
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --timeout-keep-alive 75
     envVars:
       - key: DATABASE_URL
         sync: false
