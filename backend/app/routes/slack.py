@@ -60,7 +60,15 @@ async def slack_events(
     background: BackgroundTasks,
     body: bytes = Depends(verify_slack_signature),
 ) -> Response:
-    payload = json.loads(body)
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        # Seen in prod from an empty-body request (some Slack-side
+        # health/monitoring ping, not a real event) -- nothing to parse,
+        # nothing to do. Ack rather than 500 so it doesn't show up as an
+        # app error / trigger a Slack retry.
+        log.warning("[slack/events] non-JSON/empty body (%d bytes); acking", len(body))
+        return empty_ok()
 
     # URL-verification handshake fires once when registering the events URL.
     if payload.get("type") == "url_verification":
