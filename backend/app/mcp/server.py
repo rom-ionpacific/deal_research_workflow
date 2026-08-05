@@ -44,6 +44,7 @@ def build_default_server():
     from ..services import chat_scenario_tools  # noqa: F401 -- registers onto mcp_registry
     from ..services import chat_base_value_tools  # noqa: F401 -- registers onto mcp_registry
     from ..services import chat_eventuality_tools  # noqa: F401 -- registers onto mcp_registry
+    from ..services import chat_simulation_tools  # noqa: F401 -- registers onto mcp_registry
 
     return build_server(
         mcp_registry, SERVER_NAME, response_filter=make_response_filter()
