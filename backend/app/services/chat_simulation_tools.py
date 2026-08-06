@@ -70,7 +70,7 @@ from pydantic import BaseModel, Field
 from ..db import get_conn
 from .chat_lib import ToolResult
 from .chat_mcp_tools import mcp_registry
-from .chat_scenario_tools import _resolve_org_scope
+from .chat_scenario_tools import _deep_link, _resolve_org_scope
 
 _TIER_ORDER = {"upside": 0, "base": 1, "downside": 2, "failure": 3}
 
@@ -278,7 +278,10 @@ class RunScenarioSimulationInput(BaseModel):
         "probability of exceeding baseline/2x/3x) as a formatted message, "
         "then ask whether the user wants to test any deal structures "
         "against it -- do not jump into deal-structure questions "
-        "unprompted."
+        "unprompted. MANDATORY: also share the response's deep_link "
+        "(unprompted, every time) as a clickable/pasteable URL so the "
+        "analyst can view this same strategy+scenario breakdown on the "
+        "deal_scenario_modeler webpage directly."
     ),
     RunScenarioSimulationInput,
     mutates_state=True,
@@ -335,12 +338,15 @@ def run_scenario_simulation(inp: RunScenarioSimulationInput, ctx: dict) -> ToolR
         "n_runs": inp.n_runs,
         "summary_stats": stats,
         "scenario_simulation_id": scenario_simulation_id,
+        "deep_link": _deep_link(anchor_org_id),
         "note": (
             "This is the company's own exit-value distribution -- no Ion "
             "deal structure has been applied. Present it, then ask "
             "whether the user wants to test one or more deal structures "
             "against it via apply_deal_structure (pass this "
-            "scenario_simulation_id)."
+            "scenario_simulation_id). Also share deep_link with the "
+            "analyst as a clickable/pasteable URL so they can see this "
+            "same strategy+scenario breakdown on the modeling webpage."
         ),
     })
 

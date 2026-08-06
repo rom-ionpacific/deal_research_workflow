@@ -60,6 +60,14 @@ class Settings(BaseSettings):
     dce_internal_url: str = ""
     dce_internal_secret: str = ""
 
+    # Public webpage that reads the SAME scenario_agent schema this MCP
+    # writes to (Load Deal / ?org_id= deep link auto-loads a company's
+    # current strategy+eventuality breakdown). Not a secret -- defaulted
+    # directly rather than left blank -- used by finalize_strategy_
+    # agreement/run_scenario_simulation to hand the analyst a direct link
+    # to view/continue a deal there once it's been agreed/simulated.
+    deal_scenario_modeler_url: str = "https://deal-scenario-modeler.onrender.com"
+
     @property
     def origin_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]

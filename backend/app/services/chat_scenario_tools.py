@@ -34,10 +34,18 @@ from typing import Literal
 import psycopg2.extras
 from pydantic import BaseModel, Field
 
+from ..config import settings
 from ..db import get_conn
 from .chat_lib import ToolResult
 from .chat_mcp_tools import _dce_post, mcp_registry
 from .document_search import list_recent_documents_for_orgs
+
+
+def _deep_link(org_id: int) -> str:
+    """Direct link to view/continue a deal on deal_scenario_modeler --
+    the webpage's ?org_id= deep link auto-loads that org's current
+    strategy+eventuality breakdown (same data these MCP tools write)."""
+    return f"{settings.deal_scenario_modeler_url.rstrip('/')}/?org_id={org_id}"
 
 
 class CitationInput(BaseModel):
@@ -365,7 +373,12 @@ class FinalizeStrategyAgreementInput(BaseModel):
         "confirm=false (or omitted) returns a preview and writes nothing -- "
         "use that to double-check resolved values first. Every override is "
         "logged to scenario_agent.company_strategy_probability_change "
-        "(change_type='manual_override') for audit."
+        "(change_type='manual_override') for audit. On a successful "
+        "confirm=true finalize, the response includes deep_link -- ALWAYS "
+        "share it with the analyst as a clickable/pasteable URL (e.g. "
+        "'You can view this on the modeling site here: {deep_link}') so "
+        "they can see the agreed strategy breakdown on "
+        "deal_scenario_modeler directly, not just in this conversation."
     ),
     FinalizeStrategyAgreementInput,
     mutates_state=True,
@@ -384,4 +397,6 @@ def finalize_strategy_agreement(inp: FinalizeStrategyAgreementInput, ctx: dict) 
         "overrides": {str(k): v.model_dump() for k, v in inp.overrides.items()},
     }
     resp = _dce_post("/internal/scenario-strategy/finalize", payload)
+    if resp.get("ok", True):
+        resp["deep_link"] = _deep_link(inp.org_id)
     return ToolResult(output=resp)
