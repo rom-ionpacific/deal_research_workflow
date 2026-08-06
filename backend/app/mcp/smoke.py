@@ -58,9 +58,10 @@ async def _run(query: str) -> int:
                 # call them here (this smoke test must stay read-only).
                 "draft_research_activity",
                 "create_research_activity",
-                # Also a write (appends to scenario_agent.simulation_run) --
-                # same reason, registration-only check.
-                "run_simulation",
+                # Also writes (append to scenario_agent.scenario_simulation /
+                # deal_structure_simulation) -- same reason, registration-only check.
+                "run_scenario_simulation",
+                "apply_deal_structure",
             }
             missing = expected - set(names)
             if missing:

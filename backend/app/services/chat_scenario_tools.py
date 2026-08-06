@@ -161,7 +161,18 @@ class GetCompanyStrategyContextInput(BaseModel):
         "every subsequent call this session. ALWAYS call this before "
         "save_strategy_draft so you build on existing state instead of "
         "starting from scratch or silently duplicating an already-agreed "
-        "strategy. Read-only."
+        "strategy.\n\n"
+        "MANDATORY even when a complete, already-reviewed breakdown comes "
+        "back: present the FULL existing mapping to the user (every "
+        "strategy, its probability, and your own assessment of the "
+        "reasoning/evidence quality behind it) and explicitly ask whether "
+        "to keep it, adjust it, or rebuild it -- NEVER silently proceed to "
+        "eventuality-mapping or simulation just because a mapping already "
+        "exists. Treat stored data as a starting point for discussion, not "
+        "a decision already made. If the user agrees on something "
+        "different from what's stored, that's a fresh reasoned mapping "
+        "(save_strategy_draft + finalize_strategy_agreement) with its own "
+        "reasoning, not a silent overwrite. Read-only."
     ),
     GetCompanyStrategyContextInput,
 )
