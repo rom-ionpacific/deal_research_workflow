@@ -120,6 +120,10 @@ def get_base_value_context(inp: GetBaseValueContextInput, ctx: dict) -> ToolResu
 
 class SetBaseValueInput(BaseModel):
     org_id: int = Field(..., description="The anchor_org_id from get_base_value_context.")
+    modeling_session_id: int | None = Field(
+        None,
+        description="From get_modeling_session_options / start_modeling_session, if this base value is being set as part of a specific modeling session's workflow. Audit/provenance only -- base value itself stays shared across all of an org's sessions (one current value per org), so omitting this is fine when setting a value standalone, outside any session's flow.",
+    )
     basis_type: str = Field(..., description="'price_per_share' or 'valuation'.")
     value: float = Field(..., ge=0)
     fully_diluted_shares: float | None = Field(
@@ -157,7 +161,12 @@ class SetBaseValueInput(BaseModel):
         "Propose (confirm=false) or commit (confirm=true) a company's "
         "current base value. ALWAYS call get_base_value_context first so "
         "you know whether one already exists and have the analyst's "
-        "explicit go-ahead to replace it. Ground the proposed value in "
+        "explicit go-ahead to replace it. If this is happening as part of a "
+        "modeling session's workflow (get_modeling_session_options / "
+        "start_modeling_session already called), pass that "
+        "modeling_session_id -- purely for audit/provenance, since base "
+        "value itself stays shared across every session for this org, not "
+        "session-partitioned like strategies/eventualities. Ground the proposed value in "
         "list_org_recent_documents/search_documents (internal) and/or your "
         "own web search (external) -- be CRITICAL: if the analyst proposes "
         "a number that conflicts with the evidence, say so explicitly "
@@ -177,7 +186,8 @@ class SetBaseValueInput(BaseModel):
 )
 def set_base_value(inp: SetBaseValueInput, ctx: dict) -> ToolResult:
     preview = {
-        "org_id": inp.org_id, "basis_type": inp.basis_type, "value": inp.value,
+        "org_id": inp.org_id, "modeling_session_id": inp.modeling_session_id,
+        "basis_type": inp.basis_type, "value": inp.value,
         "fully_diluted_shares": inp.fully_diluted_shares, "as_of": inp.as_of,
         "reasoning": inp.reasoning,
         "citations": [c.model_dump() for c in inp.citations],

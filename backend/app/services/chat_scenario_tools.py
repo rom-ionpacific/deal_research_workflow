@@ -41,11 +41,16 @@ from .chat_mcp_tools import _dce_post, mcp_registry
 from .document_search import list_recent_documents_for_orgs
 
 
-def _deep_link(org_id: int) -> str:
-    """Direct link to view/continue a deal on deal_scenario_modeler --
-    the webpage's ?org_id= deep link auto-loads that org's current
-    strategy+eventuality breakdown (same data these MCP tools write)."""
-    return f"{settings.deal_scenario_modeler_url.rstrip('/')}/?org_id={org_id}"
+def _deep_link(org_id: int, modeling_session_id: int | None = None) -> str:
+    """Direct link to view/continue a deal on deal_scenario_modeler.
+    Prefers ?session_id= (2026-08-07) -- unambiguous now that a company can
+    have more than one modeling session -- falling back to the older
+    ?org_id= (loads that org's most recent session) when no
+    modeling_session_id is available yet."""
+    base = settings.deal_scenario_modeler_url.rstrip("/")
+    if modeling_session_id is not None:
+        return f"{base}/?session_id={modeling_session_id}"
+    return f"{base}/?org_id={org_id}"
 
 
 class CitationInput(BaseModel):
@@ -151,25 +156,33 @@ class GetCompanyStrategyContextInput(BaseModel):
         None,
         description="A dealcloud.deal.id -- if the user names a deal rather than a company, pass this instead of org_ids and the deal's main counterparty organization is resolved automatically.",
     )
+    modeling_session_id: int = Field(
+        ...,
+        description="From get_modeling_session_options / start_modeling_session -- MUST be called first. Strategies are scoped to a specific modeling session, not just the company, so two sessions for the same org never blend together.",
+    )
 
 
 @mcp_registry.tool(
     "get_company_strategy_context",
     (
-        "Resolve a company (from org_ids, or from deal_id if the user named "
-        "a deal instead) and fetch its current scenario-agent state before "
-        "proposing or revising business strategies: its current base value "
-        "(price-per-share or valuation, if one has been set) and every "
-        "existing company_strategy row (both already-reviewed/agreed ones "
-        "from a prior session AND any unreviewed draft left over from an "
-        "interrupted one -- check is_reviewed). When org_ids has more than "
-        "one entry, or deal_id resolves alongside other known org_ids, the "
-        "FIRST org_id returned as anchor_org_id is the one everything gets "
-        "written against -- use that exact org_id (and related_org_ids) in "
-        "every subsequent call this session. ALWAYS call this before "
-        "save_strategy_draft so you build on existing state instead of "
-        "starting from scratch or silently duplicating an already-agreed "
-        "strategy.\n\n"
+        "ALWAYS call get_modeling_session_options (and start_modeling_session "
+        "if the analyst wants a new one, or none exist yet) FIRST -- this "
+        "tool requires the resulting modeling_session_id. Resolve a company "
+        "(from org_ids, or from deal_id if the user named a deal instead) "
+        "and fetch THIS SESSION's current scenario-agent state before "
+        "proposing or revising business strategies: the company's current "
+        "base value (price-per-share or valuation, shared across all "
+        "sessions for this org, if one has been set) and every "
+        "company_strategy row belonging to modeling_session_id (both "
+        "already-reviewed/agreed ones from earlier in this same session AND "
+        "any unreviewed draft left over from an interrupted one -- check "
+        "is_reviewed). When org_ids has more than one entry, or deal_id "
+        "resolves alongside other known org_ids, the FIRST org_id returned "
+        "as anchor_org_id is the one everything gets written against -- use "
+        "that exact org_id (and related_org_ids) in every subsequent call "
+        "this session. ALWAYS call this before save_strategy_draft so you "
+        "build on existing state instead of starting from scratch or "
+        "silently duplicating an already-agreed strategy.\n\n"
         "MANDATORY even when a complete, already-reviewed breakdown comes "
         "back: present the FULL existing mapping to the user (every "
         "strategy, its probability, and your own assessment of the "
@@ -212,10 +225,10 @@ def get_company_strategy_context(inp: GetCompanyStrategyContextInput, ctx: dict)
                         WHERE e.strategy_id = s.id
                    ) AS has_eventualities
               FROM scenario_agent.company_strategy s
-             WHERE s.org_id = %s AND s.is_active
+             WHERE s.org_id = %s AND s.is_active AND s.modeling_session_id = %s
              ORDER BY s.is_reviewed DESC, s.probability DESC
             """,
-            (anchor_org_id,),
+            (anchor_org_id, inp.modeling_session_id),
         )
         strategies = list(cur.fetchall())
 
@@ -223,6 +236,7 @@ def get_company_strategy_context(inp: GetCompanyStrategyContextInput, ctx: dict)
         "anchor_org_id": anchor_org_id,
         "related_org_ids": related_org_ids,
         "deal": deal_info,
+        "modeling_session_id": inp.modeling_session_id,
         "base_value": dict(base_value) if base_value else None,
         "strategies": [dict(s) for s in strategies],
     })
@@ -279,6 +293,9 @@ class BaseValueInput(BaseModel):
 
 class SaveStrategyDraftInput(BaseModel):
     org_id: int = Field(..., description="The anchor_org_id from get_company_strategy_context.")
+    modeling_session_id: int = Field(
+        ..., description="From get_modeling_session_options / start_modeling_session -- every strategy this call saves is scoped to this session.",
+    )
     related_org_ids: list[int] = Field(
         default_factory=list,
         description="The related_org_ids from get_company_strategy_context, if any -- other orgs considered alongside org_id (e.g. subsidiaries). Purely descriptive; org_id remains the sole anchor everything is written against.",
@@ -297,18 +314,21 @@ class SaveStrategyDraftInput(BaseModel):
         "strategies -- e.g. 'consumer product' vs 'B2B SaaS', NOT an exit "
         "path -- as an UNREVIEWED DRAFT (scenario_agent.company_strategy, "
         "is_reviewed=FALSE) -- does not require analyst sign-off yet. "
-        "REPLACES this org's entire prior unreviewed draft (already-"
-        "finalized strategies from a past session are untouched), so calling "
-        "this again mid-negotiation edits in place rather than piling up "
-        "duplicates -- call it as many times as the conversation needs. "
-        "Before your FIRST call: gather documents via "
-        "list_org_recent_documents (recency-weighted) plus your own web "
-        "search where useful, and get_company_strategy_context (existing "
-        "state); cite the specific document(s)/URL(s) each strategy draws "
-        "from, and be CRITICAL of any probability the analyst proposes that "
-        "conflicts with the evidence or looks unsupported -- say so "
-        "explicitly and explain why, but never silently substitute your "
-        "own number for theirs; the analyst gets the final word (at "
+        "REPLACES this modeling_session's entire prior unreviewed draft for "
+        "this org (already-finalized strategies, AND any other session's "
+        "still-unreviewed draft for the same org, are both untouched), so "
+        "calling this again mid-negotiation edits in place rather than "
+        "piling up duplicates -- call it as many times as the conversation "
+        "needs. Before your FIRST call: get_modeling_session_options (and "
+        "start_modeling_session if needed) for the modeling_session_id, "
+        "gather documents via list_org_recent_documents (recency-weighted) "
+        "plus your own web search where useful, and "
+        "get_company_strategy_context (existing state for this session); "
+        "cite the specific document(s)/URL(s) each strategy draws from, and "
+        "be CRITICAL of any probability the analyst proposes that conflicts "
+        "with the evidence or looks unsupported -- say so explicitly and "
+        "explain why, but never silently substitute your own number for "
+        "theirs; the analyst gets the final word (at "
         "finalize_strategy_agreement). MANDATORY: immediately after every "
         "call, print the full returned strategy set unprompted -- name, "
         "probability, confidence, probability_reasoning, citations, and any "
@@ -321,6 +341,7 @@ class SaveStrategyDraftInput(BaseModel):
 def save_strategy_draft(inp: SaveStrategyDraftInput, ctx: dict) -> ToolResult:
     payload = {
         "org_id": inp.org_id,
+        "modeling_session_id": inp.modeling_session_id,
         "related_org_ids": inp.related_org_ids,
         "strategies": [s.model_dump() for s in inp.strategies],
         "evidence_gaps": [g.model_dump() for g in inp.evidence_gaps],
@@ -342,6 +363,9 @@ class OverrideInput(BaseModel):
 
 class FinalizeStrategyAgreementInput(BaseModel):
     org_id: int = Field(..., description="dealcloud.organization.id (the anchor_org_id used in save_strategy_draft).")
+    modeling_session_id: int = Field(
+        ..., description="The modeling_session_id used in save_strategy_draft -- only THIS session's unreviewed draft is finalized.",
+    )
     reviewed_by: str = Field(
         "rom@ionpacific.com",
         description="Email of the analyst signing off. Defaults to the primary user.",
@@ -363,22 +387,24 @@ class FinalizeStrategyAgreementInput(BaseModel):
 @mcp_registry.tool(
     "finalize_strategy_agreement",
     (
-        "STEP 2: sign off on an org's current unreviewed draft business "
-        "strategies (marks is_reviewed=TRUE, making them eligible to feed "
-        "deal_scenario_modeler and the next phase, exit-eventuality "
-        "mapping). Do NOT call with confirm=true until the analyst has "
-        "explicitly confirmed the exact probabilities shown in the last "
-        "save_strategy_draft preview (pass any last-minute changes via "
-        "`overrides` rather than re-calling save_strategy_draft first). "
-        "confirm=false (or omitted) returns a preview and writes nothing -- "
-        "use that to double-check resolved values first. Every override is "
-        "logged to scenario_agent.company_strategy_probability_change "
-        "(change_type='manual_override') for audit. On a successful "
-        "confirm=true finalize, the response includes deep_link -- ALWAYS "
-        "share it with the analyst as a clickable/pasteable URL (e.g. "
-        "'You can view this on the modeling site here: {deep_link}') so "
-        "they can see the agreed strategy breakdown on "
-        "deal_scenario_modeler directly, not just in this conversation."
+        "STEP 2: sign off on THIS modeling session's current unreviewed "
+        "draft business strategies (marks is_reviewed=TRUE, making them "
+        "eligible to feed deal_scenario_modeler and the next phase, "
+        "exit-eventuality mapping) -- never touches another session's "
+        "still-unreviewed draft for the same org. Do NOT call with "
+        "confirm=true until the analyst has explicitly confirmed the exact "
+        "probabilities shown in the last save_strategy_draft preview (pass "
+        "any last-minute changes via `overrides` rather than re-calling "
+        "save_strategy_draft first). confirm=false (or omitted) returns a "
+        "preview and writes nothing -- use that to double-check resolved "
+        "values first. Every override is logged to scenario_agent."
+        "company_strategy_probability_change (change_type='manual_override') "
+        "for audit. On a successful confirm=true finalize, the response "
+        "includes deep_link -- ALWAYS share it with the analyst as a "
+        "clickable/pasteable URL (e.g. 'You can view this on the modeling "
+        "site here: {deep_link}') so they can see the agreed strategy "
+        "breakdown on deal_scenario_modeler directly, not just in this "
+        "conversation."
     ),
     FinalizeStrategyAgreementInput,
     mutates_state=True,
@@ -386,17 +412,19 @@ class FinalizeStrategyAgreementInput(BaseModel):
 def finalize_strategy_agreement(inp: FinalizeStrategyAgreementInput, ctx: dict) -> ToolResult:
     if not inp.confirm:
         return ToolResult(output={
-            "org_id": inp.org_id, "reviewed_by": inp.reviewed_by,
+            "org_id": inp.org_id, "modeling_session_id": inp.modeling_session_id,
+            "reviewed_by": inp.reviewed_by,
             "overrides": {k: v.model_dump() for k, v in inp.overrides.items()},
             "finalized": False, "reason": "confirm=false -- nothing written",
         })
 
     payload = {
         "org_id": inp.org_id,
+        "modeling_session_id": inp.modeling_session_id,
         "reviewed_by": inp.reviewed_by,
         "overrides": {str(k): v.model_dump() for k, v in inp.overrides.items()},
     }
     resp = _dce_post("/internal/scenario-strategy/finalize", payload)
     if resp.get("ok", True):
-        resp["deep_link"] = _deep_link(inp.org_id)
+        resp["deep_link"] = _deep_link(inp.org_id, inp.modeling_session_id)
     return ToolResult(output=resp)
