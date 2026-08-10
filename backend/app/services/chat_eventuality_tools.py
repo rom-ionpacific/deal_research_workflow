@@ -49,30 +49,37 @@ class GetEventualityContextInput(BaseModel):
         None,
         description="A dealcloud.deal.id -- if the user named a deal rather than a company, pass this instead of org_ids and the deal's main counterparty organization is resolved automatically.",
     )
+    modeling_session_id: int = Field(
+        ...,
+        description="From get_modeling_session_options / start_modeling_session -- MUST be called first. Only this session's strategies are considered.",
+    )
 
 
 @mcp_registry.tool(
     "get_eventuality_context",
     (
-        "ALWAYS call this FIRST when asked to map (or remap) exit-outcome "
-        "eventualities for a company's strategies, and ALSO before ever "
-        "calling run_scenario_simulation, even if the strategy breakdown "
-        "already looked complete -- a strategy having AGREED probabilities "
-        "does not mean its eventualities are mapped yet, and simulating "
-        "without checking silently falls back to the generic global prior "
-        "for every strategy, which is a materially weaker model than one "
-        "grounded in company/comp evidence. Resolves the company (from "
-        "org_ids, or from deal_id if the user named a deal) and returns: "
-        "its current base value (eventualities are exit MULTIPLES on "
-        "this, not dollar figures); every is_reviewed=TRUE active strategy "
-        "with its probability and, for each, its existing eventuality rows "
-        "if any (so you can see what's already mapped vs still pending, or "
-        "being revisited); and the global exit_outcome_prior -- the 4-tier "
-        "baseline (failure/downside/base/upside with probability + exit "
-        "multiple + years-to-exit) to WEIGH against company- and "
-        "comp-specific evidence, not to copy wholesale unless nothing "
-        "better is available. A strategy that isn't is_reviewed yet cannot "
-        "have eventualities set -- point the user to "
+        "ALWAYS call get_modeling_session_options (and start_modeling_session "
+        "if needed) FIRST -- this tool requires the resulting "
+        "modeling_session_id. Call this whenever asked to map (or remap) "
+        "exit-outcome eventualities for a company's strategies, and ALSO "
+        "before ever calling run_scenario_simulation, even if the strategy "
+        "breakdown already looked complete -- a strategy having AGREED "
+        "probabilities does not mean its eventualities are mapped yet, and "
+        "simulating without checking silently falls back to the generic "
+        "global prior for every strategy, which is a materially weaker "
+        "model than one grounded in company/comp evidence. Resolves the "
+        "company (from org_ids, or from deal_id if the user named a deal) "
+        "and returns: its current base value (shared across all sessions "
+        "for this org -- eventualities are exit MULTIPLES on this, not "
+        "dollar figures); every is_reviewed=TRUE active strategy belonging "
+        "to modeling_session_id with its probability and, for each, its "
+        "existing eventuality rows if any (so you can see what's already "
+        "mapped vs still pending, or being revisited); and the global "
+        "exit_outcome_prior -- the 4-tier baseline (failure/downside/base/"
+        "upside with probability + exit multiple + years-to-exit) to WEIGH "
+        "against company- and comp-specific evidence, not to copy wholesale "
+        "unless nothing better is available. A strategy that isn't "
+        "is_reviewed yet cannot have eventualities set -- point the user to "
         "finalize_strategy_agreement first if they ask for one.\n\n"
         "MANDATORY even when every strategy already has a complete 4-tier "
         "mapping: present the FULL existing mapping per strategy (each "
@@ -109,10 +116,10 @@ def get_eventuality_context(inp: GetEventualityContextInput, ctx: dict) -> ToolR
             """
             SELECT id, name, summary, probability, probability_reasoning
               FROM scenario_agent.company_strategy
-             WHERE org_id = %s AND is_active AND is_reviewed
+             WHERE org_id = %s AND is_active AND is_reviewed AND modeling_session_id = %s
              ORDER BY probability DESC
             """,
-            (anchor_org_id,),
+            (anchor_org_id, inp.modeling_session_id),
         )
         strategies = [dict(s) for s in cur.fetchall()]
 
@@ -138,6 +145,7 @@ def get_eventuality_context(inp: GetEventualityContextInput, ctx: dict) -> ToolR
         "anchor_org_id": anchor_org_id,
         "related_org_ids": related_org_ids,
         "deal": deal_info,
+        "modeling_session_id": inp.modeling_session_id,
         "base_value": dict(base_value) if base_value else None,
         "strategies": strategies,
         "exit_outcome_prior": prior,
@@ -190,7 +198,8 @@ class SetStrategyEventualitiesInput(BaseModel):
     (
         "Propose (confirm=false) or commit (confirm=true) the 4-tier exit-"
         "outcome mapping for ONE strategy. ALWAYS call get_eventuality_context "
-        "first. Ground each tier in a mix of: (1) the global "
+        "first. No modeling_session_id input needed here -- inherited "
+        "automatically from the strategy itself. Ground each tier in a mix of: (1) the global "
         "exit_outcome_prior as a starting anchor, (2) company-specific "
         "evidence from list_org_recent_documents/search_documents plus your "
         "own web search, and (3) comparable companies of similar size/"

@@ -62,6 +62,10 @@ async def _run(query: str) -> int:
                 # deal_structure_simulation) -- same reason, registration-only check.
                 "run_scenario_simulation",
                 "apply_deal_structure",
+                # Modeling-session tools -- ALWAYS the first step of any
+                # scenario-agent conversation now, registration-only check.
+                "get_modeling_session_options",
+                "start_modeling_session",
             }
             missing = expected - set(names)
             if missing:

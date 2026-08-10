@@ -94,11 +94,14 @@ def _fetch_current_base_value(org_id: int) -> dict | None:
 
 
 def _build_scenarios_for_org(
-    org_id: int, include_unreviewed: bool = False,
+    org_id: int, modeling_session_id: int, include_unreviewed: bool = False,
 ) -> tuple[list[Scenario], dict]:
     """Returns (scenarios, meta) where meta = {"strategies_used": [...],
-    "used_prior_fallback_for": [...]}. scenarios is [] if the org has no
-    (reviewed, unless include_unreviewed) active strategies at all."""
+    "used_prior_fallback_for": [...]}. scenarios is [] if this session has no
+    (reviewed, unless include_unreviewed) active strategies at all. Scoped
+    by modeling_session_id (2026-08-07) -- without this, a company with more
+    than one modeling session would blend every session's strategies into
+    one simulation."""
     review_clause = "" if include_unreviewed else "AND is_reviewed"
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -107,9 +110,9 @@ def _build_scenarios_for_org(
             f"""
             SELECT id, name, probability
               FROM scenario_agent.company_strategy
-             WHERE org_id = %s AND is_active {review_clause}
+             WHERE org_id = %s AND modeling_session_id = %s AND is_active {review_clause}
             """,
-            (org_id,),
+            (org_id, modeling_session_id),
         )
         strategies = [dict(s) for s in cur.fetchall()]
         if not strategies:
@@ -196,21 +199,21 @@ def _distribution_stats(exit_multiples: np.ndarray, exit_prices: np.ndarray) -> 
 # ---------------------------------------------------------------------------
 
 def _save_scenario_simulation(
-    *, org_id: int | None, deal_name: str, base_value: dict, scenarios_payload: list[dict],
-    meta: dict, n_runs: int, seed: int, stats: dict,
+    *, org_id: int | None, modeling_session_id: int, deal_name: str, base_value: dict,
+    scenarios_payload: list[dict], meta: dict, n_runs: int, seed: int, stats: dict,
 ) -> dict:
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
             """
             INSERT INTO scenario_agent.scenario_simulation
-                (org_id, deal_name, source, triggered_by, base_value_basis_type,
+                (org_id, modeling_session_id, deal_name, source, triggered_by, base_value_basis_type,
                  base_value, scenarios, strategies_used, used_prior_fallback_for,
                  n_runs, seed, summary_stats)
-            VALUES (%s, %s, 'mcp_chat', NULL, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s::jsonb)
+            VALUES (%s, %s, %s, 'mcp_chat', NULL, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s::jsonb)
             RETURNING id, created_at
             """,
-            (org_id, deal_name, base_value["basis_type"], base_value["value"],
+            (org_id, modeling_session_id, deal_name, base_value["basis_type"], base_value["value"],
              json.dumps(scenarios_payload), json.dumps(meta["strategies_used"]),
              json.dumps(meta["used_prior_fallback_for"]), n_runs, seed, json.dumps(stats)),
         )
@@ -226,6 +229,10 @@ class RunScenarioSimulationInput(BaseModel):
     deal_id: int | None = Field(
         None,
         description="A dealcloud.deal.id -- if the user named a deal rather than a company, pass this instead of org_ids and the deal's main counterparty organization is resolved automatically.",
+    )
+    modeling_session_id: int = Field(
+        ...,
+        description="From get_modeling_session_options / start_modeling_session -- MUST be called first. Only this session's reviewed strategies/eventualities are simulated.",
     )
     n_runs: int = Field(50_000, ge=1_000, le=200_000, description="Monte Carlo draw count.")
     include_unreviewed_strategies: bool = Field(
@@ -247,6 +254,9 @@ class RunScenarioSimulationInput(BaseModel):
         "REQUIRED sequence before calling this, every single time, even "
         "if a complete strategy/eventuality mapping already exists in the "
         "database:\n"
+        "0. get_modeling_session_options (and start_modeling_session if "
+        "the analyst wants a new one, or none exist yet) -- everything "
+        "below is scoped to the resulting modeling_session_id.\n"
         "1. get_base_value_context -- confirm the current base value with "
         "the user (or set_base_value if none exists or they want to "
         "refresh it). Do not proceed until a base value is agreed.\n"
@@ -297,14 +307,17 @@ def run_scenario_simulation(inp: RunScenarioSimulationInput, ctx: dict) -> ToolR
             "error": f"No base value set for org {anchor_org_id} -- call get_base_value_context and set_base_value first.",
         })
 
-    scenarios, meta = _build_scenarios_for_org(anchor_org_id, inp.include_unreviewed_strategies)
+    scenarios, meta = _build_scenarios_for_org(
+        anchor_org_id, inp.modeling_session_id, inp.include_unreviewed_strategies,
+    )
     if not scenarios:
         which = "strategies" if inp.include_unreviewed_strategies else "reviewed strategies"
         return ToolResult(output={
             "error": (
-                f"No {which} found for org {anchor_org_id} -- call "
-                "get_company_strategy_context first, or finalize_strategy_agreement "
-                "if strategies exist but aren't reviewed yet."
+                f"No {which} found for org {anchor_org_id} in this modeling "
+                "session -- call get_company_strategy_context first, or "
+                "finalize_strategy_agreement if strategies exist but aren't "
+                "reviewed yet."
             ),
         })
 
@@ -319,7 +332,8 @@ def run_scenario_simulation(inp: RunScenarioSimulationInput, ctx: dict) -> ToolR
     scenario_simulation_id = None
     try:
         row = _save_scenario_simulation(
-            org_id=anchor_org_id, deal_name=deal_name, base_value=base_value,
+            org_id=anchor_org_id, modeling_session_id=inp.modeling_session_id,
+            deal_name=deal_name, base_value=base_value,
             scenarios_payload=scenarios_payload, meta=meta, n_runs=inp.n_runs,
             seed=seed, stats=stats,
         )
@@ -333,12 +347,13 @@ def run_scenario_simulation(inp: RunScenarioSimulationInput, ctx: dict) -> ToolR
         "org_id": anchor_org_id,
         "related_org_ids": related_org_ids,
         "deal": deal_info,
+        "modeling_session_id": inp.modeling_session_id,
         **meta,
         "base_value": base_value,
         "n_runs": inp.n_runs,
         "summary_stats": stats,
         "scenario_simulation_id": scenario_simulation_id,
-        "deep_link": _deep_link(anchor_org_id),
+        "deep_link": _deep_link(anchor_org_id, inp.modeling_session_id),
         "note": (
             "This is the company's own exit-value distribution -- no Ion "
             "deal structure has been applied. Present it, then ask "
@@ -367,21 +382,21 @@ def _load_scenario_simulation(scenario_simulation_id: int) -> dict | None:
 
 
 def _save_deal_structure_simulation(
-    *, scenario_simulation_id: int, org_id: int | None, deal_name: str, config: dict,
-    exit_unit_price: float, stats: dict, level_breakdown: list[dict],
+    *, scenario_simulation_id: int, org_id: int | None, modeling_session_id: int | None,
+    deal_name: str, config: dict, exit_unit_price: float, stats: dict, level_breakdown: list[dict],
 ) -> dict:
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
             """
             INSERT INTO scenario_agent.deal_structure_simulation
-                (scenario_simulation_id, org_id, deal_name, source, triggered_by,
+                (scenario_simulation_id, org_id, modeling_session_id, deal_name, source, triggered_by,
                  deal_capital, ltv_ratio, deal_valuation, use_irr, levels,
                  exit_unit_price, summary_stats, level_breakdown)
-            VALUES (%s, %s, %s, 'mcp_chat', NULL, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb)
+            VALUES (%s, %s, %s, %s, 'mcp_chat', NULL, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb)
             RETURNING id, created_at
             """,
-            (scenario_simulation_id, org_id, deal_name, config["deal_capital"],
+            (scenario_simulation_id, org_id, modeling_session_id, deal_name, config["deal_capital"],
              config["ltv_ratio"], config["deal_valuation"], config["use_irr"],
              json.dumps(config["levels"]), exit_unit_price, json.dumps(stats),
              json.dumps(level_breakdown)),
@@ -469,7 +484,8 @@ def apply_deal_structure(inp: ApplyDealStructureInput, ctx: dict) -> ToolResult:
     try:
         row = _save_deal_structure_simulation(
             scenario_simulation_id=inp.scenario_simulation_id,
-            org_id=sim["org_id"], deal_name=sim["deal_name"],
+            org_id=sim["org_id"], modeling_session_id=sim.get("modeling_session_id"),
+            deal_name=sim["deal_name"],
             config=config.model_dump(), exit_unit_price=exit_unit_price,
             stats=stats, level_breakdown=level_breakdown,
         )
