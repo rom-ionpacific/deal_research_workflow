@@ -304,27 +304,28 @@ function FundList({ funds }: { funds: PortfolioFund[] }) {
 
 function FundChip({ fund }: { fund: PortfolioFund }) {
   const label = fund.fund_type_label || "Other";
-  // SPV (deal-specific vehicle) vs Blind Pool (commingled) vs SMA vs
-  // Other. Distinct colors so a glance separates the "is this our
-  // single-deal SPV?" vs "is this the parent commingled fund?" cases.
+  // SPV (deal-specific vehicle) vs SMA vs Other get a colored tag; the
+  // parent commingled fund is just called "the fund" by the team and the
+  // "Blind Pool" tag reads as noise next to it (per analyst feedback), so
+  // it's the one case rendered as plain fund name with no tag at all.
   const styles =
     label === "SPV"
       ? "bg-purple-50 border-purple-200 text-purple-800"
-      : label === "Blind Pool"
-        ? "bg-blue-50 border-blue-200 text-blue-800"
-        : label === "SMA"
-          ? "bg-teal-50 border-teal-200 text-teal-800"
-          : "bg-slate-100 border-slate-200 text-slate-700";
+      : label === "SMA"
+        ? "bg-teal-50 border-teal-200 text-teal-800"
+        : "bg-slate-100 border-slate-200 text-slate-700";
   return (
     <span className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 bg-white">
       <span className="font-medium text-slate-800">
         {fund.fund_name ?? `#${fund.fund_id}`}
       </span>
-      <span
-        className={`text-[10px] uppercase tracking-wide rounded px-1.5 py-0.5 border ${styles}`}
-      >
-        {label}
-      </span>
+      {label !== "Blind Pool" && (
+        <span
+          className={`text-[10px] uppercase tracking-wide rounded px-1.5 py-0.5 border ${styles}`}
+        >
+          {label}
+        </span>
+      )}
     </span>
   );
 }
