@@ -342,43 +342,35 @@ export interface InvestorRound {
 export interface InvestorEntry {
   name: string;
   rounds: InvestorRound[];
-}
-
-export interface FlaggedInvestorEntry extends InvestorEntry {
-  // Attribution as of the one-pager's last build -- the live view
-  // reconciles this against GET /api/v1/investors/flagged so a
-  // flag/unflag click is reflected without a rebuild.
-  flagged_by: string;
-}
-
-export interface FamiliarInvestor {
-  id?: number;
-  name: string;
-  n_deals?: number | null;
-  via: string;
+  // Present when a user manually marked this investor as top-tier (as
+  // of the one-pager's last build) -- the live view reconciles this
+  // against GET /api/v1/investors/marks so a mark/unmark click is
+  // reflected without a rebuild.
+  marked_by?: string | null;
 }
 
 export interface InvestorsContent {
   company: string | null;
-  flagged_investors: FlaggedInvestorEntry[];
   top_tier: InvestorEntry[];
   all_known_investors: string[];
-  familiar_investors: FamiliarInvestor[];
   public_error: string | null;
 }
 
-// The GLOBAL flagged-investor watchlist (not deal-scoped) -- see
+// The GLOBAL investor-marks registry (not deal-scoped) -- see
 // deal_cloud_enhancer's dealcloud.flagged_investor / one_pager_sections/
-// investors.py.
-export interface FlaggedInvestor {
+// investors.py. is_active=true means manually marked top-tier;
+// is_active=false means manually unmarked/excluded, even if the LLM
+// itself classifies the investor top-tier.
+export interface InvestorMark {
   name: string;
   normalized_name: string;
   flagged_by: string;
+  is_active: boolean;
   created_at: string | null;
 }
 
-export interface FlaggedInvestorsResp {
-  investors: FlaggedInvestor[];
+export interface InvestorMarksResp {
+  investors: InvestorMark[];
 }
 
 export interface DealListItem {
@@ -714,21 +706,21 @@ export const api = {
       body: JSON.stringify({ force }),
     }),
 
-  // ---- flagged investors (global watchlist) ----
-  // Currently-active flags. Used to render Flag/Unflag dropdown state and
-  // to reclassify a one-pager's Investors section client-side, live,
-  // without needing a rebuild.
-  listFlaggedInvestors: () =>
-    request<FlaggedInvestorsResp>("/api/v1/investors/flagged"),
+  // ---- investor marks (global top-tier override registry) ----
+  // ALL marks (both directions). Used to render Mark/Unmark dropdown
+  // state and to reclassify a one-pager's Top-tier Investors list
+  // client-side, live, without needing a rebuild.
+  listInvestorMarks: () =>
+    request<InvestorMarksResp>("/api/v1/investors/marks"),
 
-  flagInvestor: (name: string) =>
-    request<{ investor: FlaggedInvestor }>("/api/v1/investors/flag", {
+  markInvestor: (name: string) =>
+    request<{ investor: InvestorMark }>("/api/v1/investors/mark", {
       method: "POST",
       body: JSON.stringify({ name }),
     }),
 
-  unflagInvestor: (name: string) =>
-    request<{ investor: FlaggedInvestor }>("/api/v1/investors/unflag", {
+  unmarkInvestor: (name: string) =>
+    request<{ investor: InvestorMark }>("/api/v1/investors/unmark", {
       method: "POST",
       body: JSON.stringify({ name }),
     }),

@@ -1,12 +1,14 @@
-"""Flagged investors: a GLOBAL, user-curated watchlist.
+"""Investor marks: a GLOBAL, user-curated override on which investors
+count as "top-tier" in a one-pager's Investors section.
 
 The table (dealcloud.flagged_investor) and the actual read/write logic
 live in deal_cloud_enhancer -- this module only proxies to dce's internal
 API with the shared secret, same pattern as deal_one_pager.trigger_build
-and dealcloud_sync.trigger_sync. Not deal-scoped: flagging an investor
-once (e.g. "Eldridge Industries") makes it show up under every deal
-one-pager's "Flagged Investors" section from then on, wherever it
-appears as a known investor -- see deal_cloud_enhancer's
+and dealcloud_sync.trigger_sync. Not deal-scoped: marking an investor
+once (e.g. "Eldridge Industries") makes it show up under Top-tier
+Investors on every deal one-pager it appears on, from then on; unmarking
+one excludes it from Top-tier everywhere, even if the LLM itself
+classified it there -- see deal_cloud_enhancer's
 one_pager_sections/investors.py.
 
 drw has no verified per-user identity yet (see ../auth.py's V0 stub --
@@ -54,20 +56,22 @@ def _call(path: str, method: str = "GET", body: dict | None = None,
         return {"ok": False, "error": f"dce_unreachable: {type(e).__name__}: {e}"}
 
 
-def list_flagged_investors() -> dict:
+def list_investor_marks() -> dict:
     """{"ok": True, "investors": [{"name", "normalized_name",
-    "flagged_by", "created_at"}]} for all currently-active flags."""
-    return _call("/internal/investors/flagged", method="GET")
+    "flagged_by", "is_active", "created_at"}]} for ALL marks, both
+    directions (marked-top-tier and unmarked/excluded)."""
+    return _call("/internal/investors/marks", method="GET")
 
 
-def flag_investor(name: str, flagged_by: str) -> dict:
-    """Flag (or reactivate) an investor. Idempotent."""
-    return _call("/internal/investors/flag", method="POST",
-                body={"name": name, "flagged_by": flagged_by})
+def mark_investor(name: str, marked_by: str) -> dict:
+    """Mark an investor as top-tier. Idempotent."""
+    return _call("/internal/investors/mark", method="POST",
+                body={"name": name, "flagged_by": marked_by})
 
 
-def unflag_investor(name: str) -> dict:
-    """Unflag an investor (is_active -> FALSE). Returns ok=False,
-    error="not_flagged" if it was never flagged."""
-    return _call("/internal/investors/unflag", method="POST",
-                body={"name": name})
+def unmark_investor(name: str, marked_by: str) -> dict:
+    """Unmark an investor as top-tier (force-exclude, even if the LLM
+    itself classifies it there). Idempotent -- creates a row even for an
+    investor that was never marked before."""
+    return _call("/internal/investors/unmark", method="POST",
+                body={"name": name, "flagged_by": marked_by})

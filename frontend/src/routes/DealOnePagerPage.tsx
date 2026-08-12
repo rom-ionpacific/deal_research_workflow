@@ -357,19 +357,24 @@ function fmtUSD(n: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// Investors section — typed content + click-to-flag UI.
+// Investors section — typed content + click-to-mark UI.
 //
 // Given its own component (rather than the generic Markdown render every
-// other section gets) so investor names in "All known investors" and
-// "Flagged Investors" can be clickable, opening a dropdown to flag/unflag.
-// The flagged-investor watchlist (dealcloud.flagged_investor in dce) is
-// GLOBAL, not deal-scoped, and can change between one-pager rebuilds --
-// so this fetches the LIVE flagged set (GET /api/v1/investors/flagged)
-// and reclassifies top_tier/flagged_investors against it client-side,
-// rather than trusting only the build-time snapshot baked into the
-// section's stored content. A flag/unflag click is reflected here
-// instantly; the stored content_markdown (read by Slack/Todd/etc.) only
-// catches up on the next rebuild.
+// other section gets) so investor names in "Top-tier investors" and "All
+// known investors" can be clickable, opening a dropdown to mark/unmark
+// an investor as top-tier. The investor-marks registry (dealcloud.
+// flagged_investor in dce) is GLOBAL, not deal-scoped, and can change
+// between one-pager rebuilds -- so this fetches the LIVE marks (GET
+// /api/v1/investors/marks) and reclassifies content.top_tier against it
+// client-side, rather than trusting only the build-time snapshot baked
+// into the section's stored content. A mark/unmark click is reflected
+// here instantly; the stored content_markdown (read by Slack/Todd/etc.)
+// only catches up on the next rebuild.
+//
+// ("Familiar investors" -- is one of this company's investors also one
+// of OUR OWN GP/LP relationships -- is no longer part of this section;
+// folded into investor_connections.py 2026-08-12, which stays a plain
+// Markdown render, so it needs no typed component here.)
 // ---------------------------------------------------------------------------
 
 // Mirrors deal_cloud_enhancer's one_pager_lib.norm_investor_name -- both
@@ -395,23 +400,22 @@ function InvestorsSection({
   const qc = useQueryClient();
   const [openMenu, setOpenMenu] = useState<string | null>(null);
 
-  // Live flagged set -- independent of this section's (possibly stale)
+  // Live marks -- independent of this section's (possibly stale)
   // build-time snapshot. staleTime keeps it from refetching on every
-  // render; invalidated explicitly after a flag/unflag mutation.
-  const flaggedQuery = useQuery({
-    queryKey: ["flagged-investors"],
-    queryFn: api.listFlaggedInvestors,
+  // render; invalidated explicitly after a mark/unmark mutation.
+  const marksQuery = useQuery({
+    queryKey: ["investor-marks"],
+    queryFn: api.listInvestorMarks,
     staleTime: 30_000,
   });
 
-  const invalidate = () =>
-    qc.invalidateQueries({ queryKey: ["flagged-investors"] });
-  const flagMutation = useMutation({
-    mutationFn: (name: string) => api.flagInvestor(name),
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["investor-marks"] });
+  const markMutation = useMutation({
+    mutationFn: (name: string) => api.markInvestor(name),
     onSuccess: invalidate,
   });
-  const unflagMutation = useMutation({
-    mutationFn: (name: string) => api.unflagInvestor(name),
+  const unmarkMutation = useMutation({
+    mutationFn: (name: string) => api.unmarkInvestor(name),
     onSuccess: invalidate,
   });
 
@@ -427,39 +431,32 @@ function InvestorsSection({
     );
   }
 
-  const liveFlagged = new Map(
-    (flaggedQuery.data?.investors ?? []).map((f) => [f.normalized_name, f])
+  const liveMarks = new Map(
+    (marksQuery.data?.investors ?? []).map((m) => [m.normalized_name, m])
   );
-  const isLiveFlagged = (name: string) =>
-    liveFlagged.has(normInvestorName(name));
 
-  // Reclassify top_tier vs. Flagged Investors against the LIVE flagged
-  // set (the section's own content.top_tier / content.flagged_investors
-  // split reflects only whatever was flagged at the last build). Round
-  // data for a flagged top-tier investor is carried on whichever list
-  // the build-time snapshot happened to put it on -- combine both before
-  // resplitting so it's never lost.
-  const combined: InvestorEntry[] = [...content.top_tier, ...content.flagged_investors];
-  const seen = new Set<string>();
+  // Reclassify Top-tier against the LIVE marks registry -- the section's
+  // own content.top_tier reflects only whatever was marked at the last
+  // build. A FALSE mark force-excludes an LLM-native top-tier entry; a
+  // TRUE mark force-includes an all_known-only name that isn't already
+  // present (bare placeholder -- full round data lands on the next
+  // rebuild's targeted lookup).
   const liveTopTier: InvestorEntry[] = [];
-  const liveFlaggedList: Array<InvestorEntry & { flagged_by: string }> = [];
-  for (const entry of combined) {
+  const seen = new Set<string>();
+  for (const entry of content.top_tier) {
     const norm = normInvestorName(entry.name);
-    if (seen.has(norm)) continue;
+    const mark = liveMarks.get(norm);
     seen.add(norm);
-    const live = liveFlagged.get(norm);
-    if (live) liveFlaggedList.push({ ...entry, flagged_by: live.flagged_by });
-    else liveTopTier.push(entry);
+    if (mark?.is_active === false) continue; // unmarked -- force-excluded
+    liveTopTier.push(mark?.is_active ? { ...entry, marked_by: mark.flagged_by } : entry);
   }
-  // Flags that only match an all_known_investors name (no top-tier round
-  // data at all -- e.g. Eldridge Industries on Project Auto II).
   for (const name of content.all_known_investors) {
     const norm = normInvestorName(name);
     if (seen.has(norm)) continue;
-    const live = liveFlagged.get(norm);
-    if (live) {
+    const mark = liveMarks.get(norm);
+    if (mark?.is_active) {
       seen.add(norm);
-      liveFlaggedList.push({ name, rounds: [], flagged_by: live.flagged_by });
+      liveTopTier.push({ name, rounds: [], marked_by: mark.flagged_by });
     }
   }
 
@@ -469,41 +466,6 @@ function InvestorsSection({
 
   return (
     <div className="text-sm text-slate-700 space-y-4">
-      {liveFlaggedList.length > 0 && (
-        <div>
-          <div className="font-semibold mb-1.5">Flagged Investors</div>
-          <ul className="space-y-2">
-            {liveFlaggedList.map((t) => {
-              const key = `f:${normInvestorName(t.name)}`;
-              return (
-                <li key={key}>
-                  <InvestorNameMenu
-                    isOpen={openMenu === key}
-                    onToggle={() => toggle(key)}
-                    menu={
-                      <DropdownItem
-                        label="Unflag investor"
-                        onClick={() => {
-                          unflagMutation.mutate(t.name);
-                          setOpenMenu(null);
-                        }}
-                      />
-                    }
-                  >
-                    <span className="font-medium">{t.name}</span>
-                    <span className="text-slate-500">
-                      {" "}
-                      (flagged by {t.flagged_by})
-                    </span>
-                  </InvestorNameMenu>
-                  <RoundsList rounds={t.rounds} />
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      )}
-
       {content.public_error ? (
         <div>
           <span className="font-semibold">Top-tier investors:</span>{" "}
@@ -516,12 +478,35 @@ function InvestorsSection({
           <div className="font-semibold mb-1.5">Top-tier investors</div>
           {liveTopTier.length > 0 ? (
             <ul className="space-y-2">
-              {liveTopTier.map((t) => (
-                <li key={normInvestorName(t.name)}>
-                  <span className="font-medium">{t.name}</span>
-                  <RoundsList rounds={t.rounds} />
-                </li>
-              ))}
+              {liveTopTier.map((t) => {
+                const key = `t:${normInvestorName(t.name)}`;
+                return (
+                  <li key={key}>
+                    <InvestorNameMenu
+                      isOpen={openMenu === key}
+                      onToggle={() => toggle(key)}
+                      menu={
+                        <DropdownItem
+                          label="Unmark as top-tier investor"
+                          onClick={() => {
+                            unmarkMutation.mutate(t.name);
+                            setOpenMenu(null);
+                          }}
+                        />
+                      }
+                    >
+                      <span className="font-medium">{t.name}</span>
+                      {t.marked_by && (
+                        <span className="text-slate-500">
+                          {" "}
+                          (marked by {t.marked_by})
+                        </span>
+                      )}
+                    </InvestorNameMenu>
+                    <RoundsList rounds={t.rounds} />
+                  </li>
+                );
+              })}
             </ul>
           ) : (
             <div className="text-slate-500 italic">
@@ -536,7 +521,6 @@ function InvestorsSection({
           All known investors:{" "}
           {content.all_known_investors.map((name, i) => {
             const key = `a:${normInvestorName(name)}`;
-            const flagged = isLiveFlagged(name);
             return (
               <span key={key}>
                 <InvestorNameMenu
@@ -545,10 +529,9 @@ function InvestorsSection({
                   onToggle={() => toggle(key)}
                   menu={
                     <DropdownItem
-                      label={flagged ? "Unflag investor" : "Flag investor"}
+                      label="Mark as top-tier investor"
                       onClick={() => {
-                        if (flagged) unflagMutation.mutate(name);
-                        else flagMutation.mutate(name);
+                        markMutation.mutate(name);
                         setOpenMenu(null);
                       }}
                     />
@@ -562,35 +545,6 @@ function InvestorsSection({
           })}
         </div>
       )}
-
-      <div>
-        {content.familiar_investors.length > 0 ? (
-          <>
-            <div className="font-semibold mb-1.5">
-              Familiar investors (our GPs connected to this company)
-            </div>
-            <ul className="space-y-1">
-              {content.familiar_investors.map((f, i) => (
-                <li key={i}>
-                  {f.name}{" "}
-                  <span className="text-slate-500">
-                    ({f.via}
-                    {f.n_deals ? ` — ${f.n_deals} shared deal(s)` : ""})
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </>
-        ) : (
-          <div className="text-slate-500">
-            <span className="font-semibold text-slate-700">
-              Familiar investors:
-            </span>{" "}
-            none of our GPs are connected to this company in our data or
-            its public investor list.
-          </div>
-        )}
-      </div>
     </div>
   );
 }
