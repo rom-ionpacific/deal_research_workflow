@@ -391,13 +391,13 @@ def _save_deal_structure_simulation(
             """
             INSERT INTO scenario_agent.deal_structure_simulation
                 (scenario_simulation_id, org_id, modeling_session_id, deal_name, source, triggered_by,
-                 deal_capital, ltv_ratio, deal_valuation, use_irr, levels,
+                 deal_capital, ltv_ratio, deal_valuation, levels,
                  exit_unit_price, summary_stats, level_breakdown)
-            VALUES (%s, %s, %s, %s, 'mcp_chat', NULL, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb)
+            VALUES (%s, %s, %s, %s, 'mcp_chat', NULL, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb)
             RETURNING id, created_at
             """,
             (scenario_simulation_id, org_id, modeling_session_id, deal_name, config["deal_capital"],
-             config["ltv_ratio"], config["deal_valuation"], config["use_irr"],
+             config["ltv_ratio"], config["deal_valuation"],
              json.dumps(config["levels"]), exit_unit_price, json.dumps(stats),
              json.dumps(level_breakdown)),
         )
@@ -415,7 +415,6 @@ class ApplyDealStructureInput(BaseModel):
         ..., gt=0,
         description="Ion's own $-per-unit price or company valuation for THIS deal structure -- independent of the scenario simulation's base value (what Ion is paying/negotiating, not the company's general reference value).",
     )
-    use_irr: bool = Field(True, description="Whether ion_irr-condition waterfall levels compound Ion's target return over years-to-exit, vs. a flat (non-compounding) target if false.")
     levels: list[WaterfallLevel] = Field(
         ..., min_length=1,
         description="Ordered waterfall levels -- same 5 conditions as deal_scenario_modeler's Deal Structure tab (ion_fixed, ion_irr, counterparty_fixed, total_fixed, unlimited), each checked against CUMULATIVE proceeds so far.",
@@ -464,7 +463,6 @@ def apply_deal_structure(inp: ApplyDealStructureInput, ctx: dict) -> ToolResult:
         deal_capital=inp.deal_capital,
         ltv_ratio=inp.ltv_ratio,
         deal_valuation=inp.deal_valuation,
-        use_irr=inp.use_irr,
         scenarios=scenarios,
         levels=inp.levels,
     )

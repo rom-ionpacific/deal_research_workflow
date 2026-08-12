@@ -15,7 +15,7 @@ google-genai>=0.3
 # webpage-triggered run are guaranteed to run identical simulation code.
 # Pulls numpy/pydantic transitively; pin an explicit tag deliberately
 # (not @master) -- see that repo's own README.
-deal_sim_engine @ git+https://github.com/rom-ionpacific/deal_sim_engine.git@v0.1.0
+deal_sim_engine @ git+https://github.com/rom-ionpacific/deal_sim_engine.git@v0.2.0
 # MCP server framework (+ future PII scrubber) — shared infra repo.
 # Local dev: pip install -e ../../claude_enterprise_utils  (pulls mcp transitively)
 # Render: once the repo is pushed (private -> needs a deploy key), enable:
