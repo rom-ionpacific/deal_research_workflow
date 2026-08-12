@@ -14,6 +14,7 @@ from .routes import (
     dealcloud_sync,
     entities,
     health,
+    investors,
     orgs,
     sessions,
     slack,
@@ -46,6 +47,7 @@ app.include_router(entities.router, prefix="/api/v1")
 app.include_router(data_rooms.router, prefix="/api/v1")
 app.include_router(deals.router, prefix="/api/v1")
 app.include_router(dealcloud_sync.router, prefix="/api/v1")
+app.include_router(investors.router, prefix="/api/v1")
 # Slack endpoints (Todd the Walrus). Mounted at /slack -- signature
 # verification is per-route, NOT global, so the /api/v1 routes still
 # use X-User-Email auth.

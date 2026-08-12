@@ -6,6 +6,9 @@ import Markdown from "../components/Markdown";
 import {
   api,
   type DealOnePagerResp,
+  type InvestorEntry,
+  type InvestorRound,
+  type InvestorsContent,
   type PortfolioDirectPosition,
   type PortfolioFund,
   type PortfolioRelationshipContent,
@@ -13,6 +16,7 @@ import {
 import { useUI } from "../stores/ui";
 
 const PORTFOLIO_SECTION_KEY = "portfolio_relationship";
+const INVESTORS_SECTION_KEY = "investors";
 
 /** One deal's one-pager: renders the stored sections (standard markdown)
  * and a Refresh/Create button that triggers a rebuild in dce. While a
@@ -187,7 +191,9 @@ export default function DealOnePagerPage() {
                   <h2 className="text-base font-semibold border-b border-slate-200 pb-1 mb-2">
                     {s.title}
                   </h2>
-                  {s.content_markdown.trim() ? (
+                  {s.section_key === INVESTORS_SECTION_KEY ? (
+                    <InvestorsSection section={s} />
+                  ) : s.content_markdown.trim() ? (
                     <div className="text-sm text-slate-700">
                       <Markdown>{s.content_markdown}</Markdown>
                     </div>
@@ -348,4 +354,349 @@ function fmtUSD(n: number): string {
   if (a >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
   if (a >= 1e3) return `$${(n / 1e3).toFixed(0)}K`;
   return `$${n.toFixed(0)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Investors section — typed content + click-to-flag UI.
+//
+// Given its own component (rather than the generic Markdown render every
+// other section gets) so investor names in "All known investors" and
+// "Flagged Investors" can be clickable, opening a dropdown to flag/unflag.
+// The flagged-investor watchlist (dealcloud.flagged_investor in dce) is
+// GLOBAL, not deal-scoped, and can change between one-pager rebuilds --
+// so this fetches the LIVE flagged set (GET /api/v1/investors/flagged)
+// and reclassifies top_tier/flagged_investors against it client-side,
+// rather than trusting only the build-time snapshot baked into the
+// section's stored content. A flag/unflag click is reflected here
+// instantly; the stored content_markdown (read by Slack/Todd/etc.) only
+// catches up on the next rebuild.
+// ---------------------------------------------------------------------------
+
+// Mirrors deal_cloud_enhancer's one_pager_lib.norm_investor_name -- both
+// sides must agree on what counts as "the same investor" (e.g.
+// "Eldridge Industries" == "Eldridge Industries LLC").
+const INVESTOR_LEGAL_RX =
+  /\b(inc|ltd|llc|l\.?p\.?|plc|pte|gmbh|corp|co|limited|capital|ventures?|partners?|management|advisors?|group|holdings?|funds?|the)\b/gi;
+
+function normInvestorName(name: string | null | undefined): string {
+  let n = (name ?? "").toLowerCase();
+  n = n.replace(INVESTOR_LEGAL_RX, " ");
+  n = n.replace(/[^a-z0-9 ]/g, " ");
+  return n.replace(/\s+/g, " ").trim();
+}
+
+function InvestorsSection({
+  section,
+}: {
+  section:
+    | { content: unknown; content_markdown: string; status: string }
+    | undefined;
+}) {
+  const qc = useQueryClient();
+  const [openMenu, setOpenMenu] = useState<string | null>(null);
+
+  // Live flagged set -- independent of this section's (possibly stale)
+  // build-time snapshot. staleTime keeps it from refetching on every
+  // render; invalidated explicitly after a flag/unflag mutation.
+  const flaggedQuery = useQuery({
+    queryKey: ["flagged-investors"],
+    queryFn: api.listFlaggedInvestors,
+    staleTime: 30_000,
+  });
+
+  const invalidate = () =>
+    qc.invalidateQueries({ queryKey: ["flagged-investors"] });
+  const flagMutation = useMutation({
+    mutationFn: (name: string) => api.flagInvestor(name),
+    onSuccess: invalidate,
+  });
+  const unflagMutation = useMutation({
+    mutationFn: (name: string) => api.unflagInvestor(name),
+    onSuccess: invalidate,
+  });
+
+  if (!section) return null;
+  const content = section.content as InvestorsContent | null;
+  if (!content) {
+    return section.content_markdown.trim() ? (
+      <div className="text-sm text-slate-700">
+        <Markdown>{section.content_markdown}</Markdown>
+      </div>
+    ) : (
+      <div className="text-sm text-slate-400 italic">({section.status})</div>
+    );
+  }
+
+  const liveFlagged = new Map(
+    (flaggedQuery.data?.investors ?? []).map((f) => [f.normalized_name, f])
+  );
+  const isLiveFlagged = (name: string) =>
+    liveFlagged.has(normInvestorName(name));
+
+  // Reclassify top_tier vs. Flagged Investors against the LIVE flagged
+  // set (the section's own content.top_tier / content.flagged_investors
+  // split reflects only whatever was flagged at the last build). Round
+  // data for a flagged top-tier investor is carried on whichever list
+  // the build-time snapshot happened to put it on -- combine both before
+  // resplitting so it's never lost.
+  const combined: InvestorEntry[] = [...content.top_tier, ...content.flagged_investors];
+  const seen = new Set<string>();
+  const liveTopTier: InvestorEntry[] = [];
+  const liveFlaggedList: Array<InvestorEntry & { flagged_by: string }> = [];
+  for (const entry of combined) {
+    const norm = normInvestorName(entry.name);
+    if (seen.has(norm)) continue;
+    seen.add(norm);
+    const live = liveFlagged.get(norm);
+    if (live) liveFlaggedList.push({ ...entry, flagged_by: live.flagged_by });
+    else liveTopTier.push(entry);
+  }
+  // Flags that only match an all_known_investors name (no top-tier round
+  // data at all -- e.g. Eldridge Industries on Project Auto II).
+  for (const name of content.all_known_investors) {
+    const norm = normInvestorName(name);
+    if (seen.has(norm)) continue;
+    const live = liveFlagged.get(norm);
+    if (live) {
+      seen.add(norm);
+      liveFlaggedList.push({ name, rounds: [], flagged_by: live.flagged_by });
+    }
+  }
+
+  function toggle(key: string) {
+    setOpenMenu((cur) => (cur === key ? null : key));
+  }
+
+  return (
+    <div className="text-sm text-slate-700 space-y-4">
+      {liveFlaggedList.length > 0 && (
+        <div>
+          <div className="font-semibold mb-1.5">Flagged Investors</div>
+          <ul className="space-y-2">
+            {liveFlaggedList.map((t) => {
+              const key = `f:${normInvestorName(t.name)}`;
+              return (
+                <li key={key}>
+                  <InvestorNameMenu
+                    isOpen={openMenu === key}
+                    onToggle={() => toggle(key)}
+                    menu={
+                      <DropdownItem
+                        label="Unflag investor"
+                        onClick={() => {
+                          unflagMutation.mutate(t.name);
+                          setOpenMenu(null);
+                        }}
+                      />
+                    }
+                  >
+                    <span className="font-medium">{t.name}</span>
+                    <span className="text-slate-500">
+                      {" "}
+                      (flagged by {t.flagged_by})
+                    </span>
+                  </InvestorNameMenu>
+                  <RoundsList rounds={t.rounds} />
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+
+      {content.public_error ? (
+        <div>
+          <span className="font-semibold">Top-tier investors:</span>{" "}
+          <span className="italic text-slate-500">
+            research unavailable ({content.public_error}).
+          </span>
+        </div>
+      ) : (
+        <div>
+          <div className="font-semibold mb-1.5">Top-tier investors</div>
+          {liveTopTier.length > 0 ? (
+            <ul className="space-y-2">
+              {liveTopTier.map((t) => (
+                <li key={normInvestorName(t.name)}>
+                  <span className="font-medium">{t.name}</span>
+                  <RoundsList rounds={t.rounds} />
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="text-slate-500 italic">
+              none identified in public sources.
+            </div>
+          )}
+        </div>
+      )}
+
+      {content.all_known_investors.length > 0 && (
+        <div className="italic text-slate-500">
+          All known investors:{" "}
+          {content.all_known_investors.map((name, i) => {
+            const key = `a:${normInvestorName(name)}`;
+            const flagged = isLiveFlagged(name);
+            return (
+              <span key={key}>
+                <InvestorNameMenu
+                  inline
+                  isOpen={openMenu === key}
+                  onToggle={() => toggle(key)}
+                  menu={
+                    <DropdownItem
+                      label={flagged ? "Unflag investor" : "Flag investor"}
+                      onClick={() => {
+                        if (flagged) unflagMutation.mutate(name);
+                        else flagMutation.mutate(name);
+                        setOpenMenu(null);
+                      }}
+                    />
+                  }
+                >
+                  {name}
+                </InvestorNameMenu>
+                {i < content.all_known_investors.length - 1 ? ", " : ""}
+              </span>
+            );
+          })}
+        </div>
+      )}
+
+      <div>
+        {content.familiar_investors.length > 0 ? (
+          <>
+            <div className="font-semibold mb-1.5">
+              Familiar investors (our GPs connected to this company)
+            </div>
+            <ul className="space-y-1">
+              {content.familiar_investors.map((f, i) => (
+                <li key={i}>
+                  {f.name}{" "}
+                  <span className="text-slate-500">
+                    ({f.via}
+                    {f.n_deals ? ` — ${f.n_deals} shared deal(s)` : ""})
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : (
+          <div className="text-slate-500">
+            <span className="font-semibold text-slate-700">
+              Familiar investors:
+            </span>{" "}
+            none of our GPs are connected to this company in our data or
+            its public investor list.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RoundsList({ rounds }: { rounds: InvestorRound[] }) {
+  const list: InvestorRound[] =
+    rounds.length > 0
+      ? rounds
+      : [{ round: null, amount: null, date: null, lead: null, sources: [] }];
+  return (
+    <ul className="ml-3 mt-0.5 text-xs text-slate-600 space-y-0.5">
+      {list.map((rd, i) => {
+        const roundLabel = rd.round && rd.lead === true ? `${rd.round} (lead)` : rd.round;
+        const meta = [roundLabel, rd.amount, rd.date].filter(Boolean).join(" · ");
+        const sources = rd.sources.slice(0, 3);
+        return (
+          <li key={i}>
+            {meta || "—"}
+            {sources.length > 0 && (
+              <>
+                {" — "}
+                {sources.map((s, j) => (
+                  <span key={j}>
+                    <a
+                      href={s.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-blue-600 hover:underline"
+                    >
+                      {(s.title ?? s.url).slice(0, 35)}
+                    </a>
+                    {j < sources.length - 1 ? " · " : ""}
+                  </span>
+                ))}
+              </>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/** An investor name that opens a small dropdown (Flag/Unflag investor)
+ * on click. `inline` renders as a dotted-underline link suited to the
+ * comma-separated "All known investors" line; the default (Flagged/
+ * Top-tier lists) is bold. Closes on an outside click. */
+function InvestorNameMenu({
+  children,
+  inline,
+  isOpen,
+  onToggle,
+  menu,
+}: {
+  children: React.ReactNode;
+  inline?: boolean;
+  isOpen: boolean;
+  onToggle: () => void;
+  menu: React.ReactNode;
+}) {
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!isOpen) return;
+    function onDocClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onToggle();
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [isOpen, onToggle]);
+
+  return (
+    <span ref={ref} className="relative inline-block">
+      <button
+        type="button"
+        onClick={onToggle}
+        className={
+          inline
+            ? "underline decoration-dotted decoration-slate-400 hover:text-slate-800"
+            : "hover:underline decoration-dotted"
+        }
+      >
+        {children}
+      </button>
+      {isOpen && (
+        <div className="absolute z-10 mt-1 min-w-[9rem] rounded-md border border-slate-200 bg-white shadow-lg py-1 not-italic font-normal text-left">
+          {menu}
+        </div>
+      )}
+    </span>
+  );
+}
+
+function DropdownItem({
+  label,
+  onClick,
+}: {
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="block w-full text-left px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+    >
+      {label}
+    </button>
+  );
 }

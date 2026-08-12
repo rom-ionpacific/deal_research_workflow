@@ -324,6 +324,63 @@ export interface PortfolioRelationshipContent {
   summary: string;
 }
 
+// ----- investors section + flagged-investor watchlist -----
+
+export interface InvestorSource {
+  title: string | null;
+  url: string;
+}
+
+export interface InvestorRound {
+  round: string | null;
+  amount: string | null;
+  date: string | null;
+  lead: boolean | null;
+  sources: InvestorSource[];
+}
+
+export interface InvestorEntry {
+  name: string;
+  rounds: InvestorRound[];
+}
+
+export interface FlaggedInvestorEntry extends InvestorEntry {
+  // Attribution as of the one-pager's last build -- the live view
+  // reconciles this against GET /api/v1/investors/flagged so a
+  // flag/unflag click is reflected without a rebuild.
+  flagged_by: string;
+}
+
+export interface FamiliarInvestor {
+  id?: number;
+  name: string;
+  n_deals?: number | null;
+  via: string;
+}
+
+export interface InvestorsContent {
+  company: string | null;
+  flagged_investors: FlaggedInvestorEntry[];
+  top_tier: InvestorEntry[];
+  all_known_investors: string[];
+  familiar_investors: FamiliarInvestor[];
+  public_error: string | null;
+}
+
+// The GLOBAL flagged-investor watchlist (not deal-scoped) -- see
+// deal_cloud_enhancer's dealcloud.flagged_investor / one_pager_sections/
+// investors.py.
+export interface FlaggedInvestor {
+  name: string;
+  normalized_name: string;
+  flagged_by: string;
+  created_at: string | null;
+}
+
+export interface FlaggedInvestorsResp {
+  investors: FlaggedInvestor[];
+}
+
 export interface DealListItem {
   deal_id: number;
   name: string;
@@ -655,6 +712,25 @@ export const api = {
     request<BuildOnePagerResp>(`/api/v1/deals/${dealId}/one-pager/build`, {
       method: "POST",
       body: JSON.stringify({ force }),
+    }),
+
+  // ---- flagged investors (global watchlist) ----
+  // Currently-active flags. Used to render Flag/Unflag dropdown state and
+  // to reclassify a one-pager's Investors section client-side, live,
+  // without needing a rebuild.
+  listFlaggedInvestors: () =>
+    request<FlaggedInvestorsResp>("/api/v1/investors/flagged"),
+
+  flagInvestor: (name: string) =>
+    request<{ investor: FlaggedInvestor }>("/api/v1/investors/flag", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+
+  unflagInvestor: (name: string) =>
+    request<{ investor: FlaggedInvestor }>("/api/v1/investors/unflag", {
+      method: "POST",
+      body: JSON.stringify({ name }),
     }),
 
   // ---- manual DealCloud sync ----
