@@ -3,6 +3,18 @@ import { useState } from "react";
 
 import { api, type CoverageCriterion } from "../lib/api";
 
+function formatReviewedAt(iso: string): string {
+  try {
+    return new Date(iso).toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  } catch {
+    return iso;
+  }
+}
+
 /**
  * Data-room checklist coverage (see memory: data_room_coverage_analysis).
  * Read-only view + a "Scan" action that drains the room's not-yet-checked
@@ -29,8 +41,10 @@ import { api, type CoverageCriterion } from "../lib/api";
  *   Candidate Gap                                     -- the only status
  *     that means "we looked everywhere we could read and found nothing."
  *     Still needs human confirm before referencing externally -- see the
- *     design's human-review-gate principle. This UI does not (yet) have
- *     a confirm/dismiss action; it surfaces gaps for a human to triage.
+ *     design's human-review-gate principle. GapReviewControls below is
+ *     that gate: Confirm ("real gap, chase the counterparty") or Dismiss
+ *     ("not applicable to this deal"), recorded append-only server-side
+ *     so a later change of mind is auditable, not a silent overwrite.
  *   Scanning                                          -- not yet processed
  *     by the checklist matcher. Click "Scan" to process it.
  */
@@ -57,18 +71,122 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-function CriterionRow({ c }: { c: CoverageCriterion }) {
-  const [expanded, setExpanded] = useState(false);
+/** The human-review gate for a Candidate Gap (step 10a). Shows the current
+ * review (if any) with a "change" affordance, or Confirm/Dismiss buttons +
+ * an optional note if never reviewed. Every action appends a new review
+ * server-side (see api.ts) -- re-reviewing after a change of mind is
+ * expected, not blocked. */
+function GapReviewControls({
+  roomId,
+  criterionId,
+  review,
+}: {
+  roomId: number;
+  criterionId: number;
+  review: CoverageCriterion["review"];
+}) {
+  const qc = useQueryClient();
+  const [editing, setEditing] = useState(!review);
+  const [note, setNote] = useState("");
+  const [submitting, setSubmitting] = useState<"confirmed_gap" | "dismissed" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async (status: "confirmed_gap" | "dismissed") => {
+    setSubmitting(status);
+    setError(null);
+    try {
+      await api.setDataRoomCoverageReview(roomId, criterionId, status, note || undefined);
+      await qc.invalidateQueries({ queryKey: ["data-room-coverage", roomId] });
+      setEditing(false);
+      setNote("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
+  if (review && !editing) {
+    const label = review.status === "confirmed_gap" ? "Confirmed gap" : "Dismissed";
+    const style =
+      review.status === "confirmed_gap"
+        ? "text-red-700 bg-red-50 border-red-200"
+        : "text-slate-500 bg-slate-50 border-slate-200";
+    return (
+      <div
+        className={`mt-2 ml-1 px-2 py-1.5 rounded border text-xs flex items-start justify-between gap-2 ${style}`}
+      >
+        <div>
+          <span className="font-medium">{label}</span> by {review.reviewed_by} on{" "}
+          {formatReviewedAt(review.reviewed_at)}
+          {review.note && <div className="mt-0.5 italic">"{review.note}"</div>}
+        </div>
+        <button
+          type="button"
+          onClick={() => setEditing(true)}
+          className="text-slate-400 hover:text-slate-600 underline shrink-0"
+        >
+          change
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-2 ml-1 space-y-1.5">
+      <input
+        type="text"
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        placeholder="Optional note (e.g. why this is/isn't a real gap)"
+        className="w-full text-xs border border-slate-300 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+      />
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => void submit("confirmed_gap")}
+          disabled={submitting !== null}
+          className="text-xs px-2.5 py-1 rounded bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
+        >
+          {submitting === "confirmed_gap" ? "Confirming…" : "Confirm gap"}
+        </button>
+        <button
+          type="button"
+          onClick={() => void submit("dismissed")}
+          disabled={submitting !== null}
+          className="text-xs px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+        >
+          {submitting === "dismissed" ? "Dismissing…" : "Dismiss (not applicable)"}
+        </button>
+        {review && (
+          <button
+            type="button"
+            onClick={() => setEditing(false)}
+            className="text-xs text-slate-400 hover:text-slate-600 underline"
+          >
+            cancel
+          </button>
+        )}
+      </div>
+      {error && <div className="text-xs text-red-600">{error}</div>}
+    </div>
+  );
+}
+
+function CriterionRow({ roomId, c }: { roomId: number; c: CoverageCriterion }) {
+  const isGap = c.status === "Candidate Gap";
   const hasDetail = c.hits.length > 0 || c.keyword_hits.length > 0;
+  const [expanded, setExpanded] = useState(false);
+  const canExpand = hasDetail || isGap;
 
   return (
     <div className="px-3 py-2">
       <button
         type="button"
-        onClick={() => hasDetail && setExpanded((v) => !v)}
+        onClick={() => canExpand && setExpanded((v) => !v)}
         className={
           "w-full flex items-center justify-between gap-2 text-left " +
-          (hasDetail ? "cursor-pointer" : "cursor-default")
+          (canExpand ? "cursor-pointer" : "cursor-default")
         }
       >
         <span className="text-sm text-slate-700 flex-1">
@@ -76,6 +194,11 @@ function CriterionRow({ c }: { c: CoverageCriterion }) {
           {c.importance === "core" && (
             <span className="ml-1.5 text-[10px] uppercase tracking-wide text-slate-400">
               core
+            </span>
+          )}
+          {isGap && c.review && (
+            <span className="ml-1.5 text-[10px] uppercase tracking-wide text-slate-400">
+              reviewed
             </span>
           )}
         </span>
@@ -97,6 +220,10 @@ function CriterionRow({ c }: { c: CoverageCriterion }) {
             </div>
           )}
         </div>
+      )}
+
+      {expanded && isGap && (
+        <GapReviewControls roomId={roomId} criterionId={c.criterion_id} review={c.review} />
       )}
     </div>
   );
@@ -229,7 +356,7 @@ export default function CoverageSection({ roomId }: { roomId: number }) {
               {!isCollapsed && (
                 <div className="divide-y divide-slate-100">
                   {items.map((c) => (
-                    <CriterionRow key={c.criterion_id} c={c} />
+                    <CriterionRow key={c.criterion_id} roomId={roomId} c={c} />
                   ))}
                 </div>
               )}

@@ -45,8 +45,10 @@ from ..services.toltiq_adhoc import (
 )
 from ..services.data_room_coverage import (
     DceUnavailable,
+    InvalidReview,
     get_room_coverage,
     scan_room_coverage_batch,
+    set_coverage_review,
 )
 
 router = APIRouter()
@@ -607,6 +609,13 @@ class CoverageHitResp(BaseModel):
     evidence: str
 
 
+class CoverageReviewResp(BaseModel):
+    status: Literal["confirmed_gap", "dismissed"]
+    note: str | None
+    reviewed_by: str
+    reviewed_at: datetime
+
+
 class CoverageCriterionResp(BaseModel):
     criterion_id: int
     category: str
@@ -616,6 +625,7 @@ class CoverageCriterionResp(BaseModel):
     status: str
     hits: list[CoverageHitResp]
     keyword_hits: list[str]
+    review: CoverageReviewResp | None = None
 
 
 class RoomCoverageResp(BaseModel):
@@ -672,6 +682,7 @@ def get_data_room_coverage(
                 importance=c.importance, status=c.status,
                 hits=[CoverageHitResp(**h) for h in c.hits],
                 keyword_hits=c.keyword_hits,
+                review=CoverageReviewResp(**c.review) if c.review else None,
             )
             for c in result.criteria
         ],
@@ -701,3 +712,36 @@ def post_data_room_coverage_scan_batch(
         room_id=result.room_id, facets_written=result.facets_written,
         docs_processed=result.docs_processed, remaining=result.remaining,
     )
+
+
+class SetCoverageReviewReq(BaseModel):
+    criterion_id: int
+    status: Literal["confirmed_gap", "dismissed"]
+    note: str | None = None
+
+
+@router.post(
+    "/data-rooms/{room_id}/coverage/review",
+    response_model=CoverageReviewResp,
+)
+def post_data_room_coverage_review(
+    room_id: int,
+    req: SetCoverageReviewReq,
+    user: UserCtx = Depends(require_user),
+) -> CoverageReviewResp:
+    """Human-review-gate action: confirm a Candidate Gap as real (chase the
+    counterparty) or dismiss it (not applicable to this deal). Append-only
+    on the dce side -- reviewing the same criterion again records a NEW
+    decision rather than overwriting, so a change of mind is auditable.
+    reviewed_by is always the authenticated caller (user.email), never
+    accepted from the request body -- dce's internal endpoint trusts
+    whatever this route sends it."""
+    _gate_room_access(room_id, user)
+    try:
+        result = set_coverage_review(
+            room_id, req.criterion_id, req.status, user.email, note=req.note)
+    except InvalidReview as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except DceUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return CoverageReviewResp(**result)

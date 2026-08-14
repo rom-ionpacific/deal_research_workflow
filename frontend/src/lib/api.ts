@@ -282,6 +282,13 @@ export interface CoverageHit {
   evidence: string;
 }
 
+export interface CoverageReview {
+  status: "confirmed_gap" | "dismissed";
+  note: string | null;
+  reviewed_by: string;
+  reviewed_at: string;
+}
+
 export interface CoverageCriterion {
   criterion_id: number;
   category: string;
@@ -294,6 +301,10 @@ export interface CoverageCriterion {
   status: string;
   hits: CoverageHit[];
   keyword_hits: string[];
+  // Human-review-gate state (step 10a) -- null means never reviewed, NOT
+  // "no gap". Only meaningful for status === 'Candidate Gap' today, but
+  // present regardless of status.
+  review: CoverageReview | null;
 }
 
 export interface RoomCoverage {
@@ -699,6 +710,22 @@ export const api = {
       docs_processed: number;
       remaining: number;
     }>(`/api/v1/data-rooms/${roomId}/coverage/scan-batch`, { method: "POST" }),
+
+  // Human-review-gate action: confirm a Candidate Gap as real, or dismiss
+  // it as not applicable to this deal. Append-only on the backend --
+  // reviewing the same criterion again records a NEW decision, not an
+  // overwrite. reviewed_by is always the server's authenticated user, never
+  // sent from here.
+  setDataRoomCoverageReview: (
+    roomId: number,
+    criterionId: number,
+    status: "confirmed_gap" | "dismissed",
+    note?: string,
+  ) =>
+    request<CoverageReview>(`/api/v1/data-rooms/${roomId}/coverage/review`, {
+      method: "POST",
+      body: JSON.stringify({ criterion_id: criterionId, status, note: note ?? null }),
+    }),
 
   // Re-runs a failed ToltIQ answer in place (same row, status reset to
   // 'running'). Backed by POST /data-rooms/{id}/answers/{id}/retry on
