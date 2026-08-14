@@ -54,6 +54,8 @@ async def _run(query: str) -> int:
                 "search_documents",
                 "read_document",
                 "get_deal_one_pager",
+                "list_funds",
+                "get_fund_status",
                 # Write tools -- confirm they're registered, but never
                 # call them here (this smoke test must stay read-only).
                 "draft_research_activity",
@@ -102,7 +104,26 @@ async def _run(query: str) -> int:
                 else:
                     print(f"[ok] get_org_dossier({org_id}) -> {str(doss)[:80]}")
 
-            # 3) Bad-arg path returns a clean message, not a crash.
+            # 3) list_funds / get_fund_status -- exercise the fund-status
+            # tools end to end (read-only, safe against production).
+            res_lf = await session.call_tool("list_funds", {"limit": 5})
+            funds_payload = json.loads(_first_text(res_lf))
+            funds = funds_payload.get("funds", [])
+            print(f"[ok] list_funds() -> {funds_payload.get('total_matching')} funds total, "
+                  f"{len(funds)} returned")
+            if funds:
+                fund_name = funds[0]["fund_name"]
+                res_gfs = await session.call_tool(
+                    "get_fund_status", {"fund_name": fund_name}
+                )
+                gfs_payload = json.loads(_first_text(res_gfs))
+                print(
+                    f"[ok] get_fund_status({fund_name!r}) -> "
+                    f"matched={gfs_payload.get('matched')} "
+                    f"deals={len(gfs_payload.get('deals', []))}"
+                )
+
+            # 4) Bad-arg path returns a clean message, not a crash.
             res3 = await session.call_tool("find_organizations", {"query": ""})
             txt3 = _first_text(res3)
             if "Invalid arguments" in txt3 or "error" in txt3.lower():
