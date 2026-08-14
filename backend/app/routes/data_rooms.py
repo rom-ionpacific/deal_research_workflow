@@ -43,6 +43,11 @@ from ..services.toltiq_adhoc import (
     run_toltiq_workflow_safe,
     start_room_question,
 )
+from ..services.data_room_coverage import (
+    DceUnavailable,
+    get_room_coverage,
+    scan_room_coverage_batch,
+)
 
 router = APIRouter()
 
@@ -588,3 +593,111 @@ def retry_data_room_build(
             (room_id,),
         )
     return RetryRoomResp(data_room_id=room_id, status="pending")
+
+
+# ---------------------------------------------------------------------------
+# Coverage tab (see memory: data_room_coverage_analysis). Logic lives
+# entirely in deal_cloud_enhancer's data_room_folder.py -- these routes are
+# a thin, auth-gated pass-through via services/data_room_coverage.py.
+# ---------------------------------------------------------------------------
+
+class CoverageHitResp(BaseModel):
+    doc_name: str
+    present: str  # 'yes' | 'partial'
+    evidence: str
+
+
+class CoverageCriterionResp(BaseModel):
+    criterion_id: int
+    category: str
+    criterion: str
+    applies_to: str
+    importance: str | None
+    status: str
+    hits: list[CoverageHitResp]
+    keyword_hits: list[str]
+
+
+class RoomCoverageResp(BaseModel):
+    room_id: int
+    indexing_state: dict
+    criteria: list[CoverageCriterionResp]
+
+
+class ScanBatchResp(BaseModel):
+    room_id: int
+    facets_written: int
+    docs_processed: int
+    remaining: int
+
+
+def _gate_room_access(room_id: int, user: UserCtx) -> None:
+    """Reuse get_room_detail purely for its ownership check (same V0 model
+    as every other data-room route: only the room's originator may access
+    it) -- discards the detail payload, this endpoint has its own shape."""
+    try:
+        get_room_detail(room_id, user)
+    except RoomError as e:
+        msg = str(e)
+        code = 404 if "not found" in msg.lower() else 403
+        raise HTTPException(status_code=code, detail=msg)
+
+
+@router.get(
+    "/data-rooms/{room_id}/coverage",
+    response_model=RoomCoverageResp,
+)
+def get_data_room_coverage(
+    room_id: int,
+    deal_type: Literal["LP", "GP"] | None = Query(None),
+    user: UserCtx = Depends(require_user),
+) -> RoomCoverageResp:
+    """Read-only checklist coverage for the room (Found / Unconfirmed /
+    Candidate Gap / Scanning per criterion). Safe to call anytime, including
+    mid-scan -- unscanned criteria come back with status='Scanning' rather
+    than a false verdict. `deal_type` overrides dce's auto-inference from
+    the room's linked deal(s) if given."""
+    _gate_room_access(room_id, user)
+    try:
+        result = get_room_coverage(room_id, deal_type=deal_type)
+    except DceUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return RoomCoverageResp(
+        room_id=result.room_id,
+        indexing_state=result.indexing_state,
+        criteria=[
+            CoverageCriterionResp(
+                criterion_id=c.criterion_id, category=c.category,
+                criterion=c.criterion, applies_to=c.applies_to,
+                importance=c.importance, status=c.status,
+                hits=[CoverageHitResp(**h) for h in c.hits],
+                keyword_hits=c.keyword_hits,
+            )
+            for c in result.criteria
+        ],
+    )
+
+
+@router.post(
+    "/data-rooms/{room_id}/coverage/scan-batch",
+    response_model=ScanBatchResp,
+)
+def post_data_room_coverage_scan_batch(
+    room_id: int,
+    user: UserCtx = Depends(require_user),
+) -> ScanBatchResp:
+    """Process one bounded batch (~25 docs) of this room's not-yet-checked
+    documents against the checklist. Returns immediately with a progress
+    count -- the frontend polls this repeatedly (each call costs real
+    Gemini calls, so poll on user action / a visible 'Scan' state, not a
+    tight background loop) until `remaining` reaches 0, then re-fetches
+    /coverage."""
+    _gate_room_access(room_id, user)
+    try:
+        result = scan_room_coverage_batch(room_id)
+    except DceUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return ScanBatchResp(
+        room_id=result.room_id, facets_written=result.facets_written,
+        docs_processed=result.docs_processed, remaining=result.remaining,
+    )

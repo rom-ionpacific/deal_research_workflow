@@ -9,6 +9,7 @@ import {
   type PresetQA,
 } from "../lib/api";
 import { useChat } from "../stores/chat";
+import CoverageSection from "./CoverageSection";
 import Markdown from "./Markdown";
 
 const TERMINAL_STATUSES = new Set(["complete", "failed"]);
@@ -195,6 +196,7 @@ export default function DataRoomViewPhase({
             roomId={room.data.id}
             presets={effectivePresets}
           />
+          <CoverageSection roomId={room.data.id} />
           {/* Direct ToltIQ chat: posts straight to the deal. The
               followups list (the "chat history") is rendered inside
               this section so it reads like a conversation rather than

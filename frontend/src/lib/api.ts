@@ -274,6 +274,38 @@ export interface DataRoomDetail {
   followup_questions: FollowupQA[];
 }
 
+// ----- data room coverage (see memory: data_room_coverage_analysis) -----
+
+export interface CoverageHit {
+  doc_name: string;
+  present: "yes" | "partial";
+  evidence: string;
+}
+
+export interface CoverageCriterion {
+  criterion_id: number;
+  category: string;
+  criterion: string;
+  applies_to: "LP" | "GP" | "both";
+  importance: "core" | "common" | "occasional" | null;
+  // 'Found' | 'Found — high hit count, review before trusting' |
+  // 'Found (keyword only — not LLM-confirmed, needs review)' |
+  // 'Unconfirmed' | 'Candidate Gap' | 'Scanning'
+  status: string;
+  hits: CoverageHit[];
+  keyword_hits: string[];
+}
+
+export interface RoomCoverage {
+  room_id: number;
+  indexing_state: {
+    total: number;
+    by_state: Record<string, number>;
+    unconfirmed_docs: number;
+  };
+  criteria: CoverageCriterion[];
+}
+
 // ----- deal one-pagers -----
 
 // Typed shape of the portfolio_relationship section's `content`. The
@@ -646,6 +678,27 @@ export const api = {
       `/api/v1/data-rooms/${roomId}/ask-claude`,
       { method: "POST", body: JSON.stringify({ question }) },
     ),
+
+  // Read-only checklist coverage. Safe to call anytime, including
+  // mid-scan (unscanned criteria come back status='Scanning' rather than
+  // a false verdict). Logic lives entirely in deal_cloud_enhancer.
+  getDataRoomCoverage: (roomId: number, dealType?: "LP" | "GP") =>
+    request<RoomCoverage>(
+      `/api/v1/data-rooms/${roomId}/coverage` +
+        (dealType ? `?deal_type=${dealType}` : ""),
+    ),
+
+  // Processes one bounded batch (~25 docs) of the room's not-yet-checked
+  // documents against the checklist and returns immediately. Poll this
+  // (on a visible "Scanning…" UI state, not silently) until remaining
+  // reaches 0, then refetch getDataRoomCoverage.
+  scanDataRoomCoverageBatch: (roomId: number) =>
+    request<{
+      room_id: number;
+      facets_written: number;
+      docs_processed: number;
+      remaining: number;
+    }>(`/api/v1/data-rooms/${roomId}/coverage/scan-batch`, { method: "POST" }),
 
   // Re-runs a failed ToltIQ answer in place (same row, status reset to
   // 'running'). Backed by POST /data-rooms/{id}/answers/{id}/retry on
