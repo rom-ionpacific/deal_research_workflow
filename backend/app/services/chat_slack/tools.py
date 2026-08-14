@@ -518,6 +518,26 @@ def _deals_for_company(cur, company: str) -> list[dict]:
     return [dict(r) for r in cur.fetchall()]
 
 
+def _match_funds(cur, fund_name: str) -> list[dict]:
+    cur.execute(
+        """
+        SELECT id, name, short_name, fund_type, fund_status
+          FROM dealcloud.fund
+         WHERE name ILIKE %s
+            OR short_name ILIKE %s
+            OR dealcloud.similarity(name, %s) > 0.35
+            OR dealcloud.similarity(short_name, %s) > 0.35
+         ORDER BY (lower(name) = lower(%s)) DESC,
+                  (lower(short_name) = lower(%s)) DESC,
+                  dealcloud.similarity(name, %s) DESC
+         LIMIT 10
+        """,
+        (f"%{fund_name}%", f"%{fund_name}%", fund_name, fund_name,
+         fund_name, fund_name, fund_name),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
 _MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _MD_BOLD = re.compile(r"\*\*([^*]+)\*\*")
 
@@ -1522,6 +1542,390 @@ def get_fundraising_summary(inp: FundraisingSummaryInput, ctx: dict) -> ToolResu
             "capital; stages 2-4 are active pipeline. sum_of_lp_capital on "
             "each fund is DealCloud's own pre-aggregated LP total (authoritative "
             "for all-time figures)."
+        ),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Fund status -- NAV / capital called / capital returned, and the per-deal
+# deployment breakdown. Complements get_fundraising_summary (which covers
+# the LP-commitment/fundraising side) with the deployment/performance side:
+# how much of the fund's capital actually went into deals, how much has
+# come back, and what the fund/each deal is worth now.
+#
+# DealCloud data-quality note (see Fund Performance query below): the
+# "Funds Performance" entity (quarterly fund-level NAV/contributions/
+# distributions) only has real data for 3 funds in this tenant (the
+# Stonecutter I/II/III fund family) -- everywhere else it's unfilled in
+# DealCloud itself. For those other funds we fall back to a rollup derived
+# from the fund's linked deals (deal.invested_capital/fair_value/
+# realized_capital), clearly labeled as an approximation, with a
+# deal_data_coverage block so callers can see how many of the fund's deals
+# actually have each figure recorded (missing != zero).
+# ---------------------------------------------------------------------------
+
+_FUND_AGG_JOIN_SQL = """
+              LEFT JOIN LATERAL (
+                  SELECT date_q, nav, cumulative_contributions, cumulative_distributions
+                    FROM dealcloud.fund_performance
+                   WHERE fund_id = f.id AND date_q IS NOT NULL
+                   ORDER BY date_q DESC LIMIT 1
+              ) fp ON true
+              LEFT JOIN LATERAL (
+                  SELECT count(*) AS n_deals,
+                         count(invested_capital) AS n_deals_with_invested,
+                         sum(abs(invested_capital)) AS sum_invested,
+                         count(fair_value) AS n_deals_with_fv,
+                         sum(fair_value) AS sum_fv,
+                         count(realized_capital) AS n_deals_with_realized,
+                         sum(realized_capital) AS sum_realized
+                    FROM dealcloud.deal
+                   WHERE fund_id = f.id
+              ) agg ON true
+"""
+
+
+def _fund_performance_block(row: dict) -> dict:
+    """Build the {source, as_of_date, capital_called_to_date,
+    capital_returned_to_date, current_value_nav, ...} block from a row that
+    carries both the latest fund_performance columns (date_q/nav/
+    cumulative_contributions/cumulative_distributions) and the deal-rollup
+    agg columns (n_deals/n_deals_with_invested/sum_invested/n_deals_with_fv/
+    sum_fv/n_deals_with_realized/sum_realized) -- i.e. a row produced by a
+    query that joins _FUND_AGG_JOIN_SQL."""
+    n_deals = row.get("n_deals") or 0
+    if row.get("date_q") is not None:
+        contributed = row.get("cumulative_contributions")
+        return {
+            "source": "fund_performance",
+            "as_of_date": row["date_q"].date().isoformat(),
+            # DealCloud stores capital calls negative (LP-outflow / J-curve
+            # convention, same sign convention as deal.invested_capital
+            # elsewhere in this codebase) -- ABS() for an intuitive
+            # "money invested" figure, consistent with distributions/NAV
+            # which are already stored positive.
+            "capital_called_to_date": abs(contributed) if contributed is not None else None,
+            "capital_returned_to_date": row.get("cumulative_distributions"),
+            "current_value_nav": row.get("nav"),
+            "note": (
+                "DealCloud's own quarterly Fund Performance record for this "
+                "fund -- authoritative."
+            ),
+        }
+    if n_deals:
+        return {
+            "source": "derived_from_deals",
+            "as_of_date": None,
+            "capital_called_to_date": row.get("sum_invested"),
+            "capital_returned_to_date": row.get("sum_realized"),
+            "current_value_nav": row.get("sum_fv"),
+            "deal_data_coverage": {
+                "deals_in_fund": n_deals,
+                "deals_with_invested_capital": row.get("n_deals_with_invested") or 0,
+                "deals_with_fair_value": row.get("n_deals_with_fv") or 0,
+                "deals_with_realized_capital": row.get("n_deals_with_realized") or 0,
+            },
+            "note": (
+                "DealCloud has no quarterly Fund Performance record for this "
+                "fund, so these figures are DERIVED by summing this fund's "
+                "linked deals' invested_capital / fair_value / "
+                "realized_capital. Treat as an approximation, NOT an "
+                "official NAV -- see deal_data_coverage for how many of the "
+                "fund's deals actually have each field populated in "
+                "DealCloud (a deal missing a field is EXCLUDED from the "
+                "sum, not counted as zero)."
+            ),
+        }
+    return {
+        "source": "no_data",
+        "as_of_date": None,
+        "capital_called_to_date": None,
+        "capital_returned_to_date": None,
+        "current_value_nav": None,
+        "note": (
+            "No Fund Performance record and no linked deals with financial "
+            "data found in DealCloud for this fund."
+        ),
+    }
+
+
+class ListFundsInput(BaseModel):
+    name: str | None = Field(
+        None,
+        description=(
+            "Optional fuzzy filter on fund name or short name (e.g. "
+            "'Stonecutter', 'Pathway'). Omit to list every fund."
+        ),
+        max_length=200,
+    )
+    reportable_only: bool = Field(
+        False,
+        description=(
+            "When True, only include funds DealCloud flags as reportable "
+            "under Ion Pacific's GP/affiliated-entities AUM "
+            "(fund.reporting_status = 'Yes') -- excludes internal/test/"
+            "friends-and-family vehicles. Default False returns every fund."
+        ),
+    )
+    limit: int = Field(100, ge=1, le=200, description="Max funds to return.")
+    offset: int = Field(0, ge=0, description="Skip this many rows (paging).")
+
+
+@slack_registry.tool(
+    "list_funds",
+    (
+        "High-level status for every fund/SPV, one row each: capital "
+        "committed by LPs (fund_size, sum_of_lp_capital), capital called "
+        "to date, capital returned to investors to date, and the most "
+        "recent valuation of the fund (NAV) -- plus how many deals the "
+        "fund holds. Each fund's `performance` block reports whether the "
+        "called/returned/NAV figures come from DealCloud's own quarterly "
+        "Fund Performance record (`source: fund_performance`, "
+        "authoritative -- currently only a few funds have this) or are "
+        "derived by summing the fund's deals (`source: derived_from_deals`, "
+        "an approximation -- check `deal_data_coverage`), or that there's "
+        "no data at all (`source: no_data`). Filter with `name` (fuzzy) or "
+        "`reportable_only`; page with limit/offset. Use get_fund_status for "
+        "one fund's full per-deal breakdown, and get_fundraising_summary "
+        "for a per-LP commitment breakdown."
+    ),
+    ListFundsInput,
+)
+def list_funds(inp: ListFundsInput, ctx: dict) -> ToolResult:
+    where: list[str] = []
+    params: list[Any] = []
+    if inp.name:
+        where.append(
+            "(f.name ILIKE %s OR f.short_name ILIKE %s "
+            "OR dealcloud.similarity(f.name, %s) > 0.3)"
+        )
+        params += [f"%{inp.name}%", f"%{inp.name}%", inp.name]
+    if inp.reportable_only:
+        where.append("f.reporting_status = 'Yes'")
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(f"SELECT COUNT(*) AS n FROM dealcloud.fund f {where_sql}", params)
+        total = cur.fetchone()["n"]
+
+        cur.execute(
+            f"""
+            SELECT f.id AS fund_id, f.name AS fund_name, f.short_name, f.fund_type,
+                   f.fund_status, f.reporting_status, f.vintage_year,
+                   f.fund_size, f.sum_of_lp_capital,
+                   fp.date_q, fp.nav, fp.cumulative_contributions, fp.cumulative_distributions,
+                   agg.n_deals, agg.n_deals_with_invested, agg.sum_invested,
+                   agg.n_deals_with_fv, agg.sum_fv,
+                   agg.n_deals_with_realized, agg.sum_realized
+              FROM dealcloud.fund f
+              {_FUND_AGG_JOIN_SQL}
+              {where_sql}
+             ORDER BY f.fund_size DESC NULLS LAST, f.name
+             LIMIT %s OFFSET %s
+            """,
+            params + [inp.limit, inp.offset],
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+
+    funds = [{
+        "fund_id":          r["fund_id"],
+        "fund_name":        r["fund_name"],
+        "short_name":       r["short_name"],
+        "fund_type":        r["fund_type"],
+        "fund_status":      r["fund_status"],
+        "reporting_status": r["reporting_status"],
+        "vintage_year":     r["vintage_year"],
+        "capital_committed": {
+            "fund_size":         r["fund_size"],
+            "sum_of_lp_capital": r["sum_of_lp_capital"],
+        },
+        "performance": _fund_performance_block(r),
+        "n_deals": r["n_deals"] or 0,
+    } for r in rows]
+
+    return ToolResult(output={
+        "name_query": inp.name,
+        "reportable_only": inp.reportable_only,
+        "total_matching": total,
+        "returned": len(funds),
+        "offset": inp.offset,
+        "truncated": inp.offset + len(funds) < total,
+        "funds": funds,
+        "data_note": (
+            "capital_committed is what LPs have committed to the fund "
+            "(DealCloud's own pre-aggregated totals). performance is what's "
+            "actually been called/returned/valued -- see each fund's "
+            "performance.source and .note before treating figures as exact."
+        ),
+    })
+
+
+class FundStatusInput(BaseModel):
+    fund_name: str = Field(
+        ...,
+        description=(
+            "Fund or SPV name (e.g. 'Stonecutter II', 'Pathway I', 'Project "
+            "Auto'). Partial/case-insensitive, matches on name or "
+            "short_name. Use list_funds first if unsure of the exact name."
+        ),
+        min_length=1, max_length=200,
+    )
+
+
+@slack_registry.tool(
+    "get_fund_status",
+    (
+        "Full status for ONE fund/SPV: how much capital has been called "
+        "from investors, how much has been returned to them, and the most "
+        "recent valuation of the fund (NAV) -- PLUS a per-deal breakdown "
+        "of every deal the fund holds, each with how much of the fund's "
+        "capital went into that deal, how much capital has come back from "
+        "it, and the current valuation of the fund's stake in it. Use this "
+        "for 'how is fund X doing' / 'what does fund X hold' / 'break down "
+        "fund X's deals' questions. The fund-level `performance` block (and "
+        "each deal's figures) is sourced from DealCloud's own records where "
+        "available, clearly flagged as an approximation ('derived_from_deals') "
+        "where it had to be derived by summing deal-level data instead -- "
+        "read each block's `note`/`source` before quoting a number as exact. "
+        "For a per-LP commitment breakdown instead, use "
+        "get_fundraising_summary; for a bulk view across all funds, use "
+        "list_funds."
+    ),
+    FundStatusInput,
+)
+def get_fund_status(inp: FundStatusInput, ctx: dict) -> ToolResult:
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        matches = _match_funds(cur, inp.fund_name)
+        if not matches:
+            return ToolResult(output={
+                "matched": "none",
+                "note": (f"No fund found matching '{inp.fund_name}'. Try "
+                         "list_funds to browse all funds."),
+            })
+        if len(matches) > 1:
+            exact = [m for m in matches if inp.fund_name.lower() in (
+                m["name"].lower(), (m["short_name"] or "").lower()
+            )]
+            if len(exact) != 1:
+                return ToolResult(output={
+                    "matched": "ambiguous",
+                    "note": ("Several funds match -- ask the user which one, "
+                             "then call again with the exact name."),
+                    "candidates": matches,
+                })
+            matches = exact
+        fund = matches[0]
+
+        cur.execute(
+            f"""
+            SELECT f.id AS fund_id, f.name AS fund_name, f.short_name, f.fund_type,
+                   f.fund_status, f.reporting_status, f.vintage_year,
+                   f.fund_size, f.sum_of_lp_capital, f.fundraise_target,
+                   f.gp_commit_amount, f.count_of_lps,
+                   f.first_close_date, f.final_close_date,
+                   fp.date_q, fp.nav, fp.cumulative_contributions, fp.cumulative_distributions,
+                   agg.n_deals, agg.n_deals_with_invested, agg.sum_invested,
+                   agg.n_deals_with_fv, agg.sum_fv,
+                   agg.n_deals_with_realized, agg.sum_realized
+              FROM dealcloud.fund f
+              {_FUND_AGG_JOIN_SQL}
+             WHERE f.id = %s
+            """,
+            (fund["id"],),
+        )
+        f_row = dict(cur.fetchone())
+
+        cur.execute(
+            """
+            SELECT d.id AS deal_id, d.name AS deal_name, d.status, d.transaction_type,
+                   o.name AS counterparty_name,
+                   d.invested_capital, d.fair_value, d.realized_capital,
+                   d.total_value_to_invested,
+                   iv.valuation_date, iv.fair_value AS iv_fair_value,
+                   iv.paid_in_capital, iv.realized_capital_gross,
+                   iv.realized_capital_net, iv.gross_irr, iv.net_irr
+              FROM dealcloud.deal d
+              LEFT JOIN dealcloud.organization o ON o.id = d.organization_id
+              LEFT JOIN LATERAL (
+                  SELECT valuation_date, fair_value, paid_in_capital,
+                         realized_capital_gross, realized_capital_net,
+                         gross_irr, net_irr
+                    FROM dealcloud.investment_valuation
+                   WHERE deal_id = d.id
+                   ORDER BY valuation_date DESC NULLS LAST
+                   LIMIT 1
+              ) iv ON true
+             WHERE d.fund_id = %s
+             ORDER BY lower(d.name)
+            """,
+            (fund["id"],),
+        )
+        deal_rows = [dict(r) for r in cur.fetchall()]
+
+    deals = []
+    for d in deal_rows:
+        inv = d["invested_capital"]
+        capital_invested = abs(inv) if inv is not None else d["paid_in_capital"]
+        capital_returned = (d["realized_capital"] if d["realized_capital"] is not None
+                            else d["realized_capital_gross"])
+        current_stake_value = (d["fair_value"] if d["fair_value"] is not None
+                               else d["iv_fair_value"])
+        has_data = any(v is not None for v in
+                       (capital_invested, capital_returned, current_stake_value))
+        deals.append({
+            "deal_id": d["deal_id"],
+            "deal_name": d["deal_name"],
+            "status": d["status"],
+            "transaction_type": d["transaction_type"],
+            "counterparty_name": d["counterparty_name"],
+            "capital_invested": capital_invested,
+            "capital_returned": capital_returned,
+            "current_stake_value": current_stake_value,
+            "valuation_as_of": (d["valuation_date"].date().isoformat()
+                               if d["valuation_date"] else None),
+            "total_value_to_invested_multiple": d["total_value_to_invested"],
+            "gross_irr": d["gross_irr"],
+            "net_irr": d["net_irr"],
+            "has_financial_data": has_data,
+        })
+
+    n_deals = len(deals)
+    n_with_data = sum(1 for d in deals if d["has_financial_data"])
+
+    return ToolResult(output={
+        "matched": "fund",
+        "fund": {
+            "fund_id": f_row["fund_id"],
+            "fund_name": f_row["fund_name"],
+            "short_name": f_row["short_name"],
+            "fund_type": f_row["fund_type"],
+            "fund_status": f_row["fund_status"],
+            "reporting_status": f_row["reporting_status"],
+            "vintage_year": f_row["vintage_year"],
+            "first_close_date": (f_row["first_close_date"].date().isoformat()
+                                 if f_row["first_close_date"] else None),
+            "final_close_date": (f_row["final_close_date"].date().isoformat()
+                                 if f_row["final_close_date"] else None),
+        },
+        "capital_committed": {
+            "fund_size": f_row["fund_size"],
+            "sum_of_lp_capital": f_row["sum_of_lp_capital"],
+            "fundraise_target": f_row["fundraise_target"],
+            "gp_commit_amount": f_row["gp_commit_amount"],
+            "count_of_lps": f_row["count_of_lps"],
+            "note": ("What LPs have committed to the fund -- see "
+                     "get_fundraising_summary for a per-LP breakdown."),
+        },
+        "performance": _fund_performance_block(f_row),
+        "deals": deals,
+        "deal_data_completeness": (
+            f"{n_with_data}/{n_deals} of this fund's linked deals have at "
+            "least one financial figure (capital invested/returned/current "
+            "value) recorded in DealCloud."
+            if n_deals else
+            "This fund has no deals linked via deal.fund_id in DealCloud."
         ),
     })
 

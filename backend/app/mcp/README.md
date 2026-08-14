@@ -23,12 +23,30 @@ registry). Install the library for local dev:
 
 ## Tools exposed
 
-Read-only (13): `find_organizations`, `bundle_via_supersede`,
-`get_org_portfolio_status`, `get_org_deal_history`, `get_org_ion_contacts`,
-`get_org_their_contacts`, `get_org_communication_timeline`,
-`get_org_dossier`, `read_document_summary`, `search_documents`,
-`read_document`, `get_deal_one_pager`, `list_deals`. These ignore
-session/ctx state.
+The read-only tool surface has grown well past the original 13 (org search/
+dossiers, document search/read, deal one-pagers, fundraising/fund status,
+the interactive scenario-agent tool families, etc.) — run
+`python -m app.mcp.smoke` or `mcp_registry.names()` for the exact live list
+rather than trusting a hardcoded count here. Two worth calling out for
+fund-level reporting (added for the "MCP tool for fund status" task):
+
+- `list_funds` — high-level status for every fund/SPV: LP capital
+  committed, capital called/returned to date, and the most recent fund
+  valuation (NAV), each tagged with where the figure came from
+  (`fund_performance` = DealCloud's own quarterly record, authoritative;
+  `derived_from_deals` = summed from the fund's deals because DealCloud has
+  no quarterly record for it — an approximation, flagged as such;
+  `no_data` = neither exists).
+- `get_fund_status` — same fund-level status for ONE fund, PLUS a per-deal
+  breakdown: how much of the fund's capital went into each deal, how much
+  has come back from it, and the current valuation of the fund's stake.
+
+Both are read-only and complement the pre-existing `get_fundraising_summary`
+(per-LP commitment detail) rather than duplicating it. See
+`backend/app/services/chat_slack/tools.py` (`_fund_performance_block`) for
+the DealCloud data-quality notes baked into these tools' output (in
+particular: quarterly Fund Performance records only exist for a handful of
+funds in this tenant; everything else falls back to a deal-level rollup).
 
 Write (2) — logging a Claude research session as a DealCloud Activity
 (the "Interaction" entity, entry type 5341):
@@ -136,12 +154,13 @@ python -m app.mcp.smoke                  # against live Neon
 python -m app.mcp.smoke --query "Moove"
 ```
 
-Validates: initialize, list_tools (expects the 13 read tools plus
-`draft_research_activity`/`create_research_activity`), a live
-`find_organizations` + `get_org_dossier`, and the bad-argument path. Never
-calls the write tools (they're only checked for presence in the tool
-list) so this is safe to run against production. Exits non-zero on
-failure.
+Validates: initialize, list_tools (checks a fixed set of expected tool
+names is present, incl. `list_funds`/`get_fund_status`), a live
+`find_organizations` + `get_org_dossier` + `list_funds` + `get_fund_status`,
+and the bad-argument path. Only calls read-only tools (write tools like
+`draft_research_activity`/`create_research_activity` are checked for
+presence in the tool list only) so this is safe to run against production.
+Exits non-zero on failure.
 
 ## Deploying the HTTP transport (later — Enterprise connector)
 
