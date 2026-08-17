@@ -31,7 +31,7 @@ from ..auth import UserCtx
 from ..config import settings
 from ..db import get_conn
 from .data_room_view import RoomError, get_room_detail
-from .document_search import search_documents
+from .document_search import search_documents, search_documents_for_docs
 
 logger = logging.getLogger(__name__)
 
@@ -405,6 +405,115 @@ def ask_room(
             logger.exception(
                 "backstop _mark_answer_failed also failed for ans=%d", answer_id
             )
+        raise ClaudeRoomError(str(e)) from e
+
+
+def ask_room_for_docs(
+    doc_ids: list[int],
+    question: str,
+    org_name: str | None = None,
+) -> dict:
+    """Folder-scoped counterpart to ask_room() for chat-triggered
+    background data-room build jobs (data_room_build_job -- see memory:
+    data_room_coverage_analysis phase 2). These have no drw
+    historical_data_room_id, just a plain doc_ids list resolved (in
+    deal_cloud_enhancer) from a SharePoint folder path. Same retrieval /
+    system-prompt / citation-rendering / Claude-call logic as ask_room(),
+    but:
+      * no auth/room gate here -- the caller (the MCP/Slack tool) is
+        responsible for only handing this a job's doc_ids once the job
+        is known to belong to the asking user.
+      * no persistence to historical_data_room_answer -- there's no
+        historical_data_room_id to key a row to, and no UI page for a
+        job to read one back from; this is a pure chat-surface answer,
+        returned directly and not stored anywhere.
+    Raises ClaudeRoomError on any failure (empty response, missing API
+    key, retrieval error) -- there's no answer row to mark 'failed' on,
+    so the caller must handle the exception itself."""
+    if not settings.anthropic_api_key:
+        raise ClaudeRoomError(
+            "ANTHROPIC_API_KEY not configured on this API instance"
+        )
+
+    try:
+        retrieval_query = f"{org_name}: {question}" if org_name else question
+        docs = search_documents_for_docs(
+            doc_ids=doc_ids,
+            query=retrieval_query,
+            limit=RETRIEVAL_LIMIT,
+            mode="hybrid",
+        )
+
+        subject_block = (
+            f"## SUBJECT COMPANY: {org_name}\n"
+            f"Every question in this turn is about this specific "
+            f"company. References to \"the company\", \"this company\", "
+            f"\"the deal\", \"them\", etc. all resolve to {org_name}. "
+            f"The DOCUMENTS section below is curated for this deal "
+            f"only.\n\n"
+            if org_name
+            else ""
+        )
+        system_blocks: list[dict] = [
+            {
+                "type": "text",
+                "text": subject_block + _SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            },
+            {
+                "type": "text",
+                "text": _format_doc_context(docs),
+                "cache_control": {"type": "ephemeral"},
+            },
+        ]
+
+        started = time.monotonic()
+        client = Anthropic(api_key=settings.anthropic_api_key)
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            system=system_blocks,
+            messages=[{"role": "user", "content": question}],
+        )
+        elapsed = time.monotonic() - started
+
+        parts = []
+        for block in response.content:
+            if getattr(block, "type", None) == "text":
+                parts.append(block.text)
+        answer_text = "".join(parts).strip()
+        if not answer_text:
+            raise ClaudeRoomError(
+                "Claude returned an empty response; check model/version"
+            )
+
+        answer_text = _render_citations(answer_text, docs)
+
+        usage = response.usage
+        logger.info(
+            "claude_room ask_for_docs answered docs=%d in=%d out=%d "
+            "cached=%d latency=%.2fs retrieved=%d",
+            len(doc_ids), usage.input_tokens, usage.output_tokens,
+            getattr(usage, "cache_read_input_tokens", 0) or 0,
+            elapsed, len(docs),
+        )
+
+        return {
+            "answer_text": answer_text,
+            "retrieved_doc_ids": [d["document_id"] for d in docs],
+            "status": "complete",
+            "model": response.model,
+            "latency_s": round(elapsed, 2),
+            "tokens": {
+                "input": usage.input_tokens,
+                "output": usage.output_tokens,
+                "cache_read": getattr(usage, "cache_read_input_tokens", 0) or 0,
+            },
+        }
+    except ClaudeRoomError:
+        raise
+    except Exception as e:
+        logger.exception("claude_room ask_for_docs failed for %d docs", len(doc_ids))
         raise ClaudeRoomError(str(e)) from e
 
 
