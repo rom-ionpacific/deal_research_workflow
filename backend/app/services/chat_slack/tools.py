@@ -1945,3 +1945,210 @@ def _call_dossier_fn(fn_name: str, org_ids: list[int]) -> ToolResult:
         )
         row = cur.fetchone()
     return ToolResult(output=(row or {}).get("j") or {})
+
+
+# ---------------------------------------------------------------------------
+# Chat-triggered background data-room build (data_room_coverage phase 2, see
+# memory: data_room_coverage_analysis). Registered directly on slack_registry
+# (not a phase4-only registry, not a clone) so this auto-exposes to BOTH
+# Todd/Slack and the Ion Deal Research MCP connector at once, same as
+# list_all_deals / find_new_deals_to_discuss above. Reuses the EXISTING
+# checklist/gap-detection engine as-is via deal_cloud_enhancer's
+# data_room_build_job internal API (services/data_room_build.py) -- the
+# build itself runs in the background on dce's data-room-build-runner cron,
+# independent of this chat turn or any session staying open; the user gets
+# a Slack DM when it finishes.
+# ---------------------------------------------------------------------------
+
+class BuildDataRoomInput(BaseModel):
+    folder_path: str = Field(
+        ...,
+        min_length=1, max_length=1000,
+        description=(
+            "SharePoint folder path prefix, e.g. 'Common/Deal files/"
+            "_SINGLE ASSET DEALS/2026/Positron/'. Every indexed document "
+            "whose path starts with this prefix becomes part of the room."
+        ),
+    )
+    requested_by_email: str = Field(
+        ...,
+        min_length=3, max_length=200,
+        description=(
+            "Ion Pacific email of whoever asked for this build -- this is "
+            "who gets DM'd on Slack when the build finishes (docs scanned, "
+            "Found/Unconfirmed/Candidate-Gap counts, and the actual "
+            "Candidate Gap criteria names). ASK the user for their email "
+            "if you don't already know it from this conversation -- do not "
+            "guess or default to yourself/someone else, since a wrong "
+            "value means the wrong person gets DM'd."
+        ),
+    )
+
+
+@slack_registry.tool(
+    "build_data_room",
+    (
+        "Kick off a BACKGROUND build of a data room's coverage checklist "
+        "scan from a specific SharePoint folder path -- the same "
+        "Found/Unconfirmed/Candidate-Gap engine the Coverage tab uses, but "
+        "as a persistent background job drained by a cron over several "
+        "minutes, NOT something that blocks this chat turn or needs a "
+        "browser tab left open. Returns immediately with a job_id + "
+        "docs_total. Tell the user you'll DM them on Slack when it's done "
+        "(with the counts AND the actual list of missing/Candidate-Gap "
+        "criteria names), then let the conversation move on -- do not poll "
+        "in a loop yourself. Use check_data_room_build if the user wants "
+        "a status update before the DM arrives, and ask_data_room once "
+        "it's complete for ad-hoc questions about the room's documents."
+    ),
+    BuildDataRoomInput,
+)
+def build_data_room(inp: BuildDataRoomInput, ctx: dict) -> ToolResult:
+    from ..data_room_build import DceUnavailable as _DceUnavailable, create_build_job
+
+    try:
+        result = create_build_job(inp.folder_path, inp.requested_by_email)
+    except _DceUnavailable as e:
+        return ToolResult(output=f"Data room build unavailable: {e}")
+
+    return ToolResult(output={
+        "job_id": result.job_id,
+        "docs_total": result.docs_total,
+        "status": result.status,
+        "note": (
+            f"Build started for {result.docs_total} document(s) under "
+            f"'{inp.folder_path}'. I'll DM {inp.requested_by_email} on "
+            f"Slack when it's done (job_id={result.job_id}) -- no need to "
+            f"wait here."
+        ),
+    })
+
+
+class CheckDataRoomBuildInput(BaseModel):
+    job_id: int = Field(..., description="The job_id returned by build_data_room.")
+
+
+def _coverage_summary_note(summary: dict | None) -> str:
+    if not summary:
+        return "Coverage summary isn't available yet -- still scanning."
+    gap_criteria = summary.get("candidate_gap_criteria") or []
+    if not gap_criteria:
+        return (
+            f"Found: {summary.get('found', 0)} | "
+            f"Unconfirmed: {summary.get('unconfirmed', 0)} | "
+            f"Candidate Gap: {summary.get('candidate_gap', 0)}. "
+            "No Candidate Gap criteria -- every applicable checklist item "
+            "came back Found or Unconfirmed."
+        )
+    gap_list = "; ".join(gap_criteria)
+    return (
+        f"Found: {summary.get('found', 0)} | "
+        f"Unconfirmed: {summary.get('unconfirmed', 0)} | "
+        f"Candidate Gap: {summary.get('candidate_gap', 0)}. "
+        f"Candidate Gap criteria (not found): {gap_list}"
+    )
+
+
+@slack_registry.tool(
+    "check_data_room_build",
+    (
+        "Poll-style status + coverage summary for a job started with "
+        "build_data_room. Returns status ('pending'/'scanning'/'complete'/"
+        "'failed'), docs_processed/docs_total progress, and once complete, "
+        "the Found/Unconfirmed/Candidate-Gap counts PLUS the actual "
+        "Candidate Gap criteria names (the 'what's missing' answer -- "
+        "always report these by name when the user asks what's missing, "
+        "not just the count). Use this if the user doesn't want to wait "
+        "for the Slack DM, or wants a progress check on a long build."
+    ),
+    CheckDataRoomBuildInput,
+    mutates_state=False,
+)
+def check_data_room_build(inp: CheckDataRoomBuildInput, ctx: dict) -> ToolResult:
+    from ..data_room_build import DceUnavailable as _DceUnavailable, get_build_job
+
+    try:
+        job = get_build_job(inp.job_id)
+    except ValueError as e:
+        return ToolResult(output=str(e))
+    except _DceUnavailable as e:
+        return ToolResult(output=f"Data room build unavailable: {e}")
+
+    return ToolResult(output={
+        "job_id": job.job_id,
+        "folder_path": job.folder_path,
+        "status": job.status,
+        "docs_total": job.docs_total,
+        "docs_processed": job.docs_processed,
+        "error": job.error,
+        "coverage_summary": job.coverage_summary,
+        "note": (
+            f"status={job.status}, {job.docs_processed}/{job.docs_total} "
+            f"docs processed. {_coverage_summary_note(job.coverage_summary)}"
+            if job.status == "complete"
+            else f"status={job.status}, {job.docs_processed}/{job.docs_total} "
+                 f"docs processed so far."
+        ),
+    })
+
+
+class AskDataRoomInput(BaseModel):
+    job_id: int = Field(..., description="The job_id returned by build_data_room.")
+    question: str = Field(
+        ...,
+        min_length=4, max_length=2000,
+        description=(
+            "Question to ask of the data room's documents. Phrased as a "
+            "complete question; the answer will only draw on this job's "
+            "actual documents, never outside knowledge."
+        ),
+    )
+
+
+@slack_registry.tool(
+    "ask_data_room",
+    (
+        "Ask an ad-hoc question about a completed data-room build job's "
+        "documents -- retrieves the most relevant documents from the "
+        "job's folder and answers ONLY from them (sterile, no outside "
+        "knowledge or web search), with inline citations. Only call this "
+        "once check_data_room_build shows status='complete'; if it's "
+        "still scanning, tell the user to wait or check back rather than "
+        "calling this early (the checklist scan and this retrieval are "
+        "independent, but an incomplete room may be missing relevant "
+        "documents entirely). Prefer this over answering from the "
+        "coverage summary alone -- it does real retrieval against the "
+        "room's content."
+    ),
+    AskDataRoomInput,
+    mutates_state=False,
+)
+def ask_data_room(inp: AskDataRoomInput, ctx: dict) -> ToolResult:
+    from ..data_room_build import DceUnavailable as _DceUnavailable, get_build_job
+    from ..claude_data_room import ClaudeRoomError as _ClaudeRoomError, ask_room_for_docs
+
+    try:
+        job = get_build_job(inp.job_id)
+    except ValueError as e:
+        return ToolResult(output=str(e))
+    except _DceUnavailable as e:
+        return ToolResult(output=f"Data room build unavailable: {e}")
+
+    if job.status != "complete":
+        return ToolResult(output=(
+            f"job {inp.job_id} is not complete yet (status={job.status}, "
+            f"{job.docs_processed}/{job.docs_total} docs processed) -- "
+            "call check_data_room_build again shortly, or wait for the "
+            "Slack DM."
+        ))
+    if not job.doc_ids:
+        return ToolResult(output=(
+            f"job {inp.job_id}'s folder has no readable documents to "
+            "search."
+        ))
+
+    try:
+        result = ask_room_for_docs(job.doc_ids, inp.question)
+    except _ClaudeRoomError as e:
+        return ToolResult(output=f"Claude room error: {e}")
+    return ToolResult(output=result)
