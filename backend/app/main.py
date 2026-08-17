@@ -14,6 +14,7 @@ from .routes import (
     dealcloud_sync,
     entities,
     health,
+    internal,
     investors,
     orgs,
     sessions,
@@ -52,6 +53,10 @@ app.include_router(investors.router, prefix="/api/v1")
 # verification is per-route, NOT global, so the /api/v1 routes still
 # use X-User-Email auth.
 app.include_router(slack.router)
+# Service-to-service callbacks from deal_cloud_enhancer. Mounted at
+# /internal -- shared-secret auth (X-Internal-Secret), not X-User-Email
+# or Slack signing.
+app.include_router(internal.router)
 
 
 def _warmup_blocking() -> None:
