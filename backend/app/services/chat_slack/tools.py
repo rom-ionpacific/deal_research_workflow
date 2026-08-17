@@ -2152,3 +2152,115 @@ def ask_data_room(inp: AskDataRoomInput, ctx: dict) -> ToolResult:
     except _ClaudeRoomError as e:
         return ToolResult(output=f"Claude room error: {e}")
     return ToolResult(output=result)
+
+
+class StartDataRoomBuildSweepInput(BaseModel):
+    job_id: int = Field(..., description="The job_id returned by build_data_room.")
+    question: str = Field(
+        ...,
+        min_length=4, max_length=2000,
+        description=(
+            "The specific question to check systematically across every "
+            "readable document in the job's folder. Phrase it precisely "
+            "-- this drives a per-document classification, not a "
+            "retrieval query, so a vague question yields vague/noisy hits."
+        ),
+    )
+
+
+@slack_registry.tool(
+    "start_data_room_build_sweep",
+    (
+        "Start a systematic, exhaustive sweep of EVERY readable document "
+        "in a build_data_room job's folder against a specific question -- "
+        "for the long tail OUTSIDE the 113-item coverage checklist. Use "
+        "this only after ask_data_room has already come up empty or "
+        "uncertain, or when the user explicitly asks for an exhaustive/"
+        "definitive check ('search everything', 'are you sure nothing "
+        "mentions X'). Do NOT use this as a first resort -- it's slower "
+        "and costs more than ask_data_room because it reads every "
+        "document, not just the likely ones. Returns immediately with a "
+        "sweep_id and docs_total; does NOT process any documents yet -- "
+        "call check_data_room_build_sweep repeatedly to make progress and "
+        "see results. Tell the user this will take a few minutes for a "
+        "large folder and you'll report back as it progresses."
+    ),
+    StartDataRoomBuildSweepInput,
+)
+def start_data_room_build_sweep(inp: StartDataRoomBuildSweepInput, ctx: dict) -> ToolResult:
+    from ..data_room_build import DceUnavailable as _DceUnavailable, get_build_job
+    from ..data_room_sweep import (
+        DceUnavailable as _SweepDceUnavailable,
+        start_sweep_for_docs as _start_sweep_for_docs,
+    )
+
+    try:
+        job = get_build_job(inp.job_id)
+    except ValueError as e:
+        return ToolResult(output=str(e))
+    except _DceUnavailable as e:
+        return ToolResult(output=f"Data room build unavailable: {e}")
+
+    if not job.doc_ids:
+        return ToolResult(output=f"job {inp.job_id}'s folder has no readable documents to sweep.")
+
+    try:
+        result = _start_sweep_for_docs(job.doc_ids, inp.question, job.requested_by_email)
+    except _SweepDceUnavailable as e:
+        return ToolResult(output=f"Sweep unavailable: {e}")
+    return ToolResult(output={
+        "sweep_id": result.sweep_id, "docs_total": result.docs_total,
+        "status": result.status,
+        "note": (
+            "Sweep started but not yet processed -- call "
+            f"check_data_room_build_sweep with sweep_id={result.sweep_id} "
+            "to advance it and see progress."
+        ),
+    })
+
+
+class CheckDataRoomBuildSweepInput(BaseModel):
+    sweep_id: int = Field(..., description="The sweep_id returned by start_data_room_build_sweep.")
+
+
+@slack_registry.tool(
+    "check_data_room_build_sweep",
+    (
+        "Check progress on a sweep started with start_data_room_build_sweep, "
+        "AND advance it by one more batch (~10 documents, real Gemini "
+        "calls) in the same call -- this is deliberately not purely "
+        "read-only, so simply calling this repeatedly drains the sweep "
+        "over several turns without a separate 'process' action. When "
+        "status is 'complete', report the accumulated hits to the user as "
+        "the answer (with their evidence quotes), or if hits is empty, say "
+        "the question was checked against every readable document in the "
+        "folder (docs_total) and none of them answered it -- phrase this "
+        "as 'not found after an exhaustive check', NOT a flat 'the answer "
+        "does not exist'. When status is 'running', tell the user "
+        "progress (docs_processed/docs_total) and that you'll check again."
+    ),
+    CheckDataRoomBuildSweepInput,
+)
+def check_data_room_build_sweep(inp: CheckDataRoomBuildSweepInput, ctx: dict) -> ToolResult:
+    from ..data_room_sweep import (
+        DceUnavailable as _DceUnavailable,
+        advance_sweep as _advance_sweep,
+        get_sweep as _get_sweep,
+    )
+    try:
+        _advance_sweep(inp.sweep_id)
+    except _DceUnavailable as e:
+        return ToolResult(output=f"Sweep unavailable: {e}")
+    try:
+        detail = _get_sweep(inp.sweep_id)
+    except _DceUnavailable as e:
+        return ToolResult(output=f"Sweep unavailable: {e}")
+    return ToolResult(output={
+        "sweep_id": detail.sweep_id, "question": detail.question,
+        "status": detail.status, "docs_total": detail.docs_total,
+        "docs_processed": detail.docs_processed,
+        "hits": [
+            {"doc_name": h.doc_name, "present": h.present, "evidence": h.evidence}
+            for h in detail.hits
+        ],
+    })

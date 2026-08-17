@@ -128,6 +128,23 @@ def start_sweep(room_id: int, question: str, created_by: str) -> SweepStartResul
     )
 
 
+def start_sweep_for_docs(doc_ids: list[int], question: str, created_by: str) -> SweepStartResult:
+    """Folder-scoped counterpart to start_sweep() (data_room_coverage
+    phase 2 step 5, see memory: data_room_coverage_analysis) -- for a
+    data_room_build_job, which has no drw historical_data_room_id at all,
+    just a doc_ids list resolved from a SharePoint folder path (see
+    services/data_room_build.py's get_build_job)."""
+    resp = _call_dce(
+        "/internal/data-room-sweep/for-docs", method="POST",
+        body={"doc_ids": doc_ids, "question": question, "created_by": created_by},
+    )
+    if not resp.get("ok"):
+        raise DceUnavailable(resp.get("error", "unknown_dce_error"))
+    return SweepStartResult(
+        sweep_id=resp["sweep_id"], docs_total=resp["docs_total"], status=resp["status"],
+    )
+
+
 def advance_sweep(sweep_id: int, batch_size: int = 10) -> SweepBatchResult:
     resp = _call_dce(
         f"/internal/data-room-sweep/{sweep_id}/batch?batch_size={batch_size}", method="POST",
