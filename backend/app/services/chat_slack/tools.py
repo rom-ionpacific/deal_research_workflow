@@ -1945,3 +1945,393 @@ def _call_dossier_fn(fn_name: str, org_ids: list[int]) -> ToolResult:
         )
         row = cur.fetchone()
     return ToolResult(output=(row or {}).get("j") or {})
+
+
+# ---------------------------------------------------------------------------
+# Chat-triggered background data-room build (data_room_coverage phase 2, see
+# memory: data_room_coverage_analysis). Registered directly on slack_registry
+# (not a phase4-only registry, not a clone) so this auto-exposes to BOTH
+# Todd/Slack and the Ion Deal Research MCP connector at once, same as
+# list_all_deals / find_new_deals_to_discuss above. Reuses the EXISTING
+# checklist/gap-detection engine as-is via deal_cloud_enhancer's
+# data_room_build_job internal API (services/data_room_build.py) -- the
+# build itself runs in the background on dce's data-room-build-runner cron,
+# independent of this chat turn or any session staying open; the user gets
+# a Slack DM when it finishes.
+# ---------------------------------------------------------------------------
+
+class BuildDataRoomInput(BaseModel):
+    folder_path: str = Field(
+        ...,
+        min_length=1, max_length=1000,
+        description=(
+            "SharePoint folder path prefix, e.g. 'Common/Deal files/"
+            "_SINGLE ASSET DEALS/2026/Positron/'. Every indexed document "
+            "whose path starts with this prefix becomes part of the room."
+        ),
+    )
+    requested_by_email: str = Field(
+        ...,
+        min_length=3, max_length=200,
+        description=(
+            "Ion Pacific email of whoever asked for this build -- this is "
+            "who gets DM'd on Slack when the build finishes (docs scanned, "
+            "Found/Unconfirmed/Candidate-Gap counts, and the actual "
+            "Candidate Gap criteria names). ASK the user for their email "
+            "if you don't already know it from this conversation -- do not "
+            "guess or default to yourself/someone else, since a wrong "
+            "value means the wrong person gets DM'd."
+        ),
+    )
+
+
+@slack_registry.tool(
+    "build_data_room",
+    (
+        "Kick off a BACKGROUND build of a data room's coverage checklist "
+        "scan from a specific SharePoint folder path -- the same "
+        "Found/Unconfirmed/Candidate-Gap engine the Coverage tab uses, but "
+        "as a persistent background job drained by a cron over several "
+        "minutes, NOT something that blocks this chat turn or needs a "
+        "browser tab left open. Returns immediately with a job_id + "
+        "docs_total. Tell the user you'll DM them on Slack when it's done "
+        "(with the counts AND the actual list of missing/Candidate-Gap "
+        "criteria names), then let the conversation move on -- do not poll "
+        "in a loop yourself. Use check_data_room_build if the user wants "
+        "a status update before the DM arrives, and ask_data_room once "
+        "it's complete for ad-hoc questions about the room's documents."
+    ),
+    BuildDataRoomInput,
+)
+def build_data_room(inp: BuildDataRoomInput, ctx: dict) -> ToolResult:
+    from ..data_room_build import DceUnavailable as _DceUnavailable, create_build_job
+
+    try:
+        result = create_build_job(inp.folder_path, inp.requested_by_email)
+    except _DceUnavailable as e:
+        return ToolResult(output=f"Data room build unavailable: {e}")
+
+    return ToolResult(output={
+        "job_id": result.job_id,
+        "docs_total": result.docs_total,
+        "status": result.status,
+        "note": (
+            f"Build started for {result.docs_total} document(s) under "
+            f"'{inp.folder_path}'. I'll DM {inp.requested_by_email} on "
+            f"Slack when it's done (job_id={result.job_id}) -- no need to "
+            f"wait here."
+        ),
+    })
+
+
+class CheckDataRoomBuildInput(BaseModel):
+    job_id: int = Field(..., description="The job_id returned by build_data_room.")
+    requested_by_email: str = Field(
+        ...,
+        min_length=3, max_length=200,
+        description=(
+            "Ion Pacific email of the person asking, for an ownership "
+            "check against the job's original requester -- must match "
+            "who build_data_room was actually called for. ASK the user "
+            "for their email if you don't already know it from this "
+            "conversation; do not guess or default to yourself/someone "
+            "else."
+        ),
+    )
+
+
+def _emails_match(a: str, b: str) -> bool:
+    return a.strip().lower() == b.strip().lower()
+
+
+def _job_access_denied(job_id: int) -> ToolResult:
+    # Deliberately vague -- don't confirm/deny whether job_id even exists,
+    # or reveal who it actually belongs to, to someone who isn't its owner.
+    return ToolResult(output=(
+        f"job {job_id} does not belong to the email you provided, or "
+        "doesn't exist -- double-check the job_id and requested_by_email."
+    ))
+
+
+def _coverage_summary_note(summary: dict | None) -> str:
+    if not summary:
+        return "Coverage summary isn't available yet -- still scanning."
+    gap_criteria = summary.get("candidate_gap_criteria") or []
+    if not gap_criteria:
+        return (
+            f"Found: {summary.get('found', 0)} | "
+            f"Unconfirmed: {summary.get('unconfirmed', 0)} | "
+            f"Candidate Gap: {summary.get('candidate_gap', 0)}. "
+            "No Candidate Gap criteria -- every applicable checklist item "
+            "came back Found or Unconfirmed."
+        )
+    gap_list = "; ".join(gap_criteria)
+    return (
+        f"Found: {summary.get('found', 0)} | "
+        f"Unconfirmed: {summary.get('unconfirmed', 0)} | "
+        f"Candidate Gap: {summary.get('candidate_gap', 0)}. "
+        f"Candidate Gap criteria (not found): {gap_list}"
+    )
+
+
+@slack_registry.tool(
+    "check_data_room_build",
+    (
+        "Poll-style status + coverage summary for a job started with "
+        "build_data_room. Returns status ('pending'/'scanning'/'complete'/"
+        "'failed'), docs_processed/docs_total progress, and once complete, "
+        "the Found/Unconfirmed/Candidate-Gap counts PLUS the actual "
+        "Candidate Gap criteria names (the 'what's missing' answer -- "
+        "always report these by name when the user asks what's missing, "
+        "not just the count). Use this if the user doesn't want to wait "
+        "for the Slack DM, or wants a progress check on a long build. "
+        "Requires the SAME requested_by_email the job was built for -- "
+        "this will refuse to return another person's job."
+    ),
+    CheckDataRoomBuildInput,
+    mutates_state=False,
+)
+def check_data_room_build(inp: CheckDataRoomBuildInput, ctx: dict) -> ToolResult:
+    from ..data_room_build import DceUnavailable as _DceUnavailable, get_build_job
+
+    try:
+        job = get_build_job(inp.job_id)
+    except ValueError as e:
+        return ToolResult(output=str(e))
+    except _DceUnavailable as e:
+        return ToolResult(output=f"Data room build unavailable: {e}")
+
+    if not _emails_match(job.requested_by_email, inp.requested_by_email):
+        return _job_access_denied(inp.job_id)
+
+    if job.status == "complete":
+        note = (
+            f"status={job.status}, {job.docs_processed}/{job.docs_total} "
+            f"docs processed. {_coverage_summary_note(job.coverage_summary)}"
+        )
+    elif job.status == "failed":
+        note = f"status=failed. {job.error or 'no error detail recorded.'}"
+    else:
+        note = (
+            f"status={job.status}, {job.docs_processed}/{job.docs_total} "
+            f"docs processed so far."
+        )
+
+    return ToolResult(output={
+        "job_id": job.job_id,
+        "folder_path": job.folder_path,
+        "status": job.status,
+        "docs_total": job.docs_total,
+        "docs_processed": job.docs_processed,
+        "error": job.error,
+        "coverage_summary": job.coverage_summary,
+        "note": note,
+    })
+
+
+class AskDataRoomInput(BaseModel):
+    job_id: int = Field(..., description="The job_id returned by build_data_room.")
+    requested_by_email: str = Field(
+        ...,
+        min_length=3, max_length=200,
+        description=(
+            "Ion Pacific email of the person asking, for an ownership "
+            "check against the job's original requester -- must match "
+            "who build_data_room was actually called for. ASK the user "
+            "for their email if you don't already know it from this "
+            "conversation; do not guess or default to yourself/someone "
+            "else."
+        ),
+    )
+    question: str = Field(
+        ...,
+        min_length=4, max_length=2000,
+        description=(
+            "Question to ask of the data room's documents. Phrased as a "
+            "complete question; the answer will only draw on this job's "
+            "actual documents, never outside knowledge."
+        ),
+    )
+
+
+@slack_registry.tool(
+    "ask_data_room",
+    (
+        "Ask an ad-hoc question about a completed data-room build job's "
+        "documents -- retrieves the most relevant documents from the "
+        "job's folder and answers ONLY from them (sterile, no outside "
+        "knowledge or web search), with inline citations. Only call this "
+        "once check_data_room_build shows status='complete'; if it's "
+        "still scanning, tell the user to wait or check back rather than "
+        "calling this early (the checklist scan and this retrieval are "
+        "independent, but an incomplete room may be missing relevant "
+        "documents entirely). Prefer this over answering from the "
+        "coverage summary alone -- it does real retrieval against the "
+        "room's content. Requires the SAME requested_by_email the job "
+        "was built for -- this will refuse to answer against another "
+        "person's job."
+    ),
+    AskDataRoomInput,
+    mutates_state=False,
+)
+def ask_data_room(inp: AskDataRoomInput, ctx: dict) -> ToolResult:
+    from ..data_room_build import DceUnavailable as _DceUnavailable, get_build_job
+    from ..claude_data_room import ClaudeRoomError as _ClaudeRoomError, ask_room_for_docs
+
+    try:
+        job = get_build_job(inp.job_id)
+    except ValueError as e:
+        return ToolResult(output=str(e))
+    except _DceUnavailable as e:
+        return ToolResult(output=f"Data room build unavailable: {e}")
+
+    if not _emails_match(job.requested_by_email, inp.requested_by_email):
+        return _job_access_denied(inp.job_id)
+
+    if job.status != "complete":
+        return ToolResult(output=(
+            f"job {inp.job_id} is not complete yet (status={job.status}, "
+            f"{job.docs_processed}/{job.docs_total} docs processed) -- "
+            "call check_data_room_build again shortly, or wait for the "
+            "Slack DM."
+        ))
+    if not job.doc_ids:
+        return ToolResult(output=(
+            f"job {inp.job_id}'s folder has no readable documents to "
+            "search."
+        ))
+
+    try:
+        result = ask_room_for_docs(job.doc_ids, inp.question)
+    except _ClaudeRoomError as e:
+        return ToolResult(output=f"Claude room error: {e}")
+    return ToolResult(output=result)
+
+
+class StartDataRoomBuildSweepInput(BaseModel):
+    job_id: int = Field(..., description="The job_id returned by build_data_room.")
+    requested_by_email: str = Field(
+        ...,
+        min_length=3, max_length=200,
+        description=(
+            "Ion Pacific email of the person asking, for an ownership "
+            "check against the job's original requester -- must match "
+            "who build_data_room was actually called for. ASK the user "
+            "for their email if you don't already know it from this "
+            "conversation; do not guess or default to yourself/someone "
+            "else."
+        ),
+    )
+    question: str = Field(
+        ...,
+        min_length=4, max_length=2000,
+        description=(
+            "The specific question to check systematically across every "
+            "readable document in the job's folder. Phrase it precisely "
+            "-- this drives a per-document classification, not a "
+            "retrieval query, so a vague question yields vague/noisy hits."
+        ),
+    )
+
+
+@slack_registry.tool(
+    "start_data_room_build_sweep",
+    (
+        "Start a systematic, exhaustive sweep of EVERY readable document "
+        "in a build_data_room job's folder against a specific question -- "
+        "for the long tail OUTSIDE the 113-item coverage checklist. Use "
+        "this only after ask_data_room has already come up empty or "
+        "uncertain, or when the user explicitly asks for an exhaustive/"
+        "definitive check ('search everything', 'are you sure nothing "
+        "mentions X'). Do NOT use this as a first resort -- it's slower "
+        "and costs more than ask_data_room because it reads every "
+        "document, not just the likely ones. Returns immediately with a "
+        "sweep_id and docs_total; does NOT process any documents yet -- "
+        "call check_data_room_build_sweep repeatedly to make progress and "
+        "see results. Tell the user this will take a few minutes for a "
+        "large folder and you'll report back as it progresses. Requires "
+        "the SAME requested_by_email the job was built for -- this will "
+        "refuse to sweep another person's job."
+    ),
+    StartDataRoomBuildSweepInput,
+)
+def start_data_room_build_sweep(inp: StartDataRoomBuildSweepInput, ctx: dict) -> ToolResult:
+    from ..data_room_build import DceUnavailable as _DceUnavailable, get_build_job
+    from ..data_room_sweep import (
+        DceUnavailable as _SweepDceUnavailable,
+        start_sweep_for_docs as _start_sweep_for_docs,
+    )
+
+    try:
+        job = get_build_job(inp.job_id)
+    except ValueError as e:
+        return ToolResult(output=str(e))
+    except _DceUnavailable as e:
+        return ToolResult(output=f"Data room build unavailable: {e}")
+
+    if not _emails_match(job.requested_by_email, inp.requested_by_email):
+        return _job_access_denied(inp.job_id)
+
+    if not job.doc_ids:
+        return ToolResult(output=f"job {inp.job_id}'s folder has no readable documents to sweep.")
+
+    try:
+        result = _start_sweep_for_docs(job.doc_ids, inp.question, job.requested_by_email)
+    except _SweepDceUnavailable as e:
+        return ToolResult(output=f"Sweep unavailable: {e}")
+    return ToolResult(output={
+        "sweep_id": result.sweep_id, "docs_total": result.docs_total,
+        "status": result.status,
+        "note": (
+            "Sweep started but not yet processed -- call "
+            f"check_data_room_build_sweep with sweep_id={result.sweep_id} "
+            "to advance it and see progress."
+        ),
+    })
+
+
+class CheckDataRoomBuildSweepInput(BaseModel):
+    sweep_id: int = Field(..., description="The sweep_id returned by start_data_room_build_sweep.")
+
+
+@slack_registry.tool(
+    "check_data_room_build_sweep",
+    (
+        "Check progress on a sweep started with start_data_room_build_sweep, "
+        "AND advance it by one more batch (~10 documents, real Gemini "
+        "calls) in the same call -- this is deliberately not purely "
+        "read-only, so simply calling this repeatedly drains the sweep "
+        "over several turns without a separate 'process' action. When "
+        "status is 'complete', report the accumulated hits to the user as "
+        "the answer (with their evidence quotes), or if hits is empty, say "
+        "the question was checked against every readable document in the "
+        "folder (docs_total) and none of them answered it -- phrase this "
+        "as 'not found after an exhaustive check', NOT a flat 'the answer "
+        "does not exist'. When status is 'running', tell the user "
+        "progress (docs_processed/docs_total) and that you'll check again."
+    ),
+    CheckDataRoomBuildSweepInput,
+)
+def check_data_room_build_sweep(inp: CheckDataRoomBuildSweepInput, ctx: dict) -> ToolResult:
+    from ..data_room_sweep import (
+        DceUnavailable as _DceUnavailable,
+        advance_sweep as _advance_sweep,
+        get_sweep as _get_sweep,
+    )
+    try:
+        _advance_sweep(inp.sweep_id)
+    except _DceUnavailable as e:
+        return ToolResult(output=f"Sweep unavailable: {e}")
+    try:
+        detail = _get_sweep(inp.sweep_id)
+    except _DceUnavailable as e:
+        return ToolResult(output=f"Sweep unavailable: {e}")
+    return ToolResult(output={
+        "sweep_id": detail.sweep_id, "question": detail.question,
+        "status": detail.status, "docs_total": detail.docs_total,
+        "docs_processed": detail.docs_processed,
+        "hits": [
+            {"doc_name": h.doc_name, "present": h.present, "evidence": h.evidence}
+            for h in detail.hits
+        ],
+    })

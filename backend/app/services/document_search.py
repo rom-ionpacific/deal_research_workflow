@@ -358,6 +358,126 @@ def search_documents_for_orgs(
 
 
 # ---------------------------------------------------------------------------
+# doc_ids-scoped variant for chat-triggered background data-room build jobs
+# (data_room_coverage phase 2, see memory: data_room_coverage_analysis). A
+# data_room_build_job has no drw historical_data_room -- it's keyed by a
+# SharePoint folder path resolved (in deal_cloud_enhancer) to a plain list
+# of document.id. Same trigram / semantic / RRF structure as the room- and
+# org-scoped paths above, just filtered directly on d.id instead of a
+# historical_data_room_entity join or an organization_entity EXISTS check.
+# ---------------------------------------------------------------------------
+
+_TRIGRAM_SQL_DOCS = """
+WITH q AS (SELECT %s::text AS qtext, %s::int AS lim),
+hits AS (
+    SELECT d.id,
+           d.name,
+           d.path,
+           d.modified_at,
+           d.web_url,
+           LEFT(COALESCE(d.summary, ''), 200) AS summary_preview,
+           CASE
+             WHEN lower(d.name) = lower((SELECT qtext FROM q))                THEN 1.00
+             WHEN lower(d.name) LIKE lower((SELECT qtext FROM q)) || '%%'     THEN 0.85
+             WHEN lower(d.name) LIKE '%%' || lower((SELECT qtext FROM q)) || '%%' THEN 0.70
+             ELSE 0.60 * GREATEST(
+                 dealcloud.similarity(d.name, (SELECT qtext FROM q)),
+                 dealcloud.similarity(COALESCE(d.path, ''), (SELECT qtext FROM q))
+             )
+           END AS score,
+           'name'::text AS match_kind
+    FROM dealcloud.document d
+    WHERE d.id = ANY(%s::int[])
+      AND (
+        lower(d.name) = lower((SELECT qtext FROM q))
+        OR lower(d.name) LIKE '%%' || lower((SELECT qtext FROM q)) || '%%'
+        OR dealcloud.similarity(d.name, (SELECT qtext FROM q)) > 0.3
+        OR dealcloud.similarity(COALESCE(d.path, ''), (SELECT qtext FROM q)) > 0.3
+      )
+)
+SELECT id, name, path, modified_at, web_url, summary_preview, score, match_kind
+  FROM hits
+ ORDER BY score DESC, name
+ LIMIT (SELECT lim FROM q)
+"""
+
+
+_SEMANTIC_SQL_DOCS = """
+WITH q AS (SELECT %s::public.vector AS qvec, %s::int AS lim)
+SELECT d.id,
+       d.name,
+       d.path,
+       d.modified_at,
+       d.web_url,
+       LEFT(COALESCE(d.summary, ''), 200) AS summary_preview,
+       1 - (de.embedding <=> (SELECT qvec FROM q)) AS score,
+       'semantic'::text AS match_kind
+  FROM dealcloud.document_embedding de
+  JOIN dealcloud.document d ON d.id = de.document_id
+ WHERE de.model = %s
+   AND d.id = ANY(%s::int[])
+ ORDER BY de.embedding <=> (SELECT qvec FROM q)
+ LIMIT (SELECT lim FROM q)
+"""
+
+
+def _trigram_rows_docs(doc_ids: list[int], query: str, limit: int) -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(_TRIGRAM_SQL_DOCS, (query, limit, doc_ids))
+        return list(cur.fetchall())
+
+
+def _semantic_rows_docs(doc_ids: list[int], query: str, limit: int) -> list[dict]:
+    try:
+        emb = embed_query(query)
+    except EmbedNotConfigured:
+        return []
+    except EmbedError as e:
+        logger.warning("doc semantic search (docs) fell back to trigram-only: %s", e)
+        return []
+    vec = vector_literal(emb)
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(_SEMANTIC_SQL_DOCS, (vec, limit, _EMBED_MODEL, doc_ids))
+        return list(cur.fetchall())
+
+
+def search_documents_for_docs(
+    doc_ids: list[int],
+    query: str,
+    limit: int = 10,
+    mode: SearchMode = "hybrid",
+) -> list[dict]:
+    """Top-N documents matching `query`, scoped to an explicit `doc_ids`
+    list (NOT a room or org). Used by ask_room_for_docs for chat-triggered
+    background data-room build jobs (data_room_build_job), which resolve
+    their scope from a SharePoint folder path rather than a drw
+    historical_data_room. Unlike search_documents_for_orgs, an empty
+    doc_ids list returns nothing (there's no "global corpus" fallback
+    that makes sense for a job scoped to zero documents)."""
+    if not doc_ids:
+        return []
+    if mode == "trigram":
+        rows = _trigram_rows_docs(doc_ids, query, limit)
+    elif mode == "semantic":
+        rows = _semantic_rows_docs(doc_ids, query, limit)
+        if not rows:
+            rows = _trigram_rows_docs(doc_ids, query, limit)
+    elif mode == "hybrid":
+        pool = max(limit * 3, 30)
+        trigram = _trigram_rows_docs(doc_ids, query, pool)
+        semantic = _semantic_rows_docs(doc_ids, query, pool)
+        if not semantic:
+            rows = trigram[:limit]
+        else:
+            rows = _rrf_merge(trigram, semantic, limit)
+    else:
+        raise ValueError(f"unknown mode {mode!r}")
+    return [_row_to_dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
 # Recency-first listing for the scenario-strategy agent -- "what's the
 # newest material we have on this company", not topic search. get_org_dossier
 # caps at 5 recent docs (a general-purpose snapshot); this has no such cap
