@@ -2026,6 +2026,31 @@ def build_data_room(inp: BuildDataRoomInput, ctx: dict) -> ToolResult:
 
 class CheckDataRoomBuildInput(BaseModel):
     job_id: int = Field(..., description="The job_id returned by build_data_room.")
+    requested_by_email: str = Field(
+        ...,
+        min_length=3, max_length=200,
+        description=(
+            "Ion Pacific email of the person asking, for an ownership "
+            "check against the job's original requester -- must match "
+            "who build_data_room was actually called for. ASK the user "
+            "for their email if you don't already know it from this "
+            "conversation; do not guess or default to yourself/someone "
+            "else."
+        ),
+    )
+
+
+def _emails_match(a: str, b: str) -> bool:
+    return a.strip().lower() == b.strip().lower()
+
+
+def _job_access_denied(job_id: int) -> ToolResult:
+    # Deliberately vague -- don't confirm/deny whether job_id even exists,
+    # or reveal who it actually belongs to, to someone who isn't its owner.
+    return ToolResult(output=(
+        f"job {job_id} does not belong to the email you provided, or "
+        "doesn't exist -- double-check the job_id and requested_by_email."
+    ))
 
 
 def _coverage_summary_note(summary: dict | None) -> str:
@@ -2059,7 +2084,9 @@ def _coverage_summary_note(summary: dict | None) -> str:
         "Candidate Gap criteria names (the 'what's missing' answer -- "
         "always report these by name when the user asks what's missing, "
         "not just the count). Use this if the user doesn't want to wait "
-        "for the Slack DM, or wants a progress check on a long build."
+        "for the Slack DM, or wants a progress check on a long build. "
+        "Requires the SAME requested_by_email the job was built for -- "
+        "this will refuse to return another person's job."
     ),
     CheckDataRoomBuildInput,
     mutates_state=False,
@@ -2074,6 +2101,22 @@ def check_data_room_build(inp: CheckDataRoomBuildInput, ctx: dict) -> ToolResult
     except _DceUnavailable as e:
         return ToolResult(output=f"Data room build unavailable: {e}")
 
+    if not _emails_match(job.requested_by_email, inp.requested_by_email):
+        return _job_access_denied(inp.job_id)
+
+    if job.status == "complete":
+        note = (
+            f"status={job.status}, {job.docs_processed}/{job.docs_total} "
+            f"docs processed. {_coverage_summary_note(job.coverage_summary)}"
+        )
+    elif job.status == "failed":
+        note = f"status=failed. {job.error or 'no error detail recorded.'}"
+    else:
+        note = (
+            f"status={job.status}, {job.docs_processed}/{job.docs_total} "
+            f"docs processed so far."
+        )
+
     return ToolResult(output={
         "job_id": job.job_id,
         "folder_path": job.folder_path,
@@ -2082,18 +2125,24 @@ def check_data_room_build(inp: CheckDataRoomBuildInput, ctx: dict) -> ToolResult
         "docs_processed": job.docs_processed,
         "error": job.error,
         "coverage_summary": job.coverage_summary,
-        "note": (
-            f"status={job.status}, {job.docs_processed}/{job.docs_total} "
-            f"docs processed. {_coverage_summary_note(job.coverage_summary)}"
-            if job.status == "complete"
-            else f"status={job.status}, {job.docs_processed}/{job.docs_total} "
-                 f"docs processed so far."
-        ),
+        "note": note,
     })
 
 
 class AskDataRoomInput(BaseModel):
     job_id: int = Field(..., description="The job_id returned by build_data_room.")
+    requested_by_email: str = Field(
+        ...,
+        min_length=3, max_length=200,
+        description=(
+            "Ion Pacific email of the person asking, for an ownership "
+            "check against the job's original requester -- must match "
+            "who build_data_room was actually called for. ASK the user "
+            "for their email if you don't already know it from this "
+            "conversation; do not guess or default to yourself/someone "
+            "else."
+        ),
+    )
     question: str = Field(
         ...,
         min_length=4, max_length=2000,
@@ -2118,7 +2167,9 @@ class AskDataRoomInput(BaseModel):
         "independent, but an incomplete room may be missing relevant "
         "documents entirely). Prefer this over answering from the "
         "coverage summary alone -- it does real retrieval against the "
-        "room's content."
+        "room's content. Requires the SAME requested_by_email the job "
+        "was built for -- this will refuse to answer against another "
+        "person's job."
     ),
     AskDataRoomInput,
     mutates_state=False,
@@ -2133,6 +2184,9 @@ def ask_data_room(inp: AskDataRoomInput, ctx: dict) -> ToolResult:
         return ToolResult(output=str(e))
     except _DceUnavailable as e:
         return ToolResult(output=f"Data room build unavailable: {e}")
+
+    if not _emails_match(job.requested_by_email, inp.requested_by_email):
+        return _job_access_denied(inp.job_id)
 
     if job.status != "complete":
         return ToolResult(output=(
@@ -2156,6 +2210,18 @@ def ask_data_room(inp: AskDataRoomInput, ctx: dict) -> ToolResult:
 
 class StartDataRoomBuildSweepInput(BaseModel):
     job_id: int = Field(..., description="The job_id returned by build_data_room.")
+    requested_by_email: str = Field(
+        ...,
+        min_length=3, max_length=200,
+        description=(
+            "Ion Pacific email of the person asking, for an ownership "
+            "check against the job's original requester -- must match "
+            "who build_data_room was actually called for. ASK the user "
+            "for their email if you don't already know it from this "
+            "conversation; do not guess or default to yourself/someone "
+            "else."
+        ),
+    )
     question: str = Field(
         ...,
         min_length=4, max_length=2000,
@@ -2183,7 +2249,9 @@ class StartDataRoomBuildSweepInput(BaseModel):
         "sweep_id and docs_total; does NOT process any documents yet -- "
         "call check_data_room_build_sweep repeatedly to make progress and "
         "see results. Tell the user this will take a few minutes for a "
-        "large folder and you'll report back as it progresses."
+        "large folder and you'll report back as it progresses. Requires "
+        "the SAME requested_by_email the job was built for -- this will "
+        "refuse to sweep another person's job."
     ),
     StartDataRoomBuildSweepInput,
 )
@@ -2200,6 +2268,9 @@ def start_data_room_build_sweep(inp: StartDataRoomBuildSweepInput, ctx: dict) ->
         return ToolResult(output=str(e))
     except _DceUnavailable as e:
         return ToolResult(output=f"Data room build unavailable: {e}")
+
+    if not _emails_match(job.requested_by_email, inp.requested_by_email):
+        return _job_access_denied(inp.job_id)
 
     if not job.doc_ids:
         return ToolResult(output=f"job {inp.job_id}'s folder has no readable documents to sweep.")
