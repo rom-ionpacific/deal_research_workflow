@@ -70,7 +70,7 @@ def email_to_slack_user_id(email: str) -> Optional[str]:
     try:
         resp = _CLIENT.users_lookupByEmail(email=email)
         user_id = resp["user"]["id"]
-    except SlackApiError as e:
+    except Exception as e:  # noqa: BLE001 - fail soft, see notify_slack_dm docstring
         logger.info("email_to_slack_user_id: lookup failed for %s: %s", email, e)
         user_id = None
 
@@ -97,6 +97,6 @@ def notify_slack_dm(email: str, text: str) -> bool:
     try:
         _CLIENT.chat_postMessage(channel=user_id, text=text, mrkdwn=True)
         return True
-    except SlackApiError as e:
+    except Exception as e:  # noqa: BLE001 - deliberately swallow, see docstring
         logger.warning("notify_slack_dm: chat_postMessage failed for %s: %s", email, e)
         return False
