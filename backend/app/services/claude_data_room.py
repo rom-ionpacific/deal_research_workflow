@@ -78,6 +78,33 @@ _SYSTEM_PROMPT = (
     "when context helps the reader (e.g. \"as the IC memo notes "
     "[doc_id=43012], the exit multiple was 3.2x\"). Multiple citations "
     "on one claim are fine: `[doc_id=43012][doc_id=43015]`.\n\n"
+    "GROUNDING RULES -- these override everything else, including the "
+    "instruction to give a substantive answer:\n"
+    "  - Every specific figure you state (valuation, price, multiple, "
+    "    revenue, headcount, ownership %, date) MUST appear literally "
+    "    in the text provided for a document. Never calculate, "
+    "    estimate, or recall one from elsewhere.\n"
+    "  - A document's FILENAME, path, or title is NOT evidence of its "
+    "    contents. A file called \"Series D Financial Model.xlsx\" "
+    "    tells you a Series D model exists -- NOT what the valuation "
+    "    was. Never state or imply a fact just because a filename "
+    "    suggests the document would contain it.\n"
+    "  - Some documents are listed with a CONTENT UNAVAILABLE marker "
+    "    instead of a summary: their contents could not be read. You "
+    "    may cite them ONLY to say the document exists and is "
+    "    unreadable. Drawing any substantive claim from one is a "
+    "    serious error.\n"
+    "  - If the answer depends on a figure you don't actually have, "
+    "    say so plainly and name which document would likely hold it. "
+    "    \"The cap table [doc_id=N] is in the room but its contents "
+    "    weren't extractable, so the post-money valuation can't be "
+    "    confirmed from these materials\" is a GOOD answer. Supplying "
+    "    a plausible-sounding number instead is the single worst "
+    "    failure you can make here -- these answers feed investment "
+    "    decisions, and a confident wrong figure is far more damaging "
+    "    than an explicit gap.\n"
+    "  - Never contradict yourself: don't state a figure and then "
+    "    caveat elsewhere that the source wasn't readable.\n\n"
     "Be precise. Quote document language when it supports the answer. "
     "Keep the response focused on the question -- don't recap context "
     "the user didn't ask about."
@@ -222,10 +249,44 @@ def _render_citations(text: str, docs: list[dict]) -> str:
     return _DOC_ID_RE.sub(sub, text)
 
 
+def _has_readable_summary(summary: str) -> bool:
+    """Whether a summary_preview actually carries document content.
+
+    Two ways it doesn't: it's empty (the document was never summarised,
+    or its summary is NULL -- document_search COALESCEs that to ''), or
+    it's a bracketed sentinel like "[unsupported file type]" written by
+    the scanner instead of real content. Mirrors deal_cloud_enhancer's
+    own candidate-doc predicate (ic_criteria_llm.CANDIDATE_SQL:
+    `summary IS NOT NULL AND left(summary,1) <> '['`) so both sides
+    agree on what counts as readable."""
+    return bool(summary) and not summary.startswith("[")
+
+
+# Rendered in place of the Summary line for a retrieved document whose
+# content we don't actually have. Silently omitting the line (the old
+# behaviour) made a no-content document indistinguishable from one whose
+# summary merely wasn't included -- so the model saw a suggestive
+# filename ("Series D Financial Model.xlsx"), had nothing to contradict
+# it, and invented plausible figures to fill the gap. Found in the
+# 2026-08-24 live e2e test: a fabricated "$2.1 billion post-money
+# valuation" cited to a spreadsheet whose summary is NULL. Naming the
+# absence explicitly is what lets the model report it instead.
+_NO_CONTENT_MARKER = (
+    "CONTENT UNAVAILABLE -- this document was not readable, so only its "
+    "filename is known. Do NOT infer, estimate, or state ANY fact or "
+    "figure from it, and do NOT treat its filename as evidence of what "
+    "it contains. You may only note that it exists and could not be read."
+)
+
+
 def _format_doc_context(docs: list[dict]) -> str:
     """Render retrieved docs as a single text block for the system
     prompt. doc_id is the citation handle; name + summary_preview is
-    the content. Order is retrieval order (most relevant first)."""
+    the content. Order is retrieval order (most relevant first).
+
+    Documents with no readable summary are rendered with an explicit
+    CONTENT UNAVAILABLE marker rather than a bare filename -- see
+    _NO_CONTENT_MARKER."""
     if not docs:
         # Don't tell the model "no documents matched the query" -- it
         # paraphrases that back to the user and it sounds like a
@@ -248,23 +309,10 @@ def _format_doc_context(docs: list[dict]) -> str:
         lines.append(f"\n[doc_id={doc_id}] {name}")
         if path and path != name:
             lines.append(f"    Path: {path}")
-        if summary:
+        if _has_readable_summary(summary):
             lines.append(f"    Summary: {summary}")
         else:
-            # Real bug found in the 2026-08-24 e2e test (data_room_coverage
-            # phase 2, job 1, Metropolis VDR): with no summary line at all,
-            # the model was left with only a suggestive filename (e.g.
-            # "Series D Financial Model") and filled the gap by inventing a
-            # specific figure ("~$2.1B post-money") attributed to that doc.
-            # An explicit "no content" marker gives the model something to
-            # cite instead of inferring from the name.
-            lines.append(
-                "    Summary: NO CONTENT AVAILABLE -- this document could "
-                "not be summarized (e.g. unreadable spreadsheet, scan, or "
-                "unsupported format). Do not infer any figures, terms, or "
-                "facts from the filename or path alone; treat this "
-                "document as containing no retrievable information."
-            )
+            lines.append(f"    {_NO_CONTENT_MARKER}")
     return "\n".join(lines)
 
 
