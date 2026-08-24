@@ -250,6 +250,21 @@ def _format_doc_context(docs: list[dict]) -> str:
             lines.append(f"    Path: {path}")
         if summary:
             lines.append(f"    Summary: {summary}")
+        else:
+            # Real bug found in the 2026-08-24 e2e test (data_room_coverage
+            # phase 2, job 1, Metropolis VDR): with no summary line at all,
+            # the model was left with only a suggestive filename (e.g.
+            # "Series D Financial Model") and filled the gap by inventing a
+            # specific figure ("~$2.1B post-money") attributed to that doc.
+            # An explicit "no content" marker gives the model something to
+            # cite instead of inferring from the name.
+            lines.append(
+                "    Summary: NO CONTENT AVAILABLE -- this document could "
+                "not be summarized (e.g. unreadable spreadsheet, scan, or "
+                "unsupported format). Do not infer any figures, terms, or "
+                "facts from the filename or path alone; treat this "
+                "document as containing no retrievable information."
+            )
     return "\n".join(lines)
 
 
