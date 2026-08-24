@@ -2053,6 +2053,29 @@ def _job_access_denied(job_id: int) -> ToolResult:
     ))
 
 
+def _unreadable_note(summary: dict) -> str:
+    """Same warning the completion Slack DM carries (see
+    routes/internal.py::_format_unreadable_warning) -- documents the
+    checklist scanner could not read at all, overwhelmingly
+    spreadsheets. Without this the model reports a Candidate Gap as
+    settled fact when the deal's financial model was never opened."""
+    n = summary.get("docs_unreadable") or 0
+    if not n:
+        return ""
+    names = summary.get("unreadable_doc_names") or []
+    listed = "; ".join(names)
+    if summary.get("unreadable_doc_names_truncated"):
+        listed += f"; ...and {n - len(names)} more"
+    return (
+        f" IMPORTANT: {n} of {summary.get('docs_in_folder')} documents could "
+        f"NOT be read by the scanner (only {summary.get('docs_scanned')} were "
+        f"scanned) -- spreadsheets are rarely machine-readable here. Tell the "
+        f"user the gap list is NOT YET EVIDENCED rather than confirmed "
+        f"missing, and name these unread files as the place the answer may "
+        f"actually live: {listed}."
+    )
+
+
 def _coverage_summary_note(summary: dict | None) -> str:
     if not summary:
         return "Coverage summary isn't available yet -- still scanning."
@@ -2064,13 +2087,15 @@ def _coverage_summary_note(summary: dict | None) -> str:
             f"Candidate Gap: {summary.get('candidate_gap', 0)}. "
             "No Candidate Gap criteria -- every applicable checklist item "
             "came back Found or Unconfirmed."
+            + _unreadable_note(summary)
         )
     gap_list = "; ".join(gap_criteria)
     return (
         f"Found: {summary.get('found', 0)} | "
         f"Unconfirmed: {summary.get('unconfirmed', 0)} | "
         f"Candidate Gap: {summary.get('candidate_gap', 0)}. "
-        f"Candidate Gap criteria (not found): {gap_list}"
+        f"Candidate Gap criteria (not yet evidenced): {gap_list}"
+        + _unreadable_note(summary)
     )
 
 

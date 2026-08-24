@@ -40,6 +40,39 @@ def _format_gap_lines(criteria: list[str]) -> str:
     return "\n".join(f"- {c}" for c in criteria)
 
 
+def _format_unreadable_warning(coverage_summary: dict) -> str:
+    """Warn when part of the folder was never actually read.
+
+    The checklist scanner can only read documents that have a usable
+    text summary -- in practice that excludes almost all spreadsheets
+    (platform-wide ~1.4% of scanned spreadsheets have one, vs ~81% of
+    PDFs). Staying silent about that makes a Candidate Gap look like
+    evidence of absence when the evidence may be sitting unread in the
+    very file the checklist points to: on the first real Metropolis VDR
+    run, 4 of 11 docs were skipped -- including the Series D Financial
+    Model and Historical Financials -- while 6 of the reported gaps had
+    a taxonomy doc_type_hint of literally `financial_model`/`financials`.
+    Naming the skipped files lets the reader tell "we looked and it
+    isn't there" apart from "we couldn't look"."""
+    n = coverage_summary.get("docs_unreadable") or 0
+    if not n:
+        return ""
+    names = coverage_summary.get("unreadable_doc_names") or []
+    scanned = coverage_summary.get("docs_scanned")
+    in_folder = coverage_summary.get("docs_in_folder")
+    head = (
+        f":warning: *{n} of {in_folder} document(s) could NOT be read* "
+        f"(only {scanned} were scanned). Spreadsheets in particular are "
+        f"rarely machine-readable here, so treat the gap list below as "
+        f"*not yet evidenced* rather than confirmed missing -- the answer "
+        f"may be inside one of these files:"
+    )
+    listed = "\n".join(f"- {nm}" for nm in names)
+    if coverage_summary.get("unreadable_doc_names_truncated"):
+        listed += f"\n- ...and {n - len(names)} more"
+    return f"{head}\n{listed}\n\n"
+
+
 @router.post("/data-room-build-job/{job_id}/notify")
 async def notify_data_room_build_job(
     job_id: int,
@@ -86,7 +119,9 @@ async def notify_data_room_build_job(
             f"Docs scanned: *{docs_total}*\n"
             f"Found: *{found}*  |  Unconfirmed: *{unconfirmed}*  |  "
             f"Candidate Gap: *{candidate_gap}*\n\n"
-            f"*Candidate Gap criteria (not found):*\n{_format_gap_lines(gap_criteria)}\n\n"
+            f"{_format_unreadable_warning(coverage_summary)}"
+            f"*Candidate Gap criteria (not yet evidenced):*\n"
+            f"{_format_gap_lines(gap_criteria)}\n\n"
             f"Ask me follow-up questions about this data room any time -- "
             f"just reference job #{job_id}."
         )
