@@ -44,6 +44,12 @@ class BuildJobCreated:
     job_id: int
     docs_total: int
     status: str
+    # What dce actually did: 'created' a new room, 'refreshed' an existing
+    # one because documents were added to the folder since last time, or
+    # 'reused' it untouched because nothing changed. A data room IS its
+    # folder, so repeat requests must not pile up duplicate rooms.
+    action: str = "created"
+    new_docs: int = 0
 
 
 @dataclass
@@ -102,6 +108,10 @@ def create_build_job(folder_path: str, requested_by_email: str) -> BuildJobCreat
         raise DceUnavailable(resp.get("error", "unknown_dce_error"))
     return BuildJobCreated(
         job_id=resp["job_id"], docs_total=resp["docs_total"], status=resp["status"],
+        # .get with defaults: an older dce that predates folder-reuse just
+        # looks like a plain create, rather than breaking the tool.
+        action=resp.get("action", "created"),
+        new_docs=resp.get("new_docs", 0),
     )
 
 
