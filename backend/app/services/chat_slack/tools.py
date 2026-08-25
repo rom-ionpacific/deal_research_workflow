@@ -1988,8 +1988,14 @@ class BuildDataRoomInput(BaseModel):
 @slack_registry.tool(
     "build_data_room",
     (
-        "Kick off a BACKGROUND build of a data room's coverage checklist "
-        "scan from a specific SharePoint folder path -- the same "
+        "Get the data room for a specific SharePoint folder path, building "
+        "it if one doesn't exist yet. SAFE TO CALL REPEATEDLY: a data room "
+        "IS its folder, so if one already exists this reuses it -- scanning "
+        "only documents added since the last build, or doing nothing at all "
+        "if the folder is unchanged. Check the returned `action` "
+        "('created' / 'refreshed' / 'reused') and tell the user which "
+        "happened; never imply a fresh build when the room already existed. "
+        "Runs the same "
         "Found/Unconfirmed/Candidate-Gap engine the Coverage tab uses, but "
         "as a persistent background job drained by a cron over several "
         "minutes, NOT something that blocks this chat turn or needs a "
@@ -2011,16 +2017,38 @@ def build_data_room(inp: BuildDataRoomInput, ctx: dict) -> ToolResult:
     except _DceUnavailable as e:
         return ToolResult(output=f"Data room build unavailable: {e}")
 
-    return ToolResult(output={
-        "job_id": result.job_id,
-        "docs_total": result.docs_total,
-        "status": result.status,
-        "note": (
+    if result.action == "reused":
+        note = (
+            f"A data room already exists for '{inp.folder_path}' "
+            f"(job_id={result.job_id}) and nothing has been added to the "
+            f"folder since it was built, so there was nothing to rebuild. "
+            f"Use check_data_room_build for its coverage summary, or "
+            f"ask_data_room to ask questions about it -- do NOT tell the "
+            f"user a new build was started."
+        )
+    elif result.action == "refreshed":
+        note = (
+            f"Reused the existing data room for '{inp.folder_path}' "
+            f"(job_id={result.job_id}) and started scanning the "
+            f"{result.new_docs} document(s) added since it was last built "
+            f"-- the rest is already done, so this should finish quickly. "
+            f"I'll DM {inp.requested_by_email} on Slack when it's updated."
+        )
+    else:
+        note = (
             f"Build started for {result.docs_total} document(s) under "
             f"'{inp.folder_path}'. I'll DM {inp.requested_by_email} on "
             f"Slack when it's done (job_id={result.job_id}) -- no need to "
             f"wait here."
-        ),
+        )
+
+    return ToolResult(output={
+        "job_id": result.job_id,
+        "docs_total": result.docs_total,
+        "status": result.status,
+        "action": result.action,
+        "new_docs": result.new_docs,
+        "note": note,
     })
 
 
