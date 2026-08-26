@@ -580,6 +580,120 @@ def ask_room_for_docs(
         raise ClaudeRoomError(str(e)) from e
 
 
+# The grounding rules from _SYSTEM_PROMPT that must survive the move to a
+# calling model. Deliberately NOT the whole system prompt: the prose-style
+# guidance ("be precise", "quote document language") is the calling model's
+# own business, but these rules exist because of a real incident and have to
+# travel with the data.
+#
+# On 2026-08-24 the server-side path answered "approximately $2.1 billion
+# post-money", citing a Series D financial model whose summary is NULL -- it
+# saw a suggestive filename and filled the gap. _NO_CONTENT_MARKER (rendered
+# inline, per document, by _format_doc_context) is the structural half of the
+# fix; this block is the instructional half.
+_CLIENT_GROUNDING_RULES = (
+    "GROUNDING RULES for answering from the DOCUMENTS block below. These "
+    "are not stylistic suggestions -- these answers feed investment "
+    "decisions, and a confident wrong figure is far more damaging than an "
+    "explicit gap.\n"
+    "  - Answer ONLY from the documents below. Do not use outside "
+    "    knowledge, the web, or other parts of this conversation as "
+    "    evidence about this company.\n"
+    "  - Every specific figure you state (valuation, price, multiple, "
+    "    revenue, headcount, ownership %, date) MUST appear literally in "
+    "    the text provided for a document. Never calculate, estimate, or "
+    "    recall one from elsewhere.\n"
+    "  - A FILENAME, path, or title is NOT evidence of contents. A file "
+    "    called \"Series D Financial Model.xlsx\" tells you such a model "
+    "    exists -- NOT what the valuation was.\n"
+    "  - Documents shown with a CONTENT UNAVAILABLE marker could not be "
+    "    read. Cite them ONLY to say they exist and are unreadable. "
+    "    Drawing any substantive claim from one is a serious error.\n"
+    "  - If the answer depends on a figure you don't have, say so and "
+    "    name the document that would likely hold it. Consider calling "
+    "    read_document on that document_id to read its FULL body -- the "
+    "    summaries below are truncated previews, so a preview being thin "
+    "    is NOT evidence the document lacks the answer.\n"
+    "  - Each entry below is a retrieval hit, not the whole room. "
+    "    Retrieval missing something is NOT evidence it does not exist -- "
+    "    never tell anyone a document or fact is absent from the room on "
+    "    this basis. For an exhaustive per-document pass use "
+    "    start_data_room_build_sweep instead.\n"
+    "  - When the documents genuinely don't cover the question, give a "
+    "    substantive negative finding (\"the materials don't address exit "
+    "    timing -- they're limited to operating updates and capital "
+    "    structure\"), not a search-failure report (\"no documents were "
+    "    returned\").\n"
+    "  - Cite documents inline as [doc_id=N] using the ids below."
+)
+
+
+def retrieve_room_context_for_docs(
+    doc_ids: list[int],
+    question: str,
+    org_name: str | None = None,
+) -> dict:
+    """Retrieval-only counterpart to ask_room_for_docs.
+
+    ask_room_for_docs exists because the web UI and the Slack bot have no
+    model of their own: something server-side has to turn retrieved
+    documents into prose, so it spends an ANTHROPIC_API_KEY doing it.
+
+    An MCP caller is itself a model. Handing it a finished answer means
+    paying for a second, weaker Claude -- one that sees only the documents
+    while the caller sees the documents AND the whole conversation, and can
+    chain read_document for full bodies when a preview is too thin. So this
+    returns the retrieval result and the grounding rules, and lets the
+    caller answer. No API key is involved, which is also why the MCP
+    service needs no ANTHROPIC_API_KEY.
+
+    Payload is small by construction: RETRIEVAL_LIMIT documents, each with
+    a summary_preview the search layer caps at 200 chars (~6 KB total).
+
+    Raises ClaudeRoomError on retrieval failure. Auth is the caller's
+    responsibility, exactly as for ask_room_for_docs.
+    """
+    try:
+        retrieval_query = f"{org_name}: {question}" if org_name else question
+        docs = search_documents_for_docs(
+            doc_ids=doc_ids,
+            query=retrieval_query,
+            limit=RETRIEVAL_LIMIT,
+            mode="hybrid",
+        )
+    except Exception as e:
+        logger.exception(
+            "claude_room retrieve_for_docs failed for %d docs", len(doc_ids)
+        )
+        raise ClaudeRoomError(str(e)) from e
+
+    subject_block = (
+        f"SUBJECT COMPANY: {org_name}. Every reference to \"the company\", "
+        f"\"the deal\", or \"them\" in the question resolves to {org_name}.\n\n"
+        if org_name
+        else ""
+    )
+    return {
+        "question": question,
+        "instructions": subject_block + _CLIENT_GROUNDING_RULES,
+        "documents": _format_doc_context(docs),
+        "retrieved": len(docs),
+        "retrieval_limit": RETRIEVAL_LIMIT,
+        "searched_documents": len(doc_ids),
+        # doc_id -> source, so the caller can render real links rather than
+        # guessing a URL from the name.
+        "sources": [
+            {
+                "document_id": d["document_id"],
+                "name": d.get("name"),
+                "path": d.get("path"),
+                "web_url": d.get("web_url"),
+            }
+            for d in docs
+        ],
+    }
+
+
 def run_preset_playlist(room_id: int, user: UserCtx) -> None:
     """Run every preset question for `room_id` through Claude, one at
     a time. Designed as a FastAPI BackgroundTask target: never raises

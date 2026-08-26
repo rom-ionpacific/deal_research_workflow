@@ -223,10 +223,194 @@ def _build_preview(inp: ResearchActivityInput) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Registry: clone slack_registry, add the two write tools on the clone only
+# Registry: the Slack surface, with declared divergences, plus MCP-only tools
 # ---------------------------------------------------------------------------
+#
+# PARITY IS THE GOAL. A tool built for Slack should show up in Claude too,
+# with the same implementation. The only reason to diverge is that a tool
+# genuinely needs a DIFFERENT implementation over MCP -- and the one real
+# case is a tool that calls a model server-side, because an MCP caller IS a
+# model and can do that itself (see MCP_REIMPLEMENTED below).
+#
+# So the surface is declared explicitly rather than inherited blindly: every
+# Slack tool must be classified in exactly one bucket below, and
+# _assert_surface_declared() fails the build if one isn't. That is the whole
+# point -- previously this module did a bare slack_registry.clone(), so
+# ask_data_room was exposed over MCP by accident and nobody noticed it needed
+# an ANTHROPIC_API_KEY on a service that never had one. A loud build failure
+# is the cheap version of that bug.
+#
+# Adding a Slack tool? Put its name in MCP_INHERITED. That is the default and
+# almost always the right answer.
+
+# Same implementation on both surfaces.
+MCP_INHERITED: frozenset[str] = frozenset({
+    "find_organizations",
+    "find_comparable_orgs",
+    "bundle_via_supersede",
+    "get_org_portfolio_status",
+    "get_org_deal_history",
+    "get_org_ion_contacts",
+    "get_org_their_contacts",
+    "get_org_communication_timeline",
+    "get_org_dossier",
+    "read_document_summary",
+    "search_documents",
+    "read_document",
+    "get_deal_one_pager",
+    "list_deals",
+    "find_new_deals_to_discuss",
+    "list_all_deals",
+    "deal_underlying_companies",
+    "get_fundraising_summary",
+    "list_funds",
+    "get_fund_status",
+    "build_data_room",
+    "check_data_room_build",
+    "start_data_room_build_sweep",
+    "check_data_room_build_sweep",
+})
+
+# Exposed, but with an MCP-specific implementation replacing the Slack one.
+# Value is the reason, which belongs in code rather than a commit message.
+MCP_REIMPLEMENTED: dict[str, str] = {
+    "ask_data_room": (
+        "The Slack version calls Claude server-side on an "
+        "ANTHROPIC_API_KEY, because Slack has no model of its own. An MCP "
+        "caller IS a model, so it retrieves and lets the caller answer -- "
+        "cheaper, better grounded (the caller can chain read_document), "
+        "billed to the caller's own session, and no API key needed on the "
+        "MCP service at all."
+    ),
+}
+
+# Deliberately NOT exposed over MCP. Empty on purpose -- withholding a tool
+# breaks parity, so it needs a real reason here, not just an omission.
+MCP_WITHHELD: dict[str, str] = {}
+
+
+def _assert_surface_declared() -> None:
+    """Fail loudly if the Slack surface and this declaration disagree.
+
+    Two directions, both real failure modes:
+      * an undeclared Slack tool -- someone added a tool and nobody decided
+        whether it works as-is over MCP;
+      * a declared name that no longer exists in slack_registry -- a rename
+        would otherwise silently un-apply a reimplementation, quietly
+        restoring the very server-side-model version we replaced.
+    """
+    declared = set(MCP_INHERITED) | set(MCP_REIMPLEMENTED) | set(MCP_WITHHELD)
+    actual = set(slack_registry.names())
+    if undeclared := actual - declared:
+        raise RuntimeError(
+            "Slack tool(s) not classified for the MCP surface: "
+            f"{sorted(undeclared)}. Add each to MCP_INHERITED (the default "
+            "-- parity), or to MCP_REIMPLEMENTED / MCP_WITHHELD with a "
+            "reason. See chat_mcp_tools.MCP_INHERITED."
+        )
+    if stale := declared - actual:
+        raise RuntimeError(
+            f"MCP surface declares tool(s) that no longer exist in "
+            f"slack_registry: {sorted(stale)}. They were probably renamed "
+            "or removed -- update the declaration."
+        )
+
+
+_assert_surface_declared()
 
 mcp_registry = slack_registry.clone()
+for _name in MCP_WITHHELD:
+    mcp_registry.remove(_name)
+# Reimplementations are registered below; drop the Slack version first
+# because ToolRegistry.register() refuses duplicate names.
+for _name in MCP_REIMPLEMENTED:
+    mcp_registry.remove(_name)
+
+
+class McpAskDataRoomInput(BaseModel):
+    job_id: int = Field(..., description="The job_id returned by build_data_room.")
+    requested_by_email: str = Field(
+        ...,
+        min_length=3, max_length=200,
+        description=(
+            "Ion Pacific email of the person asking, for an ownership "
+            "check against the job's original requester -- must match who "
+            "build_data_room was actually called for. ASK the user for "
+            "their email if you don't already know it from this "
+            "conversation; do not guess or default to yourself/someone "
+            "else."
+        ),
+    )
+    question: str = Field(
+        ...,
+        min_length=4, max_length=2000,
+        description="The question to retrieve relevant documents for.",
+    )
+
+
+@mcp_registry.tool(
+    "ask_data_room",
+    (
+        "Retrieve the most relevant documents from a completed data-room "
+        "build job so YOU can answer from them. Returns the top matches "
+        "with their summaries, a source list for citations, and the "
+        "grounding rules you must follow -- it does NOT return a "
+        "pre-written answer; you write it. Only call this once "
+        "check_data_room_build shows status='complete'. Requires the SAME "
+        "requested_by_email the job was built for; it will refuse another "
+        "person's job.\n\n"
+        "Answer ONLY from what this returns -- no outside knowledge. The "
+        "summaries are TRUNCATED previews, so when one looks relevant but "
+        "thin, call read_document on its document_id to read the full "
+        "body before concluding anything. These are retrieval hits, not "
+        "the whole room: never report a fact or document as absent just "
+        "because it isn't here -- use start_data_room_build_sweep for an "
+        "exhaustive per-document pass."
+    ),
+    McpAskDataRoomInput,
+    mutates_state=False,
+)
+def mcp_ask_data_room(inp: McpAskDataRoomInput, ctx: dict) -> ToolResult:
+    """MCP reimplementation -- see MCP_REIMPLEMENTED['ask_data_room'].
+
+    Access checks mirror the Slack tool exactly; only the answering step
+    differs (retrieval is returned instead of a server-side Claude answer).
+    """
+    from .data_room_build import DceUnavailable as _DceUnavailable, get_build_job
+    from .claude_data_room import (
+        ClaudeRoomError as _ClaudeRoomError,
+        retrieve_room_context_for_docs,
+    )
+    from .chat_slack.tools import _emails_match, _job_access_denied
+
+    try:
+        job = get_build_job(inp.job_id)
+    except ValueError as e:
+        return ToolResult(output=str(e))
+    except _DceUnavailable as e:
+        return ToolResult(output=f"Data room build unavailable: {e}")
+
+    if not _emails_match(job.requested_by_email, inp.requested_by_email):
+        return _job_access_denied(inp.job_id)
+
+    if job.status != "complete":
+        return ToolResult(output=(
+            f"job {inp.job_id} is not complete yet (status={job.status}, "
+            f"{job.docs_processed}/{job.docs_total} docs processed) -- "
+            "call check_data_room_build again shortly, or wait for the "
+            "Slack DM."
+        ))
+    if not job.doc_ids:
+        return ToolResult(output=(
+            f"job {inp.job_id}'s folder has no readable documents to search."
+        ))
+
+    try:
+        return ToolResult(
+            output=retrieve_room_context_for_docs(job.doc_ids, inp.question)
+        )
+    except _ClaudeRoomError as e:
+        return ToolResult(output=f"Data room retrieval error: {e}")
 
 
 @mcp_registry.tool(
