@@ -2,8 +2,11 @@
 
 Two modes, mirroring services/org_search.py:
 
-  * `trigram` -- pg_trgm + ILIKE prefix over document.name + path.
-                 Good for "find the doc whose filename contains X".
+  * `trigram` -- pg_trgm + ILIKE over document.name + path, plus
+                 term-coverage matching over document.summary. Good for
+                 "find the doc whose filename contains X", and the leg
+                 that has to carry content search when a document has no
+                 embedding yet.
   * `semantic` -- cosine over dealcloud.document_embedding (uses the
                   same text-embedding-3-small model orgs use; the
                   doc embed input is `name + summary`).
@@ -25,6 +28,7 @@ actually answer questions about.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Literal
 
 import psycopg2.extras
@@ -44,12 +48,163 @@ SearchMode = Literal["trigram", "semantic", "hybrid"]
 _RRF_K = 60
 
 
-# Trigram + ILIKE-prefix scoring over document.name + path. The
-# (room_id, query) inputs scope to a single data room's uploaded
-# docs -- without that filter we'd be searching the entire corpus of
-# ~280k docs which isn't what the Phase 4 user wants.
-_TRIGRAM_SQL = """
-WITH q AS (SELECT %s::text AS qtext, %s::int AS lim, %s::int AS room),
+# Scoring over document.name + path + summary. The (room_id, query) inputs
+# scope to a single data room's docs -- without that filter we'd be searching
+# the entire corpus of ~280k docs which isn't what the Phase 4 user wants.
+# ---------------------------------------------------------------------------
+# Content matching for the trigram leg
+# ---------------------------------------------------------------------------
+# The trigram leg used to match d.name and d.path ONLY -- never d.summary --
+# which made it a filename search wearing a content search's clothes. Whole-
+# string trigram similarity between a natural-language question and a
+# filename is near zero, so a multi-word query matched nothing: "valuation"
+# found a file called "409A Valuation Report" via LIKE, but "Series D
+# valuation" and "cap table" returned zero rows. Every real question is
+# multi-word.
+#
+# That only surfaced because it is the FALLBACK leg: hybrid search normally
+# leans on the semantic leg, and this leg is what answers when embeddings
+# are missing. In August 2026 embeddings were missing for ~80k documents
+# (the data-embed cron had been dead since May), so freshly built data rooms
+# fell through to filename-only matching and reported "the room's documents
+# don't appear to contain material related to this question" -- a false
+# negative. Embeddings are fixed separately; this makes the fallback
+# degrade gracefully instead of catastrophically.
+#
+# Term coverage rather than whole-phrase matching: count how many of the
+# query's significant words appear anywhere in name/path/summary, and score
+# by the fraction matched. Bracketed sentinel summaries ("[older version -
+# skipped]", "[timed_out]") are excluded from the haystack, matching the
+# platform-wide convention that a '[' prefix means "not real content" --
+# otherwise a query for "skipped" or "version" would match them.
+
+# Question scaffolding that would match almost everything and tells us
+# nothing about relevance. Deliberately small: this is not a general
+# stopword list, just the words that show up in how people phrase requests.
+_QUERY_STOPWORDS = frozenset("""
+a an and any are as at be been by can could did do does for from get give
+had has have how in into is it its list me much many of on or our over please
+provide show some tell that the their them then there these they this those to
+us was we were what when where which who why will with would you your derive
+summarise summarize summary find about across all also been being between both
+""".split())
+
+_MAX_QUERY_TERMS = 8
+
+
+def _query_terms(query: str) -> list[str]:
+    """Significant lowercase words from a query, for term-coverage matching.
+
+    Drops sub-3-character tokens and question scaffolding, dedupes, and caps
+    the count so a rambling question can't turn into a 40-term scan. Returns
+    [] when nothing significant survives, in which case the SQL's content
+    branch contributes no score and behaviour falls back to the original
+    phrase matching.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for token in re.split(r"[^0-9a-z]+", query.lower()):
+        if len(token) < 3 or token in _QUERY_STOPWORDS or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+        if len(out) >= _MAX_QUERY_TERMS:
+            break
+    return out
+
+
+# Already lowercased, so the term comparison can use LIKE rather than ILIKE.
+_HAYSTACK = """
+        lower(d.name || ' ' || COALESCE(d.path, '') || ' ' ||
+              CASE WHEN LEFT(COALESCE(d.summary, ''), 1) = '['
+                   THEN '' ELSE COALESCE(d.summary, '') END)
+"""
+
+# How many of the query's terms appear in this document's text.
+_TERM_HITS = f"""
+        (SELECT count(*) FROM unnest((SELECT qterms FROM q)) AS term
+          WHERE {_HAYSTACK} LIKE '%%' || term || '%%')
+"""
+
+# Require both terms of a two-or-more-term query, one for a single-term
+# query. Keeps the fallback precise: matching just "company" out of
+# "company valuation over time" is noise, and the semantic leg is the right
+# tool for loose association.
+_TERM_HITS_REQUIRED = """
+        LEAST(2, GREATEST(COALESCE(array_length((SELECT qterms FROM q), 1), 0), 1))
+"""
+
+# Content score band. Sits below the name-match bands (1.00 / 0.85 / 0.70) so
+# nothing that ranked before gets demoted, but above the typical value of the
+# weak 0.60 * trigram-similarity term (usually < 0.2 for a real question) --
+# a document whose summary contains every query term genuinely beats one
+# whose filename has 0.15 trigram similarity.
+_CONTENT_SCORE = f"""
+        0.55 * ({_TERM_HITS}::float
+                / NULLIF(array_length((SELECT qterms FROM q), 1), 0))
+"""
+
+def _score_case(content_on: bool = True) -> str:
+    """Score + match_kind columns for the trigram leg.
+
+    When content_on is False the content term is omitted from the SQL
+    entirely rather than gated by a runtime condition. The score is computed
+    for every row surviving the WHERE clause, so leaving a disabled
+    subquery in the expression still costs a per-row evaluation -- that
+    alone took corpus-wide search from 4.9s to 8.3s.
+    """
+    content = f",\n                 COALESCE({_CONTENT_SCORE}, 0)" if content_on else ""
+    kind = (
+        """CASE WHEN lower(d.name) LIKE '%%' || lower((SELECT qtext FROM q)) || '%%'
+                     OR dealcloud.similarity(d.name, (SELECT qtext FROM q)) > 0.3
+                THEN 'name' ELSE 'content' END::text"""
+        if content_on
+        else "'name'::text"
+    )
+    return f"""
+           CASE
+             WHEN lower(d.name) = lower((SELECT qtext FROM q))                THEN 1.00
+             WHEN lower(d.name) LIKE lower((SELECT qtext FROM q)) || '%%'     THEN 0.85
+             WHEN lower(d.name) LIKE '%%' || lower((SELECT qtext FROM q)) || '%%' THEN 0.70
+             ELSE GREATEST(
+                 0.60 * GREATEST(
+                     dealcloud.similarity(d.name, (SELECT qtext FROM q)),
+                     dealcloud.similarity(COALESCE(d.path, ''), (SELECT qtext FROM q))
+                 ){content}
+             )
+           END AS score,
+           {kind} AS match_kind
+"""
+
+
+_SCORE_CASE = _score_case()
+
+def _match_where(content_on: str = "TRUE") -> str:
+    """Row filter for the trigram leg.
+
+    `content_on` gates the term-coverage branch. It must only be enabled
+    where the candidate set is already BOUNDED (a room, or an explicit
+    doc_ids list, or a non-empty org filter applied first). The branch is a
+    correlated subquery over unnest(), so no index can serve it and Postgres
+    evaluates it per surviving row: on the full ~280k-document corpus that
+    measured 11s versus 0.6s over a 1,607-document room. Corpus-wide search
+    therefore stays the filename finder it is documented to be.
+    """
+    return f"""
+       lower(d.name) = lower((SELECT qtext FROM q))
+       OR lower(d.name) LIKE '%%' || lower((SELECT qtext FROM q)) || '%%'
+       OR dealcloud.similarity(d.name, (SELECT qtext FROM q)) > 0.3
+       OR dealcloud.similarity(COALESCE(d.path, ''), (SELECT qtext FROM q)) > 0.3
+       OR ({content_on} AND {_TERM_HITS} >= {_TERM_HITS_REQUIRED})
+"""
+
+
+_MATCH_WHERE = _match_where()
+
+
+_TRIGRAM_SQL = f"""
+WITH q AS (SELECT %s::text AS qtext, %s::int AS lim, %s::int AS room,
+                  %s::text[] AS qterms),
 hits AS (
     SELECT d.id,
            d.name,
@@ -57,16 +212,7 @@ hits AS (
            d.modified_at,
            d.web_url,
            LEFT(COALESCE(d.summary, ''), 200) AS summary_preview,
-           CASE
-             WHEN lower(d.name) = lower((SELECT qtext FROM q))                THEN 1.00
-             WHEN lower(d.name) LIKE lower((SELECT qtext FROM q)) || '%%'     THEN 0.85
-             WHEN lower(d.name) LIKE '%%' || lower((SELECT qtext FROM q)) || '%%' THEN 0.70
-             ELSE 0.60 * GREATEST(
-                 dealcloud.similarity(d.name, (SELECT qtext FROM q)),
-                 dealcloud.similarity(COALESCE(d.path, ''), (SELECT qtext FROM q))
-             )
-           END AS score,
-           'name'::text AS match_kind
+{_SCORE_CASE}
     FROM dealcloud.document d
     JOIN dealcloud.historical_data_room_entity hdre
       ON hdre.entity_id = d.id
@@ -82,10 +228,7 @@ hits AS (
        -- Claude reads dealcloud.document.summary directly without
        -- needing the doc to be in ToltIQ.
     WHERE
-       lower(d.name) = lower((SELECT qtext FROM q))
-       OR lower(d.name) LIKE '%%' || lower((SELECT qtext FROM q)) || '%%'
-       OR dealcloud.similarity(d.name, (SELECT qtext FROM q)) > 0.3
-       OR dealcloud.similarity(COALESCE(d.path, ''), (SELECT qtext FROM q)) > 0.3
+{_MATCH_WHERE}
 )
 SELECT id, name, path, modified_at, web_url, summary_preview, score, match_kind
   FROM hits
@@ -138,7 +281,7 @@ def _row_to_dict(r: dict) -> dict:
 def _trigram_rows(room_id: int, query: str, limit: int) -> list[dict]:
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(_TRIGRAM_SQL, (query, limit, room_id))
+        cur.execute(_TRIGRAM_SQL, (query, limit, room_id, _query_terms(query)))
         return list(cur.fetchall())
 
 
@@ -231,8 +374,24 @@ def search_documents(
 # a historical_data_room_entity. EXISTS subquery in the WHERE clause
 # avoids fan-out from a JOIN when one doc has multiple alias rows for
 # the same org.
-_TRIGRAM_SQL_ORG = """
-WITH q AS (SELECT %s::text AS qtext, %s::int AS lim),
+# Two org variants rather than one query with a "no orgs means everything"
+# branch, because the right plan differs. Scoped: narrow to the orgs' own
+# documents FIRST (MATERIALIZED, so the planner cannot hoist the expensive
+# content branch above the org filter), then match content over that small
+# set. Global: no bounded set exists, so content matching is off and this
+# stays a filename finder -- see _match_where.
+_TRIGRAM_SQL_ORG_SCOPED = f"""
+WITH q AS (SELECT %s::text AS qtext, %s::int AS lim, %s::text[] AS qterms),
+scoped AS MATERIALIZED (
+    SELECT d.id, d.name, d.path, d.modified_at, d.web_url, d.summary
+      FROM dealcloud.document d
+     WHERE EXISTS (
+             SELECT 1 FROM dealcloud.organization_entity oe
+              WHERE oe.entity_type = 'document'
+                AND oe.entity_id = d.id
+                AND oe.organization_id = ANY (%s::int[])
+           )
+),
 hits AS (
     SELECT d.id,
            d.name,
@@ -240,32 +399,33 @@ hits AS (
            d.modified_at,
            d.web_url,
            LEFT(COALESCE(d.summary, ''), 200) AS summary_preview,
-           CASE
-             WHEN lower(d.name) = lower((SELECT qtext FROM q))                THEN 1.00
-             WHEN lower(d.name) LIKE lower((SELECT qtext FROM q)) || '%%'     THEN 0.85
-             WHEN lower(d.name) LIKE '%%' || lower((SELECT qtext FROM q)) || '%%' THEN 0.70
-             ELSE 0.60 * GREATEST(
-                 dealcloud.similarity(d.name, (SELECT qtext FROM q)),
-                 dealcloud.similarity(COALESCE(d.path, ''), (SELECT qtext FROM q))
-             )
-           END AS score,
-           'name'::text AS match_kind
+{_SCORE_CASE}
+    FROM scoped d
+    WHERE
+       (
+{_MATCH_WHERE}
+       )
+)
+SELECT id, name, path, modified_at, web_url, summary_preview, score, match_kind
+  FROM hits
+ ORDER BY score DESC, name
+ LIMIT (SELECT lim FROM q)
+"""
+
+_TRIGRAM_SQL_ORG_GLOBAL = f"""
+WITH q AS (SELECT %s::text AS qtext, %s::int AS lim, %s::text[] AS qterms),
+hits AS (
+    SELECT d.id,
+           d.name,
+           d.path,
+           d.modified_at,
+           d.web_url,
+           LEFT(COALESCE(d.summary, ''), 200) AS summary_preview,
+{_score_case(content_on=False)}
     FROM dealcloud.document d
     WHERE
        (
-         lower(d.name) = lower((SELECT qtext FROM q))
-         OR lower(d.name) LIKE '%%' || lower((SELECT qtext FROM q)) || '%%'
-         OR dealcloud.similarity(d.name, (SELECT qtext FROM q)) > 0.3
-         OR dealcloud.similarity(COALESCE(d.path, ''), (SELECT qtext FROM q)) > 0.3
-       )
-       AND (
-         COALESCE(array_length(%s::int[], 1), 0) = 0
-         OR EXISTS (
-           SELECT 1 FROM dealcloud.organization_entity oe
-            WHERE oe.entity_type = 'document'
-              AND oe.entity_id = d.id
-              AND oe.organization_id = ANY (%s::int[])
-         )
+{_match_where("FALSE")}
        )
 )
 SELECT id, name, path, modified_at, web_url, summary_preview, score, match_kind
@@ -306,8 +466,15 @@ def _trigram_rows_org(org_ids: list[int], query: str, limit: int) -> list[dict]:
     orgs = org_ids or []
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        # orgs passed twice: once for the length guard, once for ANY()
-        cur.execute(_TRIGRAM_SQL_ORG, (query, limit, orgs, orgs))
+        if orgs:
+            cur.execute(
+                _TRIGRAM_SQL_ORG_SCOPED, (query, limit, _query_terms(query), orgs)
+            )
+        else:
+            # No org filter: unbounded corpus, so content matching is off.
+            cur.execute(
+                _TRIGRAM_SQL_ORG_GLOBAL, (query, limit, _query_terms(query))
+            )
         return list(cur.fetchall())
 
 
@@ -367,8 +534,8 @@ def search_documents_for_orgs(
 # historical_data_room_entity join or an organization_entity EXISTS check.
 # ---------------------------------------------------------------------------
 
-_TRIGRAM_SQL_DOCS = """
-WITH q AS (SELECT %s::text AS qtext, %s::int AS lim),
+_TRIGRAM_SQL_DOCS = f"""
+WITH q AS (SELECT %s::text AS qtext, %s::int AS lim, %s::text[] AS qterms),
 hits AS (
     SELECT d.id,
            d.name,
@@ -376,23 +543,11 @@ hits AS (
            d.modified_at,
            d.web_url,
            LEFT(COALESCE(d.summary, ''), 200) AS summary_preview,
-           CASE
-             WHEN lower(d.name) = lower((SELECT qtext FROM q))                THEN 1.00
-             WHEN lower(d.name) LIKE lower((SELECT qtext FROM q)) || '%%'     THEN 0.85
-             WHEN lower(d.name) LIKE '%%' || lower((SELECT qtext FROM q)) || '%%' THEN 0.70
-             ELSE 0.60 * GREATEST(
-                 dealcloud.similarity(d.name, (SELECT qtext FROM q)),
-                 dealcloud.similarity(COALESCE(d.path, ''), (SELECT qtext FROM q))
-             )
-           END AS score,
-           'name'::text AS match_kind
+{_SCORE_CASE}
     FROM dealcloud.document d
     WHERE d.id = ANY(%s::int[])
       AND (
-        lower(d.name) = lower((SELECT qtext FROM q))
-        OR lower(d.name) LIKE '%%' || lower((SELECT qtext FROM q)) || '%%'
-        OR dealcloud.similarity(d.name, (SELECT qtext FROM q)) > 0.3
-        OR dealcloud.similarity(COALESCE(d.path, ''), (SELECT qtext FROM q)) > 0.3
+{_MATCH_WHERE}
       )
 )
 SELECT id, name, path, modified_at, web_url, summary_preview, score, match_kind
@@ -424,7 +579,7 @@ SELECT d.id,
 def _trigram_rows_docs(doc_ids: list[int], query: str, limit: int) -> list[dict]:
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(_TRIGRAM_SQL_DOCS, (query, limit, doc_ids))
+        cur.execute(_TRIGRAM_SQL_DOCS, (query, limit, _query_terms(query), doc_ids))
         return list(cur.fetchall())
 
 
