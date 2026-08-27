@@ -61,6 +61,19 @@ class ScanBatchResult:
     facets_written: int
     docs_processed: int
     remaining: int
+    # dce runs scan-batch in two ordered phases and does at most one per
+    # call: 'reading_files' (documents nobody has opened yet get read --
+    # dce's scanner queue is priority-ordered and puts spreadsheets last,
+    # so a new folder's xlsx can otherwise wait months) then 'classifying'
+    # (the checklist matcher). Polling until remaining==0 still works
+    # unchanged; it now also waits out the read phase.
+    #
+    # Defaults cover an older dce that doesn't send these keys yet -- the
+    # two services deploy separately, so this must not require them to move
+    # together in either direction.
+    phase: str = "classifying"
+    docs_read: int = 0
+    docs_failed: int = 0
 
 
 def _call_dce(path: str, method: str = "GET", body: Optional[dict] = None) -> dict:
@@ -115,9 +128,15 @@ def scan_room_coverage_batch(room_id: int, batch_size: int = 25) -> ScanBatchRes
         raise DceUnavailable(resp.get("error", "unknown_dce_error"))
     return ScanBatchResult(
         room_id=room_id,
-        facets_written=resp["facets_written"],
-        docs_processed=resp["docs_processed"],
+        # .get with a default rather than []: the read phase writes no
+        # facets, and a dce older than that phase sends no phase keys.
+        # Neither should be a KeyError.
+        facets_written=resp.get("facets_written", 0),
+        docs_processed=resp.get("docs_processed", 0),
         remaining=resp["remaining"],
+        phase=resp.get("phase", "classifying"),
+        docs_read=resp.get("docs_read", 0),
+        docs_failed=resp.get("docs_failed", 0),
     )
 
 

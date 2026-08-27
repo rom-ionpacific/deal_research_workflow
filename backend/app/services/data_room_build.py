@@ -46,10 +46,15 @@ class BuildJobCreated:
     status: str
     # What dce actually did: 'created' a new room, 'refreshed' an existing
     # one because documents were added to the folder since last time, or
-    # 'reused' it untouched because nothing changed. A data room IS its
-    # folder, so repeat requests must not pile up duplicate rooms.
+    # 'reused' it untouched because nothing changed, or 'resummarized' it
+    # because its stored counts had gone stale. A data room IS its folder,
+    # so repeat requests must not pile up duplicate rooms.
     action: str = "created"
     new_docs: int = 0
+    # Everyone now subscribed to this folder's room, i.e. who will be DM'd
+    # when it finishes -- may include colleagues who asked earlier, since
+    # the room is shared per-folder rather than per-person.
+    subscriber_emails: list = field(default_factory=list)
 
 
 @dataclass
@@ -66,6 +71,17 @@ class BuildJobDetail:
     error: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    # Documents under the folder that still haven't been READ at all (dce
+    # opens these in a phase that runs before checklist classification).
+    # While this is > 0, docs_processed/docs_total is not the whole story --
+    # the classify counter legitimately sits still during that phase, so
+    # reporting only that ratio reads as a stalled build. None means an
+    # older dce that doesn't report it yet.
+    content_pending: Optional[int] = None
+    # Everyone who asked for this folder, i.e. who gets DM'd when it
+    # finishes. A room is per-FOLDER and shared; requested_by_email is only
+    # the original creator and is NOT an access control.
+    subscriber_emails: list = field(default_factory=list)
 
 
 def _call_dce(path: str, method: str = "GET", body: Optional[dict] = None) -> dict:
@@ -112,6 +128,7 @@ def create_build_job(folder_path: str, requested_by_email: str) -> BuildJobCreat
         # looks like a plain create, rather than breaking the tool.
         action=resp.get("action", "created"),
         new_docs=resp.get("new_docs", 0),
+        subscriber_emails=resp.get("subscriber_emails") or [],
     )
 
 
@@ -130,4 +147,6 @@ def get_build_job(job_id: int) -> BuildJobDetail:
         slack_notified_at=resp.get("slack_notified_at"),
         error=resp.get("error"),
         created_at=resp.get("created_at"), updated_at=resp.get("updated_at"),
+        content_pending=resp.get("content_pending"),
+        subscriber_emails=resp.get("subscriber_emails") or [],
     )

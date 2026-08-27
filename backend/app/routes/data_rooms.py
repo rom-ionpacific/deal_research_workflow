@@ -639,6 +639,13 @@ class ScanBatchResp(BaseModel):
     facets_written: int
     docs_processed: int
     remaining: int
+    # Which of dce's two ordered phases this call did: 'reading_files'
+    # (opening documents nobody has read yet) or 'classifying' (the
+    # checklist matcher). Lets the UI say "reading 3 spreadsheets" instead
+    # of showing a classify count that isn't moving yet.
+    phase: str = "classifying"
+    docs_read: int = 0
+    docs_failed: int = 0
 
 
 def _gate_room_access(room_id: int, user: UserCtx) -> None:
@@ -697,12 +704,19 @@ def post_data_room_coverage_scan_batch(
     room_id: int,
     user: UserCtx = Depends(require_user),
 ) -> ScanBatchResp:
-    """Process one bounded batch (~25 docs) of this room's not-yet-checked
-    documents against the checklist. Returns immediately with a progress
-    count -- the frontend polls this repeatedly (each call costs real
-    Gemini calls, so poll on user action / a visible 'Scan' state, not a
-    tight background loop) until `remaining` reaches 0, then re-fetches
-    /coverage."""
+    """Process one bounded batch of this room's pending scan work. Returns
+    immediately with a progress count -- the frontend polls this repeatedly
+    (each call costs real Gemini calls, so poll on user action / a visible
+    'Scan' state, not a tight background loop) until `remaining` reaches 0,
+    then re-fetches /coverage.
+
+    dce does at most one PHASE per call, in order: `reading_files` (~10
+    docs) opens documents nobody has read yet, then `classifying` (~25
+    docs) runs the checklist. Reading has to come first -- a document with
+    no extracted summary isn't a checklist candidate, so classifying first
+    would finish the room with its unread files excluded from coverage.
+    Check `phase` to label progress; the remaining==0 stop condition is
+    unchanged."""
     _gate_room_access(room_id, user)
     try:
         result = scan_room_coverage_batch(room_id)
@@ -711,6 +725,8 @@ def post_data_room_coverage_scan_batch(
     return ScanBatchResp(
         room_id=result.room_id, facets_written=result.facets_written,
         docs_processed=result.docs_processed, remaining=result.remaining,
+        phase=result.phase, docs_read=result.docs_read,
+        docs_failed=result.docs_failed,
     )
 
 
