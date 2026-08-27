@@ -2031,6 +2031,25 @@ class BuildDataRoomInput(BaseModel):
     ),
     BuildDataRoomInput,
 )
+def _dm_list(result, requester: str) -> str:
+    """Who will actually be DM'd when this room finishes.
+
+    A room is per-FOLDER and shared, so joining an existing one can mean
+    colleagues who asked earlier get the DM too. Naming only the current
+    requester would be wrong in that case, and silently CC'ing people
+    without saying so is worse -- the user should know who else hears about
+    it. Falls back to the requester alone for an older dce that doesn't
+    report subscribers.
+    """
+    subs = [e for e in (getattr(result, "subscriber_emails", None) or []) if e]
+    if not subs:
+        return requester
+    others = [e for e in subs if e.strip().lower() != requester.strip().lower()]
+    if not others:
+        return requester
+    return f"{requester} (and {', '.join(others)}, who also asked for this folder)"
+
+
 def build_data_room(inp: BuildDataRoomInput, ctx: dict) -> ToolResult:
     from ..data_room_build import DceUnavailable as _DceUnavailable, create_build_job
 
@@ -2054,7 +2073,8 @@ def build_data_room(inp: BuildDataRoomInput, ctx: dict) -> ToolResult:
             f"(job_id={result.job_id}) and started scanning the "
             f"{result.new_docs} document(s) added since it was last built "
             f"-- the rest is already done, so this should finish quickly. "
-            f"I'll DM {inp.requested_by_email} on Slack when it's updated."
+            f"I'll DM {_dm_list(result, inp.requested_by_email)} on Slack "
+            f"when it's updated."
         )
     elif result.action == "resummarized":
         note = (
@@ -2071,9 +2091,9 @@ def build_data_room(inp: BuildDataRoomInput, ctx: dict) -> ToolResult:
     else:
         note = (
             f"Build started for {result.docs_total} document(s) under "
-            f"'{inp.folder_path}'. I'll DM {inp.requested_by_email} on "
-            f"Slack when it's done (job_id={result.job_id}) -- no need to "
-            f"wait here."
+            f"'{inp.folder_path}'. I'll DM "
+            f"{_dm_list(result, inp.requested_by_email)} on Slack when it's "
+            f"done (job_id={result.job_id}) -- no need to wait here."
         )
 
     return ToolResult(output={
@@ -2082,37 +2102,24 @@ def build_data_room(inp: BuildDataRoomInput, ctx: dict) -> ToolResult:
         "status": result.status,
         "action": result.action,
         "new_docs": result.new_docs,
+        "subscriber_emails": result.subscriber_emails,
         "note": note,
     })
 
 
 class CheckDataRoomBuildInput(BaseModel):
     job_id: int = Field(..., description="The job_id returned by build_data_room.")
-    requested_by_email: str = Field(
-        ...,
-        min_length=3, max_length=200,
+    requested_by_email: str | None = Field(
+        default=None,
+        max_length=200,
         description=(
-            "Ion Pacific email of the person asking, for an ownership "
-            "check against the job's original requester -- must match "
-            "who build_data_room was actually called for. ASK the user "
-            "for their email if you don't already know it from this "
-            "conversation; do not guess or default to yourself/someone "
-            "else."
+            "Optional. Ion Pacific email of the person asking. A data room "
+            "is per-FOLDER and shared across the firm, so this is NOT an "
+            "ownership check and reads are never refused on it -- pass it "
+            "only if you already know it from this conversation, and never "
+            "guess."
         ),
     )
-
-
-def _emails_match(a: str, b: str) -> bool:
-    return a.strip().lower() == b.strip().lower()
-
-
-def _job_access_denied(job_id: int) -> ToolResult:
-    # Deliberately vague -- don't confirm/deny whether job_id even exists,
-    # or reveal who it actually belongs to, to someone who isn't its owner.
-    return ToolResult(output=(
-        f"job {job_id} does not belong to the email you provided, or "
-        "doesn't exist -- double-check the job_id and requested_by_email."
-    ))
 
 
 def _unreadable_note(summary: dict) -> str:
@@ -2193,8 +2200,8 @@ def _coverage_summary_note(summary: dict | None) -> str:
         "always report these by name when the user asks what's missing, "
         "not just the count). Use this if the user doesn't want to wait "
         "for the Slack DM, or wants a progress check on a long build. "
-        "Requires the SAME requested_by_email the job was built for -- "
-        "this will refuse to return another person's job."
+        "A data room is per-FOLDER and shared across the firm, so any "
+        "colleague can check on it."
     ),
     CheckDataRoomBuildInput,
     mutates_state=False,
@@ -2208,9 +2215,6 @@ def check_data_room_build(inp: CheckDataRoomBuildInput, ctx: dict) -> ToolResult
         return ToolResult(output=str(e))
     except _DceUnavailable as e:
         return ToolResult(output=f"Data room build unavailable: {e}")
-
-    if not _emails_match(job.requested_by_email, inp.requested_by_email):
-        return _job_access_denied(inp.job_id)
 
     if job.status == "complete":
         note = (
@@ -2251,16 +2255,15 @@ def check_data_room_build(inp: CheckDataRoomBuildInput, ctx: dict) -> ToolResult
 
 class AskDataRoomInput(BaseModel):
     job_id: int = Field(..., description="The job_id returned by build_data_room.")
-    requested_by_email: str = Field(
-        ...,
-        min_length=3, max_length=200,
+    requested_by_email: str | None = Field(
+        default=None,
+        max_length=200,
         description=(
-            "Ion Pacific email of the person asking, for an ownership "
-            "check against the job's original requester -- must match "
-            "who build_data_room was actually called for. ASK the user "
-            "for their email if you don't already know it from this "
-            "conversation; do not guess or default to yourself/someone "
-            "else."
+            "Optional. Ion Pacific email of the person asking. A data room "
+            "is per-FOLDER and shared across the firm, so this is NOT an "
+            "ownership check and reads are never refused on it -- pass it "
+            "only if you already know it from this conversation, and never "
+            "guess."
         ),
     )
     question: str = Field(
@@ -2287,9 +2290,8 @@ class AskDataRoomInput(BaseModel):
         "independent, but an incomplete room may be missing relevant "
         "documents entirely). Prefer this over answering from the "
         "coverage summary alone -- it does real retrieval against the "
-        "room's content. Requires the SAME requested_by_email the job "
-        "was built for -- this will refuse to answer against another "
-        "person's job."
+        "room's content. A data room is per-FOLDER and shared across the "
+        "firm, so any colleague can ask against it."
     ),
     AskDataRoomInput,
     mutates_state=False,
@@ -2304,9 +2306,6 @@ def ask_data_room(inp: AskDataRoomInput, ctx: dict) -> ToolResult:
         return ToolResult(output=str(e))
     except _DceUnavailable as e:
         return ToolResult(output=f"Data room build unavailable: {e}")
-
-    if not _emails_match(job.requested_by_email, inp.requested_by_email):
-        return _job_access_denied(inp.job_id)
 
     if job.status != "complete":
         return ToolResult(output=(
@@ -2330,16 +2329,15 @@ def ask_data_room(inp: AskDataRoomInput, ctx: dict) -> ToolResult:
 
 class StartDataRoomBuildSweepInput(BaseModel):
     job_id: int = Field(..., description="The job_id returned by build_data_room.")
-    requested_by_email: str = Field(
-        ...,
-        min_length=3, max_length=200,
+    requested_by_email: str | None = Field(
+        default=None,
+        max_length=200,
         description=(
-            "Ion Pacific email of the person asking, for an ownership "
-            "check against the job's original requester -- must match "
-            "who build_data_room was actually called for. ASK the user "
-            "for their email if you don't already know it from this "
-            "conversation; do not guess or default to yourself/someone "
-            "else."
+            "Optional. Ion Pacific email of the person asking. A data room "
+            "is per-FOLDER and shared across the firm, so this is NOT an "
+            "ownership check and reads are never refused on it -- pass it "
+            "only if you already know it from this conversation, and never "
+            "guess."
         ),
     )
     question: str = Field(
@@ -2369,9 +2367,9 @@ class StartDataRoomBuildSweepInput(BaseModel):
         "sweep_id and docs_total; does NOT process any documents yet -- "
         "call check_data_room_build_sweep repeatedly to make progress and "
         "see results. Tell the user this will take a few minutes for a "
-        "large folder and you'll report back as it progresses. Requires "
-        "the SAME requested_by_email the job was built for -- this will "
-        "refuse to sweep another person's job."
+        "large folder and you'll report back as it progresses. A data "
+        "room is per-FOLDER and shared across the firm, so any colleague "
+        "can sweep it."
     ),
     StartDataRoomBuildSweepInput,
 )
@@ -2389,14 +2387,16 @@ def start_data_room_build_sweep(inp: StartDataRoomBuildSweepInput, ctx: dict) ->
     except _DceUnavailable as e:
         return ToolResult(output=f"Data room build unavailable: {e}")
 
-    if not _emails_match(job.requested_by_email, inp.requested_by_email):
-        return _job_access_denied(inp.job_id)
-
     if not job.doc_ids:
         return ToolResult(output=f"job {inp.job_id}'s folder has no readable documents to sweep.")
 
+    # Attribute the sweep to whoever ran it when we know that, falling back
+    # to the room's creator -- a shared room means those are often different
+    # people, and recording the creator for someone else's sweep would
+    # misattribute it in the audit trail.
+    created_by = inp.requested_by_email or job.requested_by_email
     try:
-        result = _start_sweep_for_docs(job.doc_ids, inp.question, job.requested_by_email)
+        result = _start_sweep_for_docs(job.doc_ids, inp.question, created_by)
     except _SweepDceUnavailable as e:
         return ToolResult(output=f"Sweep unavailable: {e}")
     return ToolResult(output={

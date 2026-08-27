@@ -329,16 +329,15 @@ for _name in MCP_REIMPLEMENTED:
 
 class McpAskDataRoomInput(BaseModel):
     job_id: int = Field(..., description="The job_id returned by build_data_room.")
-    requested_by_email: str = Field(
-        ...,
-        min_length=3, max_length=200,
+    requested_by_email: str | None = Field(
+        default=None,
+        max_length=200,
         description=(
-            "Ion Pacific email of the person asking, for an ownership "
-            "check against the job's original requester -- must match who "
-            "build_data_room was actually called for. ASK the user for "
-            "their email if you don't already know it from this "
-            "conversation; do not guess or default to yourself/someone "
-            "else."
+            "Optional. Ion Pacific email of the person asking. A data room "
+            "is per-FOLDER and shared across the firm, so this is NOT an "
+            "ownership check and reads are never refused on it -- pass it "
+            "only if you already know it from this conversation, and never "
+            "guess."
         ),
     )
     question: str = Field(
@@ -356,9 +355,9 @@ class McpAskDataRoomInput(BaseModel):
         "with their summaries, a source list for citations, and the "
         "grounding rules you must follow -- it does NOT return a "
         "pre-written answer; you write it. Only call this once "
-        "check_data_room_build shows status='complete'. Requires the SAME "
-        "requested_by_email the job was built for; it will refuse another "
-        "person's job.\n\n"
+        "check_data_room_build shows status='complete'. A data room is "
+        "per-FOLDER and shared across the firm, so any colleague can ask "
+        "against it.\n\n"
         "Answer ONLY from what this returns -- no outside knowledge. The "
         "summaries are TRUNCATED previews, so when one looks relevant but "
         "thin, call read_document on its document_id to read the full "
@@ -377,25 +376,24 @@ class McpAskDataRoomInput(BaseModel):
 def mcp_ask_data_room(inp: McpAskDataRoomInput, ctx: dict) -> ToolResult:
     """MCP reimplementation -- see MCP_REIMPLEMENTED['ask_data_room'].
 
-    Access checks mirror the Slack tool exactly; only the answering step
-    differs (retrieval is returned instead of a server-side Claude answer).
+    Mirrors the Slack tool exactly; only the answering step differs
+    (retrieval is returned instead of a server-side Claude answer). There is
+    no per-job ownership check: a room is per-FOLDER and shared, and the
+    caller is already authenticated by the MCP transport. SharePoint remains
+    the real access boundary -- dce does not model per-user document
+    permissions.
     """
     from .data_room_build import DceUnavailable as _DceUnavailable, get_build_job
     from .claude_data_room import (
         ClaudeRoomError as _ClaudeRoomError,
         retrieve_room_context_for_docs,
     )
-    from .chat_slack.tools import _emails_match, _job_access_denied
-
     try:
         job = get_build_job(inp.job_id)
     except ValueError as e:
         return ToolResult(output=str(e))
     except _DceUnavailable as e:
         return ToolResult(output=f"Data room build unavailable: {e}")
-
-    if not _emails_match(job.requested_by_email, inp.requested_by_email):
-        return _job_access_denied(inp.job_id)
 
     if job.status != "complete":
         return ToolResult(output=(

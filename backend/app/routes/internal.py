@@ -86,26 +86,52 @@ async def notify_data_room_build_job(
     criteria names (the "what's missing" part of the original ask, not
     just counts).
 
-    Body: {requested_by_email: str, folder_path: str,
-           status: 'complete'|'failed', docs_total: int,
+    A data room is per-FOLDER and shared, so this DMs every subscriber --
+    everyone who asked for that folder -- not only whoever created the row.
+
+    Body: {subscriber_emails: list[str], requested_by_email: str,
+           folder_path: str, status: 'complete'|'failed', docs_total: int,
            coverage_summary: dict|None, error: str|None}
+
+    subscriber_emails is preferred; requested_by_email is the fallback for
+    an older dce that predates per-folder rooms (the services deploy
+    separately, so this must keep working in both directions).
 
     Auth: X-Internal-Secret header must match settings.dce_internal_secret.
     """
     _check_internal_secret(x_internal_secret)
 
     body = await request.json()
-    email = body.get("requested_by_email")
     folder_path = body.get("folder_path") or "(unknown folder)"
     status = body.get("status")
     docs_total = body.get("docs_total") or 0
     coverage_summary = body.get("coverage_summary") or {}
     error = body.get("error")
 
-    if not email or status not in ("complete", "failed"):
+    # Case-insensitive dedupe, preserving first-seen spelling: dce dedupes on
+    # write, but the requested_by_email fallback can reintroduce a duplicate
+    # and nobody should get the same DM twice.
+    raw = body.get("subscriber_emails")
+    if not isinstance(raw, list) or not raw:
+        raw = [body.get("requested_by_email")]
+    seen: set[str] = set()
+    emails: list[str] = []
+    for e in raw:
+        if not isinstance(e, str) or not e.strip():
+            continue
+        if e.strip().lower() in seen:
+            continue
+        seen.add(e.strip().lower())
+        emails.append(e.strip())
+
+    if not emails or status not in ("complete", "failed"):
         raise HTTPException(
             status_code=400,
-            detail="requested_by_email and status ('complete'|'failed') are required",
+            detail=(
+                "at least one recipient (subscriber_emails or "
+                "requested_by_email) and status ('complete'|'failed') "
+                "are required"
+            ),
         )
 
     if status == "complete":
@@ -132,9 +158,23 @@ async def notify_data_room_build_job(
             f"Error: {error or 'unknown error'}"
         )
 
-    sent = notify_slack_dm(email, text)
+    # One failed DM must not stop the others -- a stale address or a
+    # Slack-side error for one subscriber shouldn't silently deprive the rest
+    # of the room's result. Report per-recipient so dce's log (and a human
+    # reading it) can tell a partial delivery from a total failure.
+    results: dict[str, bool] = {}
+    for e in emails:
+        try:
+            results[e] = bool(notify_slack_dm(e, text))
+        except Exception:  # noqa: BLE001 -- best-effort, keep going
+            logger.exception("internal notify: DM failed for %s (job %d)", e, job_id)
+            results[e] = False
+
+    sent_count = sum(1 for ok in results.values() if ok)
     logger.info(
-        "internal notify: job=%d status=%s email=%s sent=%s",
-        job_id, status, email, sent,
+        "internal notify: job=%d status=%s recipients=%d sent=%d detail=%s",
+        job_id, status, len(emails), sent_count, results,
     )
-    return {"ok": True, "sent": sent}
+    # `sent` kept as a bool for any existing reader: true if ANYONE got it.
+    return {"ok": True, "sent": sent_count > 0,
+            "sent_count": sent_count, "recipients": results}
