@@ -2012,8 +2012,11 @@ class BuildDataRoomInput(BaseModel):
         "IS its folder, so if one already exists this reuses it -- scanning "
         "only documents added since the last build, or doing nothing at all "
         "if the folder is unchanged. Check the returned `action` "
-        "('created' / 'refreshed' / 'reused') and tell the user which "
-        "happened; never imply a fresh build when the room already existed. "
+        "('created' / 'refreshed' / 'resummarized' / 'reused') and tell the "
+        "user which happened; never imply a fresh build when the room "
+        "already existed, and never say 'nothing changed' on "
+        "'resummarized' -- that means the stored counts were stale and have "
+        "just been corrected, so quote the new ones. "
         "Runs the same "
         "Found/Unconfirmed/Candidate-Gap engine the Coverage tab uses, but "
         "as a persistent background job drained by a cron over several "
@@ -2052,6 +2055,18 @@ def build_data_room(inp: BuildDataRoomInput, ctx: dict) -> ToolResult:
             f"{result.new_docs} document(s) added since it was last built "
             f"-- the rest is already done, so this should finish quickly. "
             f"I'll DM {inp.requested_by_email} on Slack when it's updated."
+        )
+    elif result.action == "resummarized":
+        note = (
+            f"The data room for '{inp.folder_path}' (job_id="
+            f"{result.job_id}) already existed and is complete, but its "
+            f"stored coverage numbers were out of date -- documents in the "
+            f"folder had become readable since it was last summarised, so "
+            f"they were missing from its counts. The summary has been "
+            f"recomputed and now covers "
+            f"{result.docs_total} document(s). Nothing needed re-scanning. "
+            f"Report the UPDATED numbers from check_data_room_build, and do "
+            f"NOT tell the user nothing had changed -- the counts did."
         )
     else:
         note = (
