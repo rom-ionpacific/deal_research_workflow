@@ -66,6 +66,13 @@ class BuildJobDetail:
     error: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    # Documents under the folder that still haven't been READ at all (dce
+    # opens these in a phase that runs before checklist classification).
+    # While this is > 0, docs_processed/docs_total is not the whole story --
+    # the classify counter legitimately sits still during that phase, so
+    # reporting only that ratio reads as a stalled build. None means an
+    # older dce that doesn't report it yet.
+    content_pending: Optional[int] = None
 
 
 def _call_dce(path: str, method: str = "GET", body: Optional[dict] = None) -> dict:
@@ -130,4 +137,5 @@ def get_build_job(job_id: int) -> BuildJobDetail:
         slack_notified_at=resp.get("slack_notified_at"),
         error=resp.get("error"),
         created_at=resp.get("created_at"), updated_at=resp.get("updated_at"),
+        content_pending=resp.get("content_pending"),
     )

@@ -232,6 +232,10 @@ function CriterionRow({ roomId, c }: { roomId: number; c: CoverageCriterion }) {
 export default function CoverageSection({ roomId }: { roomId: number }) {
   const qc = useQueryClient();
   const [scanning, setScanning] = useState(false);
+  const [scanPhase, setScanPhase] = useState<
+    "reading_files" | "classifying"
+  >("classifying");
+  const [docsRead, setDocsRead] = useState(0);
   const [scanError, setScanError] = useState<string | null>(null);
   const [collapsedCats, setCollapsedCats] = useState<Set<string>>(new Set());
 
@@ -243,6 +247,7 @@ export default function CoverageSection({ roomId }: { roomId: number }) {
   const runScan = async () => {
     setScanning(true);
     setScanError(null);
+    setDocsRead(0);
     try {
       // Drain in a polled loop -- each call is one bounded, real batch on
       // dce (~25 docs, real Gemini calls, a few seconds each). Deliberately
@@ -251,6 +256,13 @@ export default function CoverageSection({ roomId }: { roomId: number }) {
       // accurate to what's actually happening.
       for (;;) {
         const res = await api.scanDataRoomCoverageBatch(roomId);
+        // A room with unread documents spends its first calls in dce's
+        // 'reading_files' phase. Label that distinctly: it can take a
+        // while, and a generic "Scanning…" would look stuck.
+        setScanPhase(res.phase);
+        if (res.phase === "reading_files") {
+          setDocsRead((n) => n + res.docs_read);
+        }
         if (res.remaining <= 0) break;
       }
       await qc.invalidateQueries({ queryKey: ["data-room-coverage", roomId] });
@@ -321,7 +333,11 @@ export default function CoverageSection({ roomId }: { roomId: number }) {
             disabled={scanning}
             className="text-xs px-3 py-1 rounded-md bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
           >
-            {scanning ? "Scanning…" : "Scan for coverage"}
+            {!scanning
+              ? "Scan for coverage"
+              : scanPhase === "reading_files"
+                ? `Reading documents${docsRead > 0 ? ` (${docsRead})` : ""}…`
+                : "Scanning…"}
           </button>
         )}
       </div>

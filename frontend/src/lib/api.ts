@@ -699,16 +699,26 @@ export const api = {
         (dealType ? `?deal_type=${dealType}` : ""),
     ),
 
-  // Processes one bounded batch (~25 docs) of the room's not-yet-checked
-  // documents against the checklist and returns immediately. Poll this
-  // (on a visible "Scanning…" UI state, not silently) until remaining
-  // reaches 0, then refetch getDataRoomCoverage.
+  // Processes one bounded batch of the room's pending scan work and returns
+  // immediately. Poll this (on a visible "Scanning…" UI state, not
+  // silently) until remaining reaches 0, then refetch
+  // getDataRoomCoverage.
+  //
+  // One phase per call, in order: "reading_files" opens documents nobody
+  // has read yet (~10/call), then "classifying" runs the checklist
+  // (~25/call). The remaining<=0 stop condition covers whichever phase is
+  // active, so polling logic needs no change -- `phase` is for labelling
+  // progress honestly, since a classify count sits at 0 while files are
+  // still being read.
   scanDataRoomCoverageBatch: (roomId: number) =>
     request<{
       room_id: number;
       facets_written: number;
       docs_processed: number;
       remaining: number;
+      phase: "reading_files" | "classifying";
+      docs_read: number;
+      docs_failed: number;
     }>(`/api/v1/data-rooms/${roomId}/coverage/scan-batch`, { method: "POST" }),
 
   // Human-review-gate action: confirm a Candidate Gap as real, or dismiss

@@ -2204,6 +2204,17 @@ def check_data_room_build(inp: CheckDataRoomBuildInput, ctx: dict) -> ToolResult
         )
     elif job.status == "failed":
         note = f"status=failed. {job.error or 'no error detail recorded.'}"
+    elif job.content_pending:
+        # Phase 1: dce is still OPENING files (documents its scanner queue
+        # had never reached -- typically spreadsheets, which the queue ranks
+        # last). Say so instead of reporting a classify ratio that cannot
+        # move yet; "0/29 docs processed" on a healthy build looks stalled.
+        note = (
+            f"status={job.status}, still reading {job.content_pending} "
+            f"document(s) that had never been opened before "
+            f"(classification starts once they're read). Do NOT report "
+            f"coverage or document counts yet -- they will change."
+        )
     else:
         note = (
             f"status={job.status}, {job.docs_processed}/{job.docs_total} "
@@ -2216,6 +2227,7 @@ def check_data_room_build(inp: CheckDataRoomBuildInput, ctx: dict) -> ToolResult
         "status": job.status,
         "docs_total": job.docs_total,
         "docs_processed": job.docs_processed,
+        "content_pending": job.content_pending,
         "error": job.error,
         "coverage_summary": job.coverage_summary,
         "note": note,
