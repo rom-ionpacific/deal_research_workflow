@@ -365,7 +365,11 @@ class McpAskDataRoomInput(BaseModel):
         "body before concluding anything. These are retrieval hits, not "
         "the whole room: never report a fact or document as absent just "
         "because it isn't here -- use start_data_room_build_sweep for an "
-        "exhaustive per-document pass."
+        "exhaustive per-document pass.\n\n"
+        "Every document comes with a Link. Whenever you name a specific "
+        "document, render it as a markdown link -- [document name](link) -- "
+        "never a raw doc_id and never a bare URL. The returned instructions "
+        "restate this; follow them."
     ),
     McpAskDataRoomInput,
     mutates_state=False,

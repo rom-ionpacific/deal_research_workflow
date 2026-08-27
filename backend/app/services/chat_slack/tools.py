@@ -106,6 +106,22 @@ class DocumentIdInput(BaseModel):
 
 slack_registry = ToolRegistry()
 
+# Appended to every tool description that hands back documents. Without it
+# the model cites documents as "doc_id=43012" or a bare filename -- the
+# doc_id convention exists only because the drw FRONTEND rewrites
+# `[doc_id=N]` markers into clickable chips, which no chat surface does.
+# Markdown is the single format asked for: Claude.ai renders it natively, and
+# chat_slack/orchestrator.py now runs model prose through _md_to_slack, which
+# turns `[label](url)` into Slack's `<url|label>`.
+_LINK_RULE = (
+    " CITING: whenever you name a specific document to the user, render it "
+    "as a markdown link to its web_url -- [document name](web_url). Never "
+    "show a raw document_id and never paste a bare URL; both are noise to "
+    "the reader. If a document has no web_url, give its path instead and "
+    "say it isn't linkable -- never guess a URL."
+)
+
+
 
 @slack_registry.tool(
     "find_organizations",
@@ -295,6 +311,7 @@ def get_org_dossier(inp: OrgIdInput, ctx: dict) -> ToolResult:
         "get_org_dossier (which lists recent doc ids and names). "
         "If the summary doesn't answer the question, say so -- do NOT "
         "speculate about the doc's full contents."
+        + _LINK_RULE
     ),
     DocumentIdInput,
 )
@@ -411,6 +428,7 @@ class ReadDocumentInput(BaseModel):
         "canonical org_ids from bundle_via_supersede; empty list "
         "searches the whole 280k-doc corpus (avoid unless org "
         "search has failed). Read-only."
+        + _LINK_RULE
     ),
     SearchDocumentsInput,
 )
@@ -443,6 +461,7 @@ def search_documents(inp: SearchDocumentsInput, ctx: dict) -> ToolResult:
         "document_id (preferred), document_name, or web_url. "
         "For long docs (PPM, LPA, IC memo) pass `query` to filter "
         "the returned body to paragraphs about a specific topic."
+        + _LINK_RULE
     ),
     ReadDocumentInput,
 )
@@ -2090,17 +2109,38 @@ def _unreadable_note(summary: dict) -> str:
     n = summary.get("docs_unreadable") or 0
     if not n:
         return ""
-    names = summary.get("unreadable_doc_names") or []
-    listed = "; ".join(names)
+    # Prefer the rich form (name + path + web_url) so each unread file can be
+    # rendered as a clickable link; fall back to names-only for a
+    # coverage_summary written before dce started emitting unreadable_docs.
+    docs = summary.get("unreadable_docs")
+    if docs:
+        listed = "; ".join(
+            f"{d.get('name')} [link: {d.get('web_url')}]" if d.get("web_url")
+            else f"{d.get('name')} [no link; path: {d.get('path') or 'unknown'}]"
+            for d in docs
+        )
+        count_listed = len(docs)
+        link_rule = (
+            " When you name any of these files to the user, make it a "
+            "clickable markdown link to its link value -- [filename](url) -- "
+            "never a bare filename the reader has to go hunting for, and "
+            "never a raw URL. For a file with no link, give its path instead "
+            "and say it has no link; do not invent one."
+        )
+    else:
+        names = summary.get("unreadable_doc_names") or []
+        listed = "; ".join(names)
+        count_listed = len(names)
+        link_rule = ""
     if summary.get("unreadable_doc_names_truncated"):
-        listed += f"; ...and {n - len(names)} more"
+        listed += f"; ...and {n - count_listed} more"
     return (
         f" IMPORTANT: {n} of {summary.get('docs_in_folder')} documents could "
         f"NOT be read by the scanner (only {summary.get('docs_scanned')} were "
         f"scanned) -- spreadsheets are rarely machine-readable here. Tell the "
         f"user the gap list is NOT YET EVIDENCED rather than confirmed "
         f"missing, and name these unread files as the place the answer may "
-        f"actually live: {listed}."
+        f"actually live: {listed}.{link_rule}"
     )
 
 
