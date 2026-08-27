@@ -45,7 +45,7 @@ from ...config import settings
 from ...db import get_conn
 from ..chat_lib import run_chat_turn
 from ..slack.client import client as slack_client
-from .tools import slack_registry
+from .tools import _md_to_slack, slack_registry
 
 log = logging.getLogger(__name__)
 
@@ -289,7 +289,17 @@ async def _run_loop(
             full = "".join(text_buffer).strip()
             text_buffer.clear()
             if full:
-                _post_long_section(channel_id, thread_ts, full)
+                # The model writes standard markdown, which Slack renders
+                # literally -- `**bold**` came out with the asterisks
+                # showing, and `[label](url)` as raw brackets. Convert to
+                # mrkdwn, the same way the one-pager's stored markdown
+                # already is. This matters now that tools ask the model to
+                # cite documents as markdown links: one instruction has to
+                # render correctly on both the Slack and Claude.ai
+                # surfaces, since they share the tool registry. The
+                # post_markdown branch below is NOT converted -- its tool
+                # hands us mrkdwn already.
+                _post_long_section(channel_id, thread_ts, _md_to_slack(full))
         elif ev_type == "post_markdown":
             # A tool (e.g. get_deal_one_pager) handed us pre-formatted
             # Slack mrkdwn to post directly, bypassing the model so a

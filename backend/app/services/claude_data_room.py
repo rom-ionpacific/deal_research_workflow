@@ -279,14 +279,23 @@ _NO_CONTENT_MARKER = (
 )
 
 
-def _format_doc_context(docs: list[dict]) -> str:
+def _format_doc_context(docs: list[dict], *, with_links: bool = False) -> str:
     """Render retrieved docs as a single text block for the system
     prompt. doc_id is the citation handle; name + summary_preview is
     the content. Order is retrieval order (most relevant first).
 
     Documents with no readable summary are rendered with an explicit
     CONTENT UNAVAILABLE marker rather than a bare filename -- see
-    _NO_CONTENT_MARKER."""
+    _NO_CONTENT_MARKER.
+
+    with_links adds each document's web_url. Off by default because the
+    drw frontend turns `[doc_id=N]` markers into clickable `#N` chips
+    itself (_render_citations), so the server-side path neither needs nor
+    wants raw URLs in the prose. A chat surface that renders plain
+    markdown -- Claude.ai via MCP -- has no such post-processing, and
+    `doc_id=43012` is meaningless to the reader there, so it gets the URL
+    and is told to link the document name.
+    """
     if not docs:
         # Don't tell the model "no documents matched the query" -- it
         # paraphrases that back to the user and it sounds like a
@@ -309,6 +318,16 @@ def _format_doc_context(docs: list[dict]) -> str:
         lines.append(f"\n[doc_id={doc_id}] {name}")
         if path and path != name:
             lines.append(f"    Path: {path}")
+        if with_links:
+            url = (d.get("web_url") or "").strip()
+            # Say so explicitly when a document has no URL, so the model
+            # reports it as unlinkable rather than inventing a plausible
+            # SharePoint address for it.
+            lines.append(
+                f"    Link: {url}" if url
+                else "    Link: NONE -- this document has no web_url; refer to "
+                     "it by name and path, and do NOT invent a URL."
+            )
         if _has_readable_summary(summary):
             lines.append(f"    Summary: {summary}")
         else:
@@ -624,7 +643,23 @@ _CLIENT_GROUNDING_RULES = (
     "    timing -- they're limited to operating updates and capital "
     "    structure\"), not a search-failure report (\"no documents were "
     "    returned\").\n"
-    "  - Cite documents inline as [doc_id=N] using the ids below."
+    "\n"
+    "CITING DOCUMENTS -- every time you reference a specific document, make "
+    "it a clickable markdown link to its Link value: "
+    "[Board Consent (409A Valuation) - 27MAR2026.pdf](https://...). Rules:\n"
+    "  - Link the document's NAME as the link text. Never write a raw "
+    "    doc_id, an id number, or the bare URL -- \"doc_id=43012\" and a "
+    "    naked SharePoint URL are both meaningless to the reader.\n"
+    "  - Do this for EVERY specific document you name, including ones you "
+    "    only mention as unreadable or as the likely home of a missing "
+    "    figure. A file the reader then has to hunt for in SharePoint is "
+    "    barely more useful than not naming it.\n"
+    "  - A bare filename is often ambiguous (several folders here hold "
+    "    files with the same name), so when the folder disambiguates or "
+    "    matters, say it in the prose -- e.g. \"the March 2026 409A report "
+    "    (VDR/Company/Valuations)\" -- in addition to linking.\n"
+    "  - If a document's Link is NONE, name it and give its path, and say "
+    "    plainly that it has no link. Never construct or guess a URL."
 )
 
 
@@ -676,7 +711,7 @@ def retrieve_room_context_for_docs(
     return {
         "question": question,
         "instructions": subject_block + _CLIENT_GROUNDING_RULES,
-        "documents": _format_doc_context(docs),
+        "documents": _format_doc_context(docs, with_links=True),
         "retrieved": len(docs),
         "retrieval_limit": RETRIEVAL_LIMIT,
         "searched_documents": len(doc_ids),
