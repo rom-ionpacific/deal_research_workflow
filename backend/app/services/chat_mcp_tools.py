@@ -22,6 +22,41 @@ and the MCP server (mcp/server.py). Registering write tools there would
 silently hand DealCloud-write ability to anyone who can DM Todd. Instead
 `mcp_registry` is a clone with these two tools added on top, and only the
 MCP server imports it.
+
+## Writing tool descriptions: what may and may not go in one
+
+Tool descriptions and input schemas are CACHED PER USER by claude.ai, and
+there is no way for us to invalidate that cache. Each person has to use
+Connectors -> ... -> "Refresh tools list" themselves, and until they do they
+are steering on whatever text was current when they connected. The MCP
+`tools.listChanged` notification does not help: our HTTP transport runs
+`stateless=True` (no session to push down), `build_server()` snapshots the
+tool list at process start, and the list only ever changes on redeploy --
+which restarts the process. There is never a live session whose tool list
+changed.
+
+Tool RESPONSES are never cached. So:
+
+  * Description = what the tool IS and when to reach for it. Stable facts
+    only.
+  * Response (the `note` field every tool here returns) = anything that can
+    change: current policy, counts, "don't quote X yet".
+
+Concretely, keep OUT of a description:
+  - access/permission claims ("requires the same email", "will refuse
+    another person's job", or the inverse "shared across the firm"). Be
+    SILENT on policy -- silence cannot go stale, whereas any assertion can,
+    in either direction.
+  - specific magnitudes that are really server constants (batch sizes, SQL
+    LIMITs, row counts, model names). State the RELATIONSHIP instead ("a
+    capped handful -- use X for the full list"), which keeps the steering
+    without a number that rots.
+
+This is not hypothetical. A description promising "Requires the SAME
+requested_by_email ... will refuse another person's job" outlived the gate
+it described; the server had stopped refusing, but every user who had not
+refreshed still had a tool that told the model to demand an email and expect
+a refusal.
 """
 from __future__ import annotations
 
@@ -333,11 +368,9 @@ class McpAskDataRoomInput(BaseModel):
         default=None,
         max_length=200,
         description=(
-            "Optional. Ion Pacific email of the person asking. A data room "
-            "is per-FOLDER and shared across the firm, so this is NOT an "
-            "ownership check and reads are never refused on it -- pass it "
-            "only if you already know it from this conversation, and never "
-            "guess."
+            "Optional. Ion Pacific email of the person asking, if you "
+            "already know it from this conversation. Never guess it, and "
+            "never ask the user for it just to make this call."
         ),
     )
     question: str = Field(
@@ -355,9 +388,7 @@ class McpAskDataRoomInput(BaseModel):
         "with their summaries, a source list for citations, and the "
         "grounding rules you must follow -- it does NOT return a "
         "pre-written answer; you write it. Only call this once "
-        "check_data_room_build shows status='complete'. A data room is "
-        "per-FOLDER and shared across the firm, so any colleague can ask "
-        "against it.\n\n"
+        "check_data_room_build shows status='complete'.\n\n"
         "Answer ONLY from what this returns -- no outside knowledge. The "
         "summaries are TRUNCATED previews, so when one looks relevant but "
         "thin, call read_document on its document_id to read the full "

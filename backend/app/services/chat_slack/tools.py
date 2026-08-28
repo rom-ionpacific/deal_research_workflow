@@ -244,8 +244,8 @@ def get_org_deal_history(inp: OrgIdsInput, ctx: dict) -> ToolResult:
 @slack_registry.tool(
     "get_org_ion_contacts",
     (
-        "Q3: Who at Ion Pacific has worked with this org? Top 5 Ion "
-        "people by activity (active vs passive touches across email / "
+        "Q3: Who at Ion Pacific has worked with this org? The most-active "
+        "Ion people by activity (active vs passive touches across email / "
         "calendar / DC communications), plus last-touch-by-channel. "
         "Slack is rolled into Q5's totals but not split per Ion employee."
     ),
@@ -258,7 +258,8 @@ def get_org_ion_contacts(inp: OrgIdsInput, ctx: dict) -> ToolResult:
 @slack_registry.tool(
     "get_org_their_contacts",
     (
-        "Q4: Who at the org have we engaged? Top 5 external contacts "
+        "Q4: Who at the org have we engaged? The most-engaged external "
+        "contacts "
         "ranked by domain-match boost (their email is on a domain we "
         "associate with the org) then by activity. Includes whether each "
         "is in DealCloud and the org's known email domains."
@@ -287,9 +288,11 @@ def get_org_communication_timeline(inp: OrgIdsInput, ctx: dict) -> ToolResult:
     "get_org_dossier",
     (
         "Compact rich snapshot for ONE org: identity, total entity "
-        "counts, main contacts, the 5 most recent documents, the 5 most "
-        "recent email threads, the 3 most recent calendar events, the 3 "
-        "most recent slack groups, and aggregate deal stats. Use when "
+        "counts, main contacts, and a capped handful of the most recent "
+        "documents, email threads, calendar events and slack groups, plus "
+        "aggregate deal stats. The per-section caps are small by design -- "
+        "use list_org_recent_documents for a company's full document list "
+        "rather than assuming the dossier showed everything. Use when "
         "the user wants a quick \"what's this org\" answer or to compare "
         "similarly-named candidates by recent activity. ~2-3 KB."
     ),
@@ -305,8 +308,8 @@ def get_org_dossier(inp: OrgIdInput, ctx: dict) -> ToolResult:
 @slack_registry.tool(
     "read_document_summary",
     (
-        "Read the LLM-generated summary of one document (200-1000 chars "
-        "depending on the doc). Use when the user asks what a specific "
+        "Read the LLM-generated summary of one document -- a short paragraph, "
+        "not the document body. Use when the user asks what a specific "
         "document is about or wants context on a doc you found via "
         "get_org_dossier (which lists recent doc ids and names). "
         "If the summary doesn't answer the question, say so -- do NOT "
@@ -861,8 +864,8 @@ class ListAllDealsInput(BaseModel):
             "Pipeline', 'Under Observation', 'Early Discussions', "
             "'Pre-Pipeline', 'Warming Station', 'Partnership', 'Portfolio "
             "Company', 'Passed/Dead'. Omit for all statuses. Use this to "
-            "answer 'all active deals' etc. -- the book is ~1,450 deals and "
-            "most are 'Passed/Dead'."
+            "answer 'all active deals' etc. -- most of the book is "
+            "'Passed/Dead'."
         ),
     )
     company: str | None = Field(
@@ -890,9 +893,10 @@ class ListAllDealsInput(BaseModel):
         "status_counts summary over the entire book plus a page of "
         "{deal_name, company, status, transaction_type}, ordered "
         "most-active status first. Filter with `status` (e.g. ['Active "
-        "Pipeline']) and/or `company`; page with limit/offset. There are "
-        "~1,450 deals total and ~1,300 are 'Passed/Dead', so prefer a "
-        "status filter unless the user really wants the full history."
+        "Pipeline']) and/or `company`; page with limit/offset. Most of the "
+        "book is 'Passed/Dead', so prefer a status filter unless the user "
+        "really wants the full history -- the status_counts in the "
+        "response gives current totals per status."
     ),
     ListAllDealsInput,
 )
@@ -2136,11 +2140,9 @@ class CheckDataRoomBuildInput(BaseModel):
         default=None,
         max_length=200,
         description=(
-            "Optional. Ion Pacific email of the person asking. A data room "
-            "is per-FOLDER and shared across the firm, so this is NOT an "
-            "ownership check and reads are never refused on it -- pass it "
-            "only if you already know it from this conversation, and never "
-            "guess."
+            "Optional. Ion Pacific email of the person asking, if you "
+            "already know it from this conversation. Never guess it, and "
+            "never ask the user for it just to make this call."
         ),
     )
 
@@ -2223,8 +2225,8 @@ def _coverage_summary_note(summary: dict | None) -> str:
         "always report these by name when the user asks what's missing, "
         "not just the count). Use this if the user doesn't want to wait "
         "for the Slack DM, or wants a progress check on a long build. "
-        "A data room is per-FOLDER and shared across the firm, so any "
-        "colleague can check on it."
+        "The returned requested_by_email/subscriber_emails say who asked "
+        "for this room."
     ),
     CheckDataRoomBuildInput,
     mutates_state=False,
@@ -2272,6 +2274,13 @@ def check_data_room_build(inp: CheckDataRoomBuildInput, ctx: dict) -> ToolResult
         "content_pending": job.content_pending,
         "error": job.error,
         "coverage_summary": job.coverage_summary,
+        # Who asked for this room. Returned as DATA rather than asserted in
+        # the tool description, because descriptions are cached per user and
+        # cannot be corrected once they drift, while responses always
+        # reflect the current state. Also lets a colleague see whose room
+        # they're looking at without a second call.
+        "requested_by_email": job.requested_by_email,
+        "subscriber_emails": job.subscriber_emails,
         "note": note,
     })
 
@@ -2282,11 +2291,9 @@ class AskDataRoomInput(BaseModel):
         default=None,
         max_length=200,
         description=(
-            "Optional. Ion Pacific email of the person asking. A data room "
-            "is per-FOLDER and shared across the firm, so this is NOT an "
-            "ownership check and reads are never refused on it -- pass it "
-            "only if you already know it from this conversation, and never "
-            "guess."
+            "Optional. Ion Pacific email of the person asking, if you "
+            "already know it from this conversation. Never guess it, and "
+            "never ask the user for it just to make this call."
         ),
     )
     question: str = Field(
@@ -2313,8 +2320,7 @@ class AskDataRoomInput(BaseModel):
         "independent, but an incomplete room may be missing relevant "
         "documents entirely). Prefer this over answering from the "
         "coverage summary alone -- it does real retrieval against the "
-        "room's content. A data room is per-FOLDER and shared across the "
-        "firm, so any colleague can ask against it."
+        "room's content."
     ),
     AskDataRoomInput,
     mutates_state=False,
@@ -2356,11 +2362,9 @@ class StartDataRoomBuildSweepInput(BaseModel):
         default=None,
         max_length=200,
         description=(
-            "Optional. Ion Pacific email of the person asking. A data room "
-            "is per-FOLDER and shared across the firm, so this is NOT an "
-            "ownership check and reads are never refused on it -- pass it "
-            "only if you already know it from this conversation, and never "
-            "guess."
+            "Optional. Ion Pacific email of the person asking, if you "
+            "already know it from this conversation. Never guess it, and "
+            "never ask the user for it just to make this call."
         ),
     )
     question: str = Field(
@@ -2390,9 +2394,8 @@ class StartDataRoomBuildSweepInput(BaseModel):
         "sweep_id and docs_total; does NOT process any documents yet -- "
         "call check_data_room_build_sweep repeatedly to make progress and "
         "see results. Tell the user this will take a few minutes for a "
-        "large folder and you'll report back as it progresses. A data "
-        "room is per-FOLDER and shared across the firm, so any colleague "
-        "can sweep it."
+        "large folder and you'll report back as it progresses. Sweeps are "
+        "attributed to whoever ran them."
     ),
     StartDataRoomBuildSweepInput,
 )
@@ -2441,7 +2444,7 @@ class CheckDataRoomBuildSweepInput(BaseModel):
     "check_data_room_build_sweep",
     (
         "Check progress on a sweep started with start_data_room_build_sweep, "
-        "AND advance it by one more batch (~10 documents, real Gemini "
+        "AND advance it by one more batch of documents (real LLM "
         "calls) in the same call -- this is deliberately not purely "
         "read-only, so simply calling this repeatedly drains the sweep "
         "over several turns without a separate 'process' action. When "
