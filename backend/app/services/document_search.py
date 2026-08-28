@@ -278,6 +278,88 @@ def _row_to_dict(r: dict) -> dict:
     }
 
 
+# Labels carried per hit. Real density is avg 1.50 per document, p95 3,
+# max 8 (measured over all 1,666 ic_criterion facets, 2026-08-28), so this
+# ceiling is a defensive bound rather than something that normally bites --
+# it just stops one pathologically over-matched document from crowding a
+# result list.
+_MAX_CRITERIA_PER_DOC = 6
+
+
+def attach_criteria_labels(results: list[dict]) -> list[dict]:
+    """Annotate search hits with the IC criteria each document was mapped to.
+
+    Retrieval hands the model a `summary_preview` truncated to 200 chars and
+    asks it to judge relevance from that. For a 40-page LPA or a board deck
+    the first 200 characters are usually boilerplate, so the model is
+    guessing. `document_facet` already holds a per-document mapping against
+    the 113-item IC checklist, computed from the FULL summary plus the
+    document's folder path -- strictly more signal than the truncated
+    preview, and already paid for.
+
+    Attaches `criteria: ["Entry Valuation (yes)", "Downside Protection
+    (partial)", ...]` in place, and returns the same list for convenience.
+
+    Two things this is NOT:
+
+      * NOT a retrieval channel. These labels annotate documents that were
+        already selected by trigram/semantic search; nothing is retrieved
+        BECAUSE of a label. (Retrieving by criterion is a sensible next
+        step, but it needs specificity weighting and per-criterion caps --
+        in a 1,600-doc room 'Signed NDA' alone matches 277 documents, while
+        in an 8-doc room the same criterion matches at most a couple.)
+      * NOT evidence of absence. An empty `criteria` list means the matcher
+        found no checklist hit, which is common and benign -- 558 of
+        Positron's 1,591 processed documents matched no criterion at all.
+        Absence stays the job of the coverage engine and the sweep. The
+        model is told this explicitly in the tool descriptions.
+
+    Coverage is room-shaped: essentially every readable document inside a
+    built data room is mapped (Positron 1,591/1,605 processed), but only
+    ~0.4% of the whole corpus, because ic_criteria_llm runs room-scoped by
+    design. So this enriches data-room retrieval and mostly no-ops on
+    corpus-wide search until that changes -- absent labels degrade to
+    exactly today's behaviour.
+    """
+    if not results:
+        return results
+    doc_ids = [r["document_id"] for r in results if r.get("document_id")]
+    if not doc_ids:
+        return results
+
+    by_doc: dict[int, list[str]] = {}
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT f.document_id, ic.criterion, f.relationship_type
+              FROM dealcloud.document_facet f
+              JOIN dealcloud.ic_criterion ic ON ic.id = f.facet_id
+             WHERE f.facet_type = 'ic_criterion'
+               AND f.document_id = ANY(%s)
+             ORDER BY f.document_id,
+                      -- 'yes' before 'partial'; confidence is NOT used for
+                      -- ordering because it is a flat 0.8/0.5 derived from
+                      -- relationship_type, not a calibrated score.
+                      (f.relationship_type = 'yes') DESC,
+                      ic.criterion
+            """,
+            (doc_ids,),
+        )
+        for row in cur.fetchall():
+            labels = by_doc.setdefault(row["document_id"], [])
+            if len(labels) >= _MAX_CRITERIA_PER_DOC:
+                continue
+            rel = row["relationship_type"]
+            labels.append(
+                f"{row['criterion']} ({rel})" if rel else row["criterion"]
+            )
+
+    for r in results:
+        r["criteria"] = by_doc.get(r.get("document_id"), [])
+    return results
+
+
 def _trigram_rows(room_id: int, query: str, limit: int) -> list[dict]:
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -361,7 +443,7 @@ def search_documents(
             rows = _rrf_merge(trigram, semantic, limit)
     else:
         raise ValueError(f"unknown mode {mode!r}")
-    return [_row_to_dict(r) for r in rows]
+    return attach_criteria_labels([_row_to_dict(r) for r in rows])
 
 
 # ---------------------------------------------------------------------------
@@ -521,7 +603,7 @@ def search_documents_for_orgs(
             rows = _rrf_merge(trigram, semantic, limit)
     else:
         raise ValueError(f"unknown mode {mode!r}")
-    return [_row_to_dict(r) for r in rows]
+    return attach_criteria_labels([_row_to_dict(r) for r in rows])
 
 
 # ---------------------------------------------------------------------------
@@ -629,7 +711,7 @@ def search_documents_for_docs(
             rows = _rrf_merge(trigram, semantic, limit)
     else:
         raise ValueError(f"unknown mode {mode!r}")
-    return [_row_to_dict(r) for r in rows]
+    return attach_criteria_labels([_row_to_dict(r) for r in rows])
 
 
 # ---------------------------------------------------------------------------
@@ -702,11 +784,11 @@ def list_recent_documents_for_orgs(
     if exclude_firm_decks:
         rows = [r for r in rows if not _is_firm_deck(r["name"], r.get("path"))]
     rows = rows[:limit]
-    return [{
+    return attach_criteria_labels([{
         "document_id": r["id"],
         "name": r["name"],
         "path": r.get("path"),
         "modified_at": r.get("modified_at"),
         "web_url": r.get("web_url"),
         "summary_preview": r.get("summary_preview") or "",
-    } for r in rows]
+    } for r in rows])
