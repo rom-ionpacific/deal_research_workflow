@@ -1,6 +1,6 @@
 """Document search scoped to a data room.
 
-Two modes, mirroring services/org_search.py:
+Modes, mirroring services/org_search.py:
 
   * `trigram` -- pg_trgm + ILIKE over document.name + path, plus
                  term-coverage matching over document.summary. Good for
@@ -10,9 +10,20 @@ Two modes, mirroring services/org_search.py:
   * `semantic` -- cosine over dealcloud.document_embedding (uses the
                   same text-embedding-3-small model orgs use; the
                   doc embed input is `name + summary`).
-  * `hybrid`  -- RRF fusion (k=60) over both legs. Filenames stay top-
-                 ranked when they match; summary-content matches still
-                 surface. Default for the chat tool.
+  * `hybrid`  -- RRF fusion (k=60). Filenames stay top-ranked when they
+                 match; summary-content matches still surface. Default
+                 for the chat tool.
+
+Hybrid fuses a THIRD leg on the room-scoped paths only: `criteria`, which
+maps the question onto IC checklist items via ic_criterion.keyword_aliases
+and then pulls the documents already mapped to those items in
+document_facet. It exists because both text legs match the question against
+a document's own words, so both miss a document that covers the topic in
+different vocabulary -- ask "what's the liquidation preference?" and a term
+sheet summarised as "Series E preferred stock financing" scores near zero.
+See the "Criteria leg" section below for why it is aliases rather than
+embeddings, why it is weighted below the text legs, and why the org/corpus
+path is deliberately excluded.
 
 All paths scope to documents the room has actually uploaded:
 
@@ -275,6 +286,14 @@ def _row_to_dict(r: dict) -> dict:
         "summary_preview": r.get("summary_preview") or "",
         "score": float(r["score"]) if r.get("score") is not None else None,
         "match_kind": r.get("match_kind"),
+        # Which retrieval legs found this document, set by _rrf_merge. Only
+        # populated for hybrid mode; single-leg modes leave it None rather
+        # than asserting a leg. Carried through because this dict is the
+        # boundary the row crosses -- it builds from explicit keys, so
+        # anything _rrf_merge attaches is otherwise silently discarded, and
+        # dropping it made criteria-promoted documents look criteria-ONLY
+        # when they had in fact also matched on text.
+        "matched_by": r.get("matched_by"),
     }
 
 
@@ -383,23 +402,43 @@ def _semantic_rows(room_id: int, query: str, limit: int) -> list[dict]:
         return list(cur.fetchall())
 
 
+# Weight on the criteria leg's RRF contribution. Below 1.0 on purpose: the
+# leg is an indirection (question -> checklist item -> document) built on an
+# LLM mapping that is known to over-match on broad items, so it should
+# promote a document the other legs missed without being able to outvote two
+# legs that matched the document's own text. Standard RRF gives every leg
+# 1.0; this is the one leg that has earned less than that.
+_CRITERIA_RRF_WEIGHT = 0.5
+
+
 def _rrf_merge(
     trigram: list[dict],
     semantic: list[dict],
     limit: int,
+    criteria: list[dict] | None = None,
 ) -> list[dict]:
+    """Reciprocal-rank fusion over the retrieval legs.
+
+    `criteria` is optional and weighted below the other two -- see
+    _CRITERIA_RRF_WEIGHT. Passing None or [] reproduces the two-leg
+    behaviour exactly, which is what the org/corpus paths rely on.
+    """
     by_id: dict[int, dict] = {}
-    for rank, r in enumerate(trigram, start=1):
-        by_id[r["id"]] = {
-            "row": dict(r), "t_rank": rank, "s_rank": None
-        }
-    for rank, r in enumerate(semantic, start=1):
-        if r["id"] in by_id:
-            by_id[r["id"]]["s_rank"] = rank
-        else:
-            by_id[r["id"]] = {
-                "row": dict(r), "t_rank": None, "s_rank": rank
-            }
+
+    def _put(rows: list[dict], key: str) -> None:
+        for rank, r in enumerate(rows or [], start=1):
+            e = by_id.get(r["id"])
+            if e is None:
+                by_id[r["id"]] = {
+                    "row": dict(r), "t_rank": None, "s_rank": None,
+                    "c_rank": None, key: rank,
+                }
+            elif e.get(key) is None:
+                e[key] = rank
+
+    _put(trigram, "t_rank")
+    _put(semantic, "s_rank")
+    _put(criteria, "c_rank")
 
     def fused(e: dict) -> float:
         s = 0.0
@@ -407,6 +446,8 @@ def _rrf_merge(
             s += 1.0 / (_RRF_K + e["t_rank"])
         if e["s_rank"] is not None:
             s += 1.0 / (_RRF_K + e["s_rank"])
+        if e["c_rank"] is not None:
+            s += _CRITERIA_RRF_WEIGHT / (_RRF_K + e["c_rank"])
         return s
 
     ordered = sorted(by_id.values(), key=fused, reverse=True)[:limit]
@@ -414,6 +455,16 @@ def _rrf_merge(
     for e in ordered:
         r = e["row"]
         r["score"] = fused(e)
+        # Which legs found this document. Surfaced so a reader (or a future
+        # debugging session) can tell a text match from a checklist-only
+        # match, rather than inferring it from match_kind, which only
+        # records whichever leg happened to supply the row.
+        r["matched_by"] = [
+            name for name, k in (("name/content", "t_rank"),
+                                 ("semantic", "s_rank"),
+                                 ("criteria", "c_rank"))
+            if e[k] is not None
+        ]
         out.append(r)
     return out
 
@@ -437,10 +488,11 @@ def search_documents(
         pool = max(limit * 3, 30)
         trigram = _trigram_rows(room_id, query, pool)
         semantic = _semantic_rows(room_id, query, pool)
-        if not semantic:
+        criteria = _criteria_rows(room_id, query, pool)
+        if not semantic and not criteria:
             rows = trigram[:limit]
         else:
-            rows = _rrf_merge(trigram, semantic, limit)
+            rows = _rrf_merge(trigram, semantic, limit, criteria=criteria)
     else:
         raise ValueError(f"unknown mode {mode!r}")
     return attach_criteria_labels([_row_to_dict(r) for r in rows])
@@ -658,6 +710,207 @@ SELECT d.id,
 """
 
 
+# ---------------------------------------------------------------------------
+# Criteria leg: question -> IC checklist items -> documents mapped to them
+# ---------------------------------------------------------------------------
+# The trigram and semantic legs both match a question against a document's
+# name/path/summary. Both therefore miss a document whose summary never uses
+# the questioner's vocabulary -- ask "what's the liquidation preference?" and
+# a term sheet whose 200-char summary says "Series E preferred stock
+# financing" scores near zero on trigram and only loosely on embedding.
+#
+# ic_criterion already solves that vocabulary gap. Its keyword_aliases were
+# LLM-generated (enrich_ic_criteria_hints.py) precisely to bridge how people
+# phrase a topic to what documents call it: 'Downside Protection' carries
+# ['liquidation preference', 'anti-dilution', 'protective provisions', ...].
+# So: match the QUESTION against those aliases, then pull the documents
+# already mapped to the matching criteria via document_facet.
+#
+# Aliases rather than embeddings on purpose. All 113 active criteria have
+# them (avg 4.8 each), matching is deterministic, free, and needs no new
+# storage -- embed.py has no batch interface and there is nowhere to persist
+# 113 criterion vectors without a dce schema change. Worth revisiting if
+# recall proves too literal, but it would be added strength, not a rewrite.
+#
+# ONLY wired into the two ROOM-scoped entrypoints. The org/corpus path is
+# deliberately excluded: its scope is an org (or, with empty org_ids, all
+# ~280k documents), so a question matching a broad criterion could drag in
+# NDAs from unrelated deals. A room's scope is a folder, where every hit is
+# at least about the right deal.
+
+# Aliases are matched as whole words/phrases, never as substrings. Several
+# are short acronyms -- ARR, NDA, CDA, GMV, KPIs -- and a naive `in` test
+# fires on 'arrangement', 'narrow', 'cda' inside a filename. Verified in
+# tests.
+_ALIAS_BOUNDARY = r"(?<![0-9a-z]){}(?![0-9a-z])"
+
+# Documents pulled per matched criterion. Bounds the damage from a broad
+# criterion in a big room: 'Signed NDA' matches 277 documents in Positron,
+# and without a cap one such criterion would swamp the fused ranking. Small
+# rooms never reach it (EliseAI averages 1.4 documents per criterion).
+_CRITERIA_DOCS_PER_ITEM = 20
+
+# Matched criteria used per question. A rambling question can brush against
+# many items; the most specific few carry the signal.
+_MAX_MATCHED_CRITERIA = 5
+
+_criterion_vocab_cache: list[tuple[int, str, list[str]]] | None = None
+
+
+def _criterion_vocab() -> list[tuple[int, str, list[str]]]:
+    """(criterion_id, criterion, aliases) for active criteria, process-cached.
+
+    The vocabulary is ~113 rows that change only when someone re-seeds
+    ic_criterion, so it is loaded once per process rather than per search.
+    """
+    global _criterion_vocab_cache
+    if _criterion_vocab_cache is not None:
+        return _criterion_vocab_cache
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT id, criterion, keyword_aliases
+              FROM dealcloud.ic_criterion
+             WHERE is_active AND keyword_aliases IS NOT NULL
+            """
+        )
+        _criterion_vocab_cache = [
+            (r["id"], r["criterion"], [a for a in (r["keyword_aliases"] or []) if a])
+            for r in cur.fetchall()
+        ]
+    return _criterion_vocab_cache
+
+
+def match_criteria_for_question(question: str) -> list[tuple[int, str, str]]:
+    """Criteria whose name or aliases appear in `question`.
+
+    Returns (criterion_id, criterion, matched_alias), longest match first --
+    a question hitting 'liquidation preference' is better served by that
+    than by a criterion that merely matched the bare word 'preference', and
+    length is a cheap, deterministic proxy for specificity that needs no
+    corpus statistics.
+    """
+    q = (question or "").lower()
+    if not q:
+        return []
+    hits: list[tuple[int, str, str]] = []
+    for cid, criterion, aliases in _criterion_vocab():
+        best = ""
+        # The criterion's own name counts as an alias of itself.
+        for cand in [criterion, *aliases]:
+            cand_l = (cand or "").strip().lower()
+            if len(cand_l) < 3 or len(cand_l) <= len(best):
+                continue
+            if re.search(_ALIAS_BOUNDARY.format(re.escape(cand_l)), q):
+                best = cand_l
+        if best:
+            hits.append((cid, criterion, best))
+    hits.sort(key=lambda h: len(h[2]), reverse=True)
+    return hits[:_MAX_MATCHED_CRITERIA]
+
+
+_CRITERIA_SQL_DOCS = """
+WITH matched AS (
+    SELECT unnest(%(cids)s::int[]) AS facet_id
+), ranked AS (
+    SELECT f.document_id,
+           f.facet_id,
+           ROW_NUMBER() OVER (
+               PARTITION BY f.facet_id
+               -- 'yes' ahead of 'partial'; newest first within each, so a
+               -- broad criterion's cap keeps the most current evidence.
+               ORDER BY (f.relationship_type = 'yes') DESC,
+                        d.modified_at DESC NULLS LAST
+           ) AS rn
+      FROM dealcloud.document_facet f
+      JOIN matched m ON m.facet_id = f.facet_id
+      JOIN dealcloud.document d ON d.id = f.document_id
+     WHERE f.facet_type = 'ic_criterion'
+       AND f.document_id = ANY(%(doc_ids)s::int[])
+)
+SELECT d.id,
+       d.name,
+       d.path,
+       d.modified_at,
+       d.web_url,
+       LEFT(COALESCE(d.summary, ''), 200) AS summary_preview,
+       NULL::float AS score,
+       'criteria'::text AS match_kind
+  FROM ranked r
+  JOIN dealcloud.document d ON d.id = r.document_id
+ WHERE r.rn <= %(per_item)s
+ GROUP BY d.id, d.name, d.path, d.modified_at, d.web_url, d.summary
+ -- A document mapped to SEVERAL of the question's criteria is a better
+ -- answer than one mapped to a single criterion, so rank by how many of
+ -- them it carries, then by the best rank it achieved within any of them.
+ ORDER BY count(DISTINCT r.facet_id) DESC, min(r.rn), d.modified_at DESC NULLS LAST
+ LIMIT %(lim)s
+"""
+
+
+def _criteria_rows_docs(doc_ids: list[int], query: str, limit: int) -> list[dict]:
+    """Third retrieval leg for a doc_id-scoped search. Empty list when the
+    question matches no criterion, or when no scoped document carries one --
+    both are normal, and both leave fused ranking exactly as it was."""
+    matched = match_criteria_for_question(query)
+    if not matched or not doc_ids:
+        return []
+    cids = [m[0] for m in matched]
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            _CRITERIA_SQL_DOCS,
+            {"cids": cids, "doc_ids": doc_ids,
+             "per_item": _CRITERIA_DOCS_PER_ITEM, "lim": limit},
+        )
+        rows = list(cur.fetchall())
+    if rows:
+        logger.info(
+            "criteria leg: question matched %s -> %d doc(s)",
+            [f"{c}<-{a}" for _i, c, a in matched], len(rows),
+        )
+    return rows
+
+
+# Same leg for a drw historical_data_room. Scope is membership in
+# historical_data_room_entity rather than an explicit id list -- and
+# deliberately NOT filtered on hdre.status, matching the other legs: that
+# column tracks ToltIQ's upload state, which never reaches 'uploaded' for
+# Claude-only rooms, so filtering on it would return zero rows.
+_CRITERIA_SQL_ROOM = _CRITERIA_SQL_DOCS.replace(
+    "       AND f.document_id = ANY(%(doc_ids)s::int[])",
+    """       AND EXISTS (
+               SELECT 1 FROM dealcloud.historical_data_room_entity hdre
+                WHERE hdre.entity_id = f.document_id
+                  AND hdre.entity_type = 'document'
+                  AND hdre.historical_data_room_id = %(room_id)s
+           )""",
+)
+
+
+def _criteria_rows(room_id: int, query: str, limit: int) -> list[dict]:
+    """Criteria leg for a room_id-scoped search. Same contract as
+    _criteria_rows_docs; empty list means "nothing to add"."""
+    matched = match_criteria_for_question(query)
+    if not matched:
+        return []
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            _CRITERIA_SQL_ROOM,
+            {"cids": [m[0] for m in matched], "room_id": room_id,
+             "per_item": _CRITERIA_DOCS_PER_ITEM, "lim": limit},
+        )
+        rows = list(cur.fetchall())
+    if rows:
+        logger.info(
+            "criteria leg (room %d): matched %s -> %d doc(s)",
+            room_id, [f"{c}<-{a}" for _i, c, a in matched], len(rows),
+        )
+    return rows
+
+
 def _trigram_rows_docs(doc_ids: list[int], query: str, limit: int) -> list[dict]:
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -705,10 +958,11 @@ def search_documents_for_docs(
         pool = max(limit * 3, 30)
         trigram = _trigram_rows_docs(doc_ids, query, pool)
         semantic = _semantic_rows_docs(doc_ids, query, pool)
-        if not semantic:
+        criteria = _criteria_rows_docs(doc_ids, query, pool)
+        if not semantic and not criteria:
             rows = trigram[:limit]
         else:
-            rows = _rrf_merge(trigram, semantic, limit)
+            rows = _rrf_merge(trigram, semantic, limit, criteria=criteria)
     else:
         raise ValueError(f"unknown mode {mode!r}")
     return attach_criteria_labels([_row_to_dict(r) for r in rows])
