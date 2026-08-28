@@ -55,6 +55,11 @@ class BuildJobCreated:
     # when it finishes -- may include colleagues who asked earlier, since
     # the room is shared per-folder rather than per-person.
     subscriber_emails: list = field(default_factory=list)
+    # Of new_docs, how many need READING (never opened) as opposed to
+    # classifying. Distinct because a document that was in the folder all
+    # along but unread means the previous coverage answer was computed
+    # without it -- worth saying out loud, unlike a routine new arrival.
+    docs_to_read: int = 0
 
 
 @dataclass
@@ -129,6 +134,7 @@ def create_build_job(folder_path: str, requested_by_email: str) -> BuildJobCreat
         action=resp.get("action", "created"),
         new_docs=resp.get("new_docs", 0),
         subscriber_emails=resp.get("subscriber_emails") or [],
+        docs_to_read=resp.get("docs_to_read", 0),
     )
 
 

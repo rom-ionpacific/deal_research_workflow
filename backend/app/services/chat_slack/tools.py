@@ -2068,13 +2068,36 @@ def build_data_room(inp: BuildDataRoomInput, ctx: dict) -> ToolResult:
             f"user a new build was started."
         )
     elif result.action == "refreshed":
+        # `new_docs` covers two different populations: documents genuinely
+        # added to the folder, and documents that were always there but had
+        # never been opened (dce's scanner queue ranks spreadsheets last, so
+        # a room can complete with files still unread). Calling both "added"
+        # was wrong for the second kind, and that kind is the more important
+        # one to say out loud -- it means the previous coverage answer was
+        # computed without those files.
+        if result.docs_to_read:
+            detail = (
+                f"{result.docs_to_read} document(s) in it had never been "
+                f"opened before (typically spreadsheets), so they're being "
+                f"read now and the coverage numbers will change"
+            )
+            if result.new_docs > result.docs_to_read:
+                detail += (
+                    f", plus {result.new_docs - result.docs_to_read} "
+                    f"awaiting classification"
+                )
+        else:
+            detail = (
+                f"started scanning the {result.new_docs} document(s) added "
+                f"since it was last built -- the rest is already done, so "
+                f"this should finish quickly"
+            )
         note = (
             f"Reused the existing data room for '{inp.folder_path}' "
-            f"(job_id={result.job_id}) and started scanning the "
-            f"{result.new_docs} document(s) added since it was last built "
-            f"-- the rest is already done, so this should finish quickly. "
+            f"(job_id={result.job_id}) and {detail}. "
             f"I'll DM {_dm_list(result, inp.requested_by_email)} on Slack "
-            f"when it's updated."
+            f"when it's updated. Do NOT quote coverage or document counts "
+            f"until it completes -- they are about to change."
         )
     elif result.action == "resummarized":
         note = (
