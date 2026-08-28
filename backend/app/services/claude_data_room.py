@@ -332,6 +332,30 @@ def _format_doc_context(docs: list[dict], *, with_links: bool = False) -> str:
             lines.append(f"    Summary: {summary}")
         else:
             lines.append(f"    {_NO_CONTENT_MARKER}")
+        # Which IC checklist items this document was mapped to, from
+        # document_facet (see document_search.attach_criteria_labels). The
+        # Summary above is capped at 200 chars by the search layer, which for
+        # a long LPA or board deck is often just boilerplate -- these labels
+        # were derived from the FULL summary plus the folder path, so they say
+        # what the document is ABOUT when the visible preview doesn't.
+        #
+        # Absent for a document the checklist matcher hasn't processed, and
+        # legitimately empty for one it processed with no hit -- neither is
+        # evidence about the document's content, so nothing is rendered in
+        # that case rather than printing an empty or reassuring line.
+        criteria = [c for c in (d.get("criteria") or []) if c]
+        if criteria:
+            lines.append(f"    Mapped to checklist items: {'; '.join(criteria)}")
+    if any(d.get("criteria") for d in docs):
+        lines.append(
+            "\n(\"Mapped to checklist items\" comes from a separate "
+            "per-document pass against the IC checklist and is a hint about "
+            "what a document covers -- useful when its Summary is truncated. "
+            "Treat it as a pointer, not a quotation: it can over-match on "
+            "broad items. Its ABSENCE says nothing at all -- many documents "
+            "match no checklist item -- so never infer from a missing label "
+            "that a document lacks something.)"
+        )
     return "\n".join(lines)
 
 
@@ -683,7 +707,8 @@ def retrieve_room_context_for_docs(
     service needs no ANTHROPIC_API_KEY.
 
     Payload is small by construction: RETRIEVAL_LIMIT documents, each with
-    a summary_preview the search layer caps at 200 chars (~6 KB total).
+    a summary_preview the search layer caps at 200 chars, plus up to a
+    handful of short IC-checklist labels per document (~6-7 KB total).
 
     Raises ClaudeRoomError on retrieval failure. Auth is the caller's
     responsibility, exactly as for ask_room_for_docs.

@@ -427,10 +427,16 @@ class ReadDocumentInput(BaseModel):
         "and often misses the right doc. Returns up to `limit` rows "
         "ranked by hybrid retrieval (filename trigram + embedding "
         "cosine over doc name+summary). Each row has document_id, "
-        "name, path, web_url, summary_preview, score. Pass the "
-        "canonical org_ids from bundle_via_supersede; empty list "
-        "searches the whole 280k-doc corpus (avoid unless org "
-        "search has failed). Read-only."
+        "name, path, web_url, summary_preview, score, and `criteria` "
+        "-- the IC checklist items that document was mapped to. Lean on "
+        "`criteria` when summary_preview is truncated mid-sentence: it "
+        "was derived from the full summary, so it says what the document "
+        "is about when the preview does not. An EMPTY criteria list is "
+        "not a signal -- plenty of documents match no checklist item, "
+        "and most of the corpus has not been through that pass at all. "
+        "Pass the canonical org_ids from bundle_via_supersede; empty "
+        "list searches the whole corpus (avoid unless org search has "
+        "failed). Read-only."
         + _LINK_RULE
     ),
     SearchDocumentsInput,
