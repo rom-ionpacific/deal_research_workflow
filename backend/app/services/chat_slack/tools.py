@@ -2388,7 +2388,7 @@ class StartDataRoomBuildSweepInput(BaseModel):
 @slack_registry.tool(
     "start_data_room_build_sweep",
     (
-        "Start a systematic, exhaustive sweep of EVERY readable document "
+        "Start a systematic, exhaustive sweep of EVERY document "
         "in a build_data_room job's folder against a specific question -- "
         "for the long tail OUTSIDE the 113-item coverage checklist. Use "
         "this only after ask_data_room has already come up empty or "
@@ -2455,12 +2455,15 @@ class CheckDataRoomBuildSweepInput(BaseModel):
         "read-only, so simply calling this repeatedly drains the sweep "
         "over several turns without a separate 'process' action. When "
         "status is 'complete', report the accumulated hits to the user as "
-        "the answer (with their evidence quotes), or if hits is empty, say "
-        "the question was checked against every readable document in the "
-        "folder (docs_total) and none of them answered it -- phrase this "
-        "as 'not found after an exhaustive check', NOT a flat 'the answer "
-        "does not exist'. When status is 'running', tell the user "
-        "progress (docs_processed/docs_total) and that you'll check again."
+        "the answer (with their evidence quotes). If hits is empty, follow "
+        "the returned `note`: it says whether the check was genuinely "
+        "exhaustive, or whether some documents could not be read and were "
+        "never checked. Phrase a hit-less exhaustive result as 'not found "
+        "after an exhaustive check', NEVER a flat 'the answer does not "
+        "exist' -- and when documents were unreadable, name them as "
+        "unchecked rather than implying full coverage. When status is "
+        "'running', tell the user progress (docs_processed/docs_total) and "
+        "that you'll check again."
     ),
     CheckDataRoomBuildSweepInput,
 )
@@ -2478,12 +2481,54 @@ def check_data_room_build_sweep(inp: CheckDataRoomBuildSweepInput, ctx: dict) ->
         detail = _get_sweep(inp.sweep_id)
     except _DceUnavailable as e:
         return ToolResult(output=f"Sweep unavailable: {e}")
+    # A sweep's answer is the one this project phrases most confidently
+    # ("not found after an exhaustive check"), so the documents it could NOT
+    # open have to travel with the result. dce now reads unread files before
+    # classifying, which makes the check genuinely exhaustive in most rooms;
+    # what remains here is the residue that cannot be read at all (images,
+    # video, oversized files), and a hit-less result over a room with such a
+    # residue is NOT exhaustive.
+    caveat = ""
+    if detail.docs_unread:
+        caveat = (
+            f"STILL READING {detail.docs_unread} document(s) that had never "
+            f"been opened -- coverage is not final yet, so do NOT report this "
+            f"as an exhaustive check. Call again."
+        )
+    elif detail.docs_unreadable:
+        names = "; ".join(
+            d.get("name", "?") for d in (detail.unreadable_docs or [])[:5]
+        )
+        caveat = (
+            f"{detail.docs_unreadable} document(s) in this room could NOT be "
+            f"read at all and were therefore never checked"
+            + (f" ({names})" if names else "")
+            + ". If there are no hits, say the question was not found in the "
+              "documents that COULD be read, and name these as unchecked -- "
+              "do NOT call it exhaustive."
+        )
     return ToolResult(output={
         "sweep_id": detail.sweep_id, "question": detail.question,
         "status": detail.status, "docs_total": detail.docs_total,
         "docs_processed": detail.docs_processed,
+        "docs_unread": detail.docs_unread,
+        "docs_unreadable": detail.docs_unreadable,
+        "unreadable_docs": detail.unreadable_docs,
         "hits": [
             {"doc_name": h.doc_name, "present": h.present, "evidence": h.evidence}
             for h in detail.hits
         ],
+        # Only claim full coverage when dce actually reported the counts.
+        # An older dce omits them, and silently reading that absence as
+        # "zero unread, zero unreadable" would manufacture exactly the
+        # false confidence this change exists to remove.
+        "note": caveat or (
+            "Every document in this room was read and checked; a hit-less "
+            "result here is a genuine 'not found after an exhaustive check'."
+            if detail.docs_unread is not None
+               and detail.docs_unreadable is not None
+            else "This dce build does not report read-coverage for sweeps, "
+                 "so do NOT claim the check was exhaustive -- say the "
+                 "question was not found in the documents that were checked."
+        ),
     })
