@@ -2014,6 +2014,25 @@ class BuildDataRoomInput(BaseModel):
     )
 
 
+def _dm_list(result, requester: str) -> str:
+    """Who will actually be DM'd when this room finishes.
+
+    A room is per-FOLDER and shared, so joining an existing one can mean
+    colleagues who asked earlier get the DM too. Naming only the current
+    requester would be wrong in that case, and silently CC'ing people
+    without saying so is worse -- the user should know who else hears about
+    it. Falls back to the requester alone for an older dce that doesn't
+    report subscribers.
+    """
+    subs = [e for e in (getattr(result, "subscriber_emails", None) or []) if e]
+    if not subs:
+        return requester
+    others = [e for e in subs if e.strip().lower() != requester.strip().lower()]
+    if not others:
+        return requester
+    return f"{requester} (and {', '.join(others)}, who also asked for this folder)"
+
+
 @slack_registry.tool(
     "build_data_room",
     (
@@ -2041,25 +2060,6 @@ class BuildDataRoomInput(BaseModel):
     ),
     BuildDataRoomInput,
 )
-def _dm_list(result, requester: str) -> str:
-    """Who will actually be DM'd when this room finishes.
-
-    A room is per-FOLDER and shared, so joining an existing one can mean
-    colleagues who asked earlier get the DM too. Naming only the current
-    requester would be wrong in that case, and silently CC'ing people
-    without saying so is worse -- the user should know who else hears about
-    it. Falls back to the requester alone for an older dce that doesn't
-    report subscribers.
-    """
-    subs = [e for e in (getattr(result, "subscriber_emails", None) or []) if e]
-    if not subs:
-        return requester
-    others = [e for e in subs if e.strip().lower() != requester.strip().lower()]
-    if not others:
-        return requester
-    return f"{requester} (and {', '.join(others)}, who also asked for this folder)"
-
-
 def build_data_room(inp: BuildDataRoomInput, ctx: dict) -> ToolResult:
     from ..data_room_build import DceUnavailable as _DceUnavailable, create_build_job
 
