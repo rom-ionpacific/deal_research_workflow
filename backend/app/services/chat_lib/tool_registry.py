@@ -24,6 +24,8 @@ the orchestrator hears about session_version creations without
 """
 from __future__ import annotations
 
+import inspect
+
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -81,6 +83,54 @@ class Tool:
         }
 
 
+
+def _assert_handler_shape(tool: "Tool") -> None:
+    """Fail at import time if a handler cannot be what it claims to be.
+
+    Motivated by a real, silent, user-facing outage: `build_data_room` was
+    registered against the WRONG FUNCTION for over a week. A helper was
+    added directly beneath the decorator --
+
+        @slack_registry.tool("build_data_room", "...", BuildDataRoomInput)
+        def _dm_list(result, requester: str) -> str:      # <-- registered!
+            ...
+
+        def build_data_room(inp, ctx) -> ToolResult:      # <-- never wired
+            ...
+
+    -- so a decorator that binds to "whatever def comes next" bound to the
+    helper. Every call returned the ctx dict instead of starting a build, and
+    the tool answered `{}` with no job_id for ANY folder path. Nothing caught
+    it: the NAME was still registered (so the surface-parity assertion in
+    chat_mcp_tools passed), the real function still existed and still passed
+    its own direct tests, and the failure only showed up through the
+    transport, which the tests bypassed.
+
+    So check the handler's SHAPE, which is the part the decorator cannot
+    guarantee: exactly two positional parameters, and a declared ToolResult
+    return. A helper grabbed by mistake fails both.
+    """
+    fn = tool.handler
+    sig = inspect.signature(fn)
+    params = [
+        p for p in sig.parameters.values()
+        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+    ]
+    ret = sig.return_annotation
+    ret_name = getattr(ret, "__name__", str(ret))
+
+    if len(params) != 2 or ret_name != "ToolResult":
+        raise RuntimeError(
+            f"Tool {tool.name!r} is registered against {fn.__name__!r}, which "
+            f"does not look like a tool handler: expected "
+            f"(input, ctx) -> ToolResult, got "
+            f"({', '.join(p.name for p in params)}) -> {ret_name}. "
+            "The usual cause is a helper function defined between "
+            "@registry.tool(...) and the real handler -- the decorator binds "
+            "to whichever def comes next. Move the helper above the "
+            "decorator."
+        )
+
 class ToolRegistry:
     """Holds tools by name. Use ``@registry.tool(...)`` to register a
     handler in one step, or build ``Tool`` objects manually and call
@@ -94,6 +144,7 @@ class ToolRegistry:
     def register(self, tool: Tool) -> None:
         if tool.name in self._tools:
             raise ValueError(f"Duplicate tool name: {tool.name!r}")
+        _assert_handler_shape(tool)
         self._tools[tool.name] = tool
 
     def tool(
