@@ -293,7 +293,10 @@ export interface CoverageCriterion {
   criterion_id: number;
   category: string;
   criterion: string;
-  applies_to: "LP" | "GP" | "both";
+  // deal.transaction_type values this criterion applies to, e.g.
+  // ["LP Deal", "GP Deal"]. Was a single "LP" | "GP" | "both" tag
+  // before the 2026-09-02 taxonomy migration.
+  applies_to: string[];
   importance: "core" | "common" | "occasional" | null;
   // 'Found' | 'Found — high hit count, review before trusting' |
   // 'Found (keyword only — not LLM-confirmed, needs review)' |
@@ -693,10 +696,14 @@ export const api = {
   // Read-only checklist coverage. Safe to call anytime, including
   // mid-scan (unscanned criteria come back status='Scanning' rather than
   // a false verdict). Logic lives entirely in deal_cloud_enhancer.
-  getDataRoomCoverage: (roomId: number, dealType?: "LP" | "GP") =>
+  getDataRoomCoverage: (roomId: number, dealType?: string | string[]) =>
     request<RoomCoverage>(
       `/api/v1/data-rooms/${roomId}/coverage` +
-        (dealType ? `?deal_type=${dealType}` : ""),
+        (dealType
+          ? `?deal_type=${encodeURIComponent(
+              Array.isArray(dealType) ? dealType.join(",") : dealType,
+            )}`
+          : ""),
     ),
 
   // Processes one bounded batch of the room's pending scan work and returns

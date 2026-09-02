@@ -40,7 +40,10 @@ class CoverageCriterion:
     criterion_id: int
     category: str
     criterion: str
-    applies_to: str
+    # List of deal.transaction_type values this criterion applies to
+    # ('LP Deal', 'Single Asset', ...). Was a single 'LP'/'GP'/'both'
+    # tag until the 2026-09-02 migration; dce sends a list now.
+    applies_to: list[str]
     importance: Optional[str]
     status: str
     hits: list = field(default_factory=list)
@@ -107,8 +110,19 @@ def _call_dce(path: str, method: str = "GET", body: Optional[dict] = None) -> di
         return {"ok": False, "error": f"dce_unreachable: {type(e).__name__}: {e}"}
 
 
-def get_room_coverage(room_id: int, deal_type: Optional[str] = None) -> RoomCoverageResult:
-    qs = f"?deal_type={deal_type}" if deal_type else ""
+def get_room_coverage(
+    room_id: int,
+    deal_type: Optional[str] | Optional[list[str]] = None,
+) -> RoomCoverageResult:
+    # Every value in the new vocabulary contains a space ('LP Deal',
+    # 'Single Asset'), so this MUST be encoded -- the old f-string
+    # interpolation was only safe because the vocabulary was 'LP'/'GP'.
+    # dce accepts a comma-separated list to scope to several types at once
+    # (a room under _FUNDS is a fund deal without saying which shape).
+    qs = ""
+    if deal_type:
+        joined = deal_type if isinstance(deal_type, str) else ",".join(deal_type)
+        qs = "?deal_type=" + urllib.parse.quote(joined, safe=",")
     resp = _call_dce(f"/internal/data-room-coverage/{room_id}{qs}")
     if not resp.get("ok"):
         raise DceUnavailable(resp.get("error", "unknown_dce_error"))

@@ -620,7 +620,7 @@ class CoverageCriterionResp(BaseModel):
     criterion_id: int
     category: str
     criterion: str
-    applies_to: str
+    applies_to: list[str]
     importance: str | None
     status: str
     hits: list[CoverageHitResp]
@@ -666,7 +666,18 @@ def _gate_room_access(room_id: int, user: UserCtx) -> None:
 )
 def get_data_room_coverage(
     room_id: int,
-    deal_type: Literal["LP", "GP"] | None = Query(None),
+    deal_type: str | None = Query(
+        None,
+        description=(
+            "Override the checklist scope. A deal.transaction_type "
+            "('LP Deal', 'GP Deal', 'Single Asset', 'SPV Investment', "
+            "'Corporate VC', 'Partnership', 'Legacy'), or several "
+            "comma-separated. The legacy 'LP'/'GP' tags are still "
+            "accepted and translated by dce. Validated there rather than "
+            "duplicated into a Literal here, so the vocabulary has one "
+            "owner."
+        ),
+    ),
     user: UserCtx = Depends(require_user),
 ) -> RoomCoverageResp:
     """Read-only checklist coverage for the room (Found / Unconfirmed /
