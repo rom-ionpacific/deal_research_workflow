@@ -46,7 +46,11 @@ class CoverageCriterion:
     applies_to: list[str]
     importance: Optional[str]
     status: str
+    # [{doc_name, present, evidence, copies}] -- dce collapses versions and
+    # copies of the same document into one entry, with copies as the count
     hits: list = field(default_factory=list)
+    # raw facet count before that collapsing (older dce omits it)
+    hit_total: int = 0
     keyword_hits: list = field(default_factory=list)
     review: Optional[dict] = None  # {status, note, reviewed_by, reviewed_at} or None
 

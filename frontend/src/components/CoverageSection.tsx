@@ -207,9 +207,21 @@ function CriterionRow({ roomId, c }: { roomId: number; c: CoverageCriterion }) {
 
       {expanded && hasDetail && (
         <div className="mt-2 ml-1 pl-2 border-l-2 border-slate-200 space-y-1.5">
+          {c.hit_total != null && c.hit_total > c.hits.length && (
+            <div className="text-[10px] uppercase tracking-wide text-slate-400">
+              {c.hits.length} document{c.hits.length === 1 ? "" : "s"} ·{" "}
+              {c.hit_total} matching files
+            </div>
+          )}
           {c.hits.map((h, i) => (
             <div key={i} className="text-xs">
               <span className="font-medium text-slate-600">{h.doc_name}</span>
+              {h.copies != null && h.copies > 1 && (
+                <span className="text-slate-400">
+                  {" "}
+                  ({h.copies} copies)
+                </span>
+              )}
               <span className="text-slate-400"> ({h.present}) — </span>
               <span className="text-slate-500 italic">"{h.evidence}"</span>
             </div>

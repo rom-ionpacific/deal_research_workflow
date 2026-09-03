@@ -607,6 +607,10 @@ class CoverageHitResp(BaseModel):
     doc_name: str
     present: str  # 'yes' | 'partial'
     evidence: str
+    # How many files in the room are this same document (draft,
+    # for-execution, fully-executed, binder copy...). 1 unless collapsed.
+    # Defaults so an older dce that doesn't send it still parses.
+    copies: int = 1
 
 
 class CoverageReviewResp(BaseModel):
@@ -624,6 +628,7 @@ class CoverageCriterionResp(BaseModel):
     importance: str | None
     status: str
     hits: list[CoverageHitResp]
+    hit_total: int = 0
     keyword_hits: list[str]
     review: CoverageReviewResp | None = None
 
@@ -699,6 +704,7 @@ def get_data_room_coverage(
                 criterion=c.criterion, applies_to=c.applies_to,
                 importance=c.importance, status=c.status,
                 hits=[CoverageHitResp(**h) for h in c.hits],
+                hit_total=getattr(c, "hit_total", 0) or 0,
                 keyword_hits=c.keyword_hits,
                 review=CoverageReviewResp(**c.review) if c.review else None,
             )

@@ -280,6 +280,10 @@ export interface CoverageHit {
   doc_name: string;
   present: "yes" | "partial";
   evidence: string;
+  // Files in the room that are this same document under a different
+  // version or in another folder (draft, for-execution, fully-executed,
+  // closing-binder copy). 1 when there is only one.
+  copies?: number;
 }
 
 export interface CoverageReview {
@@ -303,6 +307,8 @@ export interface CoverageCriterion {
   // 'Unconfirmed' | 'Candidate Gap' | 'Scanning'
   status: string;
   hits: CoverageHit[];
+  // Matching files before same-document copies were collapsed.
+  hit_total?: number;
   keyword_hits: string[];
   // Human-review-gate state (step 10a) -- null means never reviewed, NOT
   // "no gap". Only meaningful for status === 'Candidate Gap' today, but
