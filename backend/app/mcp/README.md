@@ -61,6 +61,36 @@ Write (2) — logging a Claude research session as a DealCloud Activity
   just returns the same preview. Only call with `confirm=true` after the
   user has explicitly approved the draft.
 
+Readability (1) — rewrite Claude's own prose via OpenAI:
+
+- `rewrite_plain_english` — takes text (normally an answer Claude just
+  produced) and returns it rewritten in plain English: acronyms expanded
+  on first use, jargon replaced, hedging cut, structure preserved.
+  Built because analysts were copying Claude answers into ChatGPT by hand
+  and pasting the result back — a round trip that happened entirely
+  outside any system Ion controls. Doing it as a tool call means the
+  rewrite lands in the chat transcript the Compliance-API archive already
+  captures, instead of in someone's personal ChatGPT history.
+
+  `effort` picks the model from a fixed allowlist (`fast` → gpt-5.6-luna,
+  `standard` → terra, `high` → sol) rather than accepting a model string,
+  so a rewrite can't get billed at a flagship rate. Every call returns
+  `usage` + `estimated_cost_usd`; a typical 1,500-word rewrite is ~$0.003
+  on `fast` and ~$0.03 on `standard`.
+
+  **This tool sends Ion text to a third party** — the only tool here that
+  does. Two consequences baked into `chat_rewrite_tools.py`:
+
+  - The server-level PII scrubber runs on tool *output*, which is the
+    wrong direction for an outbound call, so this tool scrubs its own
+    *input* before building the request. Any future tool with third-party
+    egress must do the same.
+  - It returns `numeric_fidelity` on every call — a multiset diff of every
+    digit-bearing token between the sent text and the rewrite. A
+    paraphraser that turns "8.4x" into "roughly 8x" is worse than verbose
+    prose in an IC context, so dropped/added figures are reported rather
+    than assumed absent.
+
 Both call `deal_cloud_enhancer`'s `/internal/activities*` endpoints (same
 shared-secret pattern as `read_document`'s dce call), since that's where
 the actual DealCloud API credentials live.
@@ -111,8 +141,11 @@ uvicorn app.mcp.asgi:app --host 0.0.0.0 --port $PORT
 Required env (loaded from `backend/.env` via pydantic-settings):
 
 - `DATABASE_URL` — Neon (required).
-- `OPENAI_API_KEY` — enables hybrid semantic org/doc search; without it,
-  search silently falls back to trigram-only.
+- `OPENAI_API_KEY` — enables hybrid semantic org/doc search **and**
+  `rewrite_plain_english`; without it, search silently falls back to
+  trigram-only and the rewrite tool returns "not configured". Note this
+  must be set on the **connector** service, not just the API service —
+  they're separate Render services off this one repo.
 - `DCE_INTERNAL_URL` + `DCE_INTERNAL_SECRET` — enable `read_document`
   full-body extraction; without them it returns a "not configured"
   message.
