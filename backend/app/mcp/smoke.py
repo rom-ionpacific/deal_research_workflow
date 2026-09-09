@@ -10,7 +10,7 @@ Run from the backend dir (so .env is picked up):
     python -m app.mcp.smoke --query "Lightspeed"
 
 Every check is read-only against DealCloud. One check
-(rewrite_plain_english) does make a real OpenAI call, costing a
+(rewrite_via_openai) does make a real OpenAI call, costing a
 fraction of a cent -- pass --no-openai to skip it.
 
 Exits non-zero on any failure so it can gate CI later.
@@ -76,7 +76,7 @@ async def _run(query: str, skip_openai: bool = False) -> int:
                 # for real below unless --no-openai: a registration-only
                 # check can't tell us whether OPENAI_API_KEY is actually
                 # set on *this* service, which is the failure we care about.
-                "rewrite_plain_english",
+                "rewrite_via_openai",
             }
             missing = expected - set(names)
             if missing:
@@ -132,7 +132,7 @@ async def _run(query: str, skip_openai: bool = False) -> int:
                     f"deals={len(gfs_payload.get('deals', []))}"
                 )
 
-            # 4) rewrite_plain_english -- a real OpenAI round trip on a
+            # 4) rewrite_via_openai -- a real OpenAI round trip on a
             # fixed jargon sentence. Costs well under a cent on 'fast',
             # and is the only check that proves OPENAI_API_KEY is present
             # on this service (a missing key also means semantic search
@@ -140,7 +140,7 @@ async def _run(query: str, skip_openai: bool = False) -> int:
             # fidelity check actually held the figures.
             if not skip_openai:
                 res_rw = await session.call_tool(
-                    "rewrite_plain_english",
+                    "rewrite_via_openai",
                     {
                         "text": (
                             "The Co's ARR CAGR was 42% w/ NDR of 118%, tho "
@@ -152,13 +152,13 @@ async def _run(query: str, skip_openai: bool = False) -> int:
                 rw = json.loads(_first_text(res_rw))
                 if not rw.get("ok"):
                     print(
-                        f"[FAIL] rewrite_plain_english -> "
+                        f"[FAIL] rewrite_via_openai -> "
                         f"{rw.get('error')}: {rw.get('message')}"
                     )
                     return 1
                 fid = rw["numeric_fidelity"]
                 print(
-                    f"[ok] rewrite_plain_english -> {rw['model']}, "
+                    f"[ok] rewrite_via_openai -> {rw['model']}, "
                     f"${rw['estimated_cost_usd']:.5f}, "
                     f"numbers_intact={fid['numbers_intact']}"
                 )
@@ -169,7 +169,7 @@ async def _run(query: str, skip_openai: bool = False) -> int:
                         f"{fid['numbers_dropped']} added={fid['numbers_added']}"
                     )
             else:
-                print("[skip] rewrite_plain_english (--no-openai)")
+                print("[skip] rewrite_via_openai (--no-openai)")
 
             # 5) Bad-arg path returns a clean message, not a crash.
             res3 = await session.call_tool("find_organizations", {"query": ""})
@@ -189,7 +189,7 @@ def main() -> None:
     ap.add_argument(
         "--no-openai",
         action="store_true",
-        help="skip the rewrite_plain_english round trip (the only "
+        help="skip the rewrite_via_openai round trip (the only "
              "check here that spends money -- fractions of a cent)",
     )
     args = ap.parse_args()

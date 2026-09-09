@@ -27,7 +27,7 @@ def build_default_server():
     base-value agent's tools (get_base_value_context / set_base_value), and
     the interactive eventuality-mapping agent's tools
     (get_eventuality_context / set_strategy_eventualities), and the
-    plain-English rewrite tool (rewrite_plain_english) — none of which
+    plain-English rewrite tool (rewrite_via_openai) — none of which
     exist on slack_registry itself, so Todd's Slack bot never gains write
     access, scenario-agent exposure, or an outbound path to OpenAI. See
     chat_mcp_tools.py, chat_modeling_session_tools.py,
@@ -42,7 +42,7 @@ def build_default_server():
     (no audit logs) this scrubber is the primary technical control.
 
     Note the direction: ``response_filter`` only sees text coming BACK
-    from a tool. ``rewrite_plain_english`` sends text OUT to OpenAI, so
+    from a tool. ``rewrite_via_openai`` sends text OUT to OpenAI, so
     the filter would mask an identifier only after the third party had
     already received it — that tool scrubs its own input instead. Any
     future tool with third-party egress must do the same.

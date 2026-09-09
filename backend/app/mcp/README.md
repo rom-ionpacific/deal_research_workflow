@@ -63,9 +63,12 @@ Write (2) — logging a Claude research session as a DealCloud Activity
 
 Readability (1) — rewrite Claude's own prose via OpenAI:
 
-- `rewrite_plain_english` — takes text (normally an answer Claude just
-  produced) and returns it rewritten in plain English: acronyms expanded
-  on first use, jargon replaced, hedging cut, structure preserved.
+- `rewrite_via_openai` — sends text (normally an answer Claude just
+  produced) **to OpenAI's API** and returns **OpenAI's** rewrite of it in
+  plain English: acronyms expanded on first use, jargon replaced, hedging
+  cut, structure preserved. The rewriting is done by an OpenAI model, not
+  by Claude; the response carries `provider: "openai"`, the `model` used
+  and a `note` saying so, so the answer can be attributed correctly.
   Built because analysts were copying Claude answers into ChatGPT by hand
   and pasting the result back — a round trip that happened entirely
   outside any system Ion controls. Doing it as a tool call means the
@@ -142,7 +145,7 @@ Required env (loaded from `backend/.env` via pydantic-settings):
 
 - `DATABASE_URL` — Neon (required).
 - `OPENAI_API_KEY` — enables hybrid semantic org/doc search **and**
-  `rewrite_plain_english`; without it, search silently falls back to
+  `rewrite_via_openai`; without it, search silently falls back to
   trigram-only and the rewrite tool returns "not configured". Note this
   must be set on the **connector** service, not just the API service —
   they're separate Render services off this one repo.

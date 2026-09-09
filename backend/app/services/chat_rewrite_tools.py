@@ -3,7 +3,7 @@
 Analysts told us they were copying Claude answers into ChatGPT because the
 prose is verbose and acronym-dense, then pasting the result back. That
 round trip happens outside every system we control -- so the deal text
-leaves Ion with no record that it did. `rewrite_plain_english` pulls that
+leaves Ion with no record that it did. `rewrite_via_openai` pulls that
 loop back inside a Claude chat (which the Compliance-API archive already
 captures), so the rewrite is a logged tool call instead of an untracked
 paste into someone's personal ChatGPT account.
@@ -364,16 +364,21 @@ class RewriteInput(BaseModel):
 
 
 @mcp_registry.tool(
-    "rewrite_plain_english",
+    "rewrite_via_openai",
     (
-        "Rewrite text into plain, readable English using OpenAI's model "
-        "instead of your own wording -- for when the user says an answer "
-        "is too verbose, too dense, or too full of acronyms to follow, or "
-        "asks to 'run this through ChatGPT'. Typically you pass your own "
-        "previous answer as `text`. "
-        "This SENDS THE TEXT TO OPENAI, a third party: only call it on "
-        "text the user has asked to have rewritten, never speculatively, "
-        "and never on raw document bodies the user hasn't seen. Structured "
+        "SENDS THE TEXT TO OPENAI (the ChatGPT company) and returns "
+        "OPENAI'S rewrite of it in plain English -- the rewriting is done "
+        "by an OpenAI model, not by you. This is the in-house replacement "
+        "for pasting an answer into ChatGPT by hand. "
+        "Use it when the user says an answer is too verbose, too dense, or "
+        "too full of acronyms to follow, or asks to 'run this through "
+        "ChatGPT' / 'ask ChatGPT' / 'ask OpenAI'. Typically you pass your "
+        "own previous answer as `text`. "
+        "Because the text LEAVES ION and goes to a third party, only call "
+        "it on text the user has asked to have rewritten, never "
+        "speculatively, and never on raw document bodies the user hasn't "
+        "seen. Tell the user the rewrite came from OpenAI, naming the "
+        "model returned in `model`. Structured "
         "identifiers (SSNs, bank/account numbers, tax IDs, cards) are "
         "masked before the text leaves, and the tool reports what it "
         "masked. "
@@ -388,7 +393,7 @@ class RewriteInput(BaseModel):
     ),
     RewriteInput,
 )
-def rewrite_plain_english(inp: RewriteInput, ctx: dict) -> ToolResult:
+def rewrite_via_openai(inp: RewriteInput, ctx: dict) -> ToolResult:
     if len(inp.text) > MAX_INPUT_CHARS:
         return ToolResult(
             output={
@@ -459,7 +464,7 @@ def rewrite_plain_english(inp: RewriteInput, ctx: dict) -> ToolResult:
         # prose was emitted. Retry once with more room.
         retry_budget = min(budget * 2, MAX_OUTPUT_TOKENS)
         logger.warning(
-            "rewrite_plain_english: empty message (finish=%s, %s reasoning "
+            "rewrite_via_openai: empty message (finish=%s, %s reasoning "
             "tokens) on budget %s; %s",
             finish,
             (usage.get("completion_tokens_details") or {}).get("reasoning_tokens"),
@@ -519,9 +524,15 @@ def rewrite_plain_english(inp: RewriteInput, ctx: dict) -> ToolResult:
     return ToolResult(
         output={
             "ok": True,
+            "provider": "openai",
             "rewritten_text": rewritten,
             "audience": inp.audience,
             "model": model,
+            "note": (
+                "This text was rewritten by OpenAI's "
+                f"{model}, not by Claude. The source text was sent to "
+                "OpenAI's API to produce it."
+            ),
             "usage": usage,
             "estimated_cost_usd": round(cost, 6),
             "numeric_fidelity": fidelity,
