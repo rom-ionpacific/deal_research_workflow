@@ -9,6 +9,10 @@ Run from the backend dir (so .env is picked up):
     python -m app.mcp.smoke
     python -m app.mcp.smoke --query "Lightspeed"
 
+Every check is read-only against DealCloud. One check
+(rewrite_plain_english) does make a real OpenAI call, costing a
+fraction of a cent -- pass --no-openai to skip it.
+
 Exits non-zero on any failure so it can gate CI later.
 """
 from __future__ import annotations
@@ -30,7 +34,7 @@ def _first_text(result) -> str:
     return ""
 
 
-async def _run(query: str) -> int:
+async def _run(query: str, skip_openai: bool = False) -> int:
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "app.mcp"],
@@ -68,6 +72,11 @@ async def _run(query: str) -> int:
                 # scenario-agent conversation now, registration-only check.
                 "get_modeling_session_options",
                 "start_modeling_session",
+                # Sends text to OpenAI (see chat_rewrite_tools.py). Called
+                # for real below unless --no-openai: a registration-only
+                # check can't tell us whether OPENAI_API_KEY is actually
+                # set on *this* service, which is the failure we care about.
+                "rewrite_plain_english",
             }
             missing = expected - set(names)
             if missing:
@@ -123,7 +132,46 @@ async def _run(query: str) -> int:
                     f"deals={len(gfs_payload.get('deals', []))}"
                 )
 
-            # 4) Bad-arg path returns a clean message, not a crash.
+            # 4) rewrite_plain_english -- a real OpenAI round trip on a
+            # fixed jargon sentence. Costs well under a cent on 'fast',
+            # and is the only check that proves OPENAI_API_KEY is present
+            # on this service (a missing key also means semantic search
+            # is silently on the trigram fallback). Asserts the numeric
+            # fidelity check actually held the figures.
+            if not skip_openai:
+                res_rw = await session.call_tool(
+                    "rewrite_plain_english",
+                    {
+                        "text": (
+                            "The Co's ARR CAGR was 42% w/ NDR of 118%, tho "
+                            "GTM CAC payback deteriorated QoQ to 19.4 months."
+                        ),
+                        "effort": "fast",
+                    },
+                )
+                rw = json.loads(_first_text(res_rw))
+                if not rw.get("ok"):
+                    print(
+                        f"[FAIL] rewrite_plain_english -> "
+                        f"{rw.get('error')}: {rw.get('message')}"
+                    )
+                    return 1
+                fid = rw["numeric_fidelity"]
+                print(
+                    f"[ok] rewrite_plain_english -> {rw['model']}, "
+                    f"${rw['estimated_cost_usd']:.5f}, "
+                    f"numbers_intact={fid['numbers_intact']}"
+                )
+                print(f"     {rw['rewritten_text'][:120]!r}")
+                if not fid["numbers_intact"]:
+                    print(
+                        f"[warn] figures moved: dropped="
+                        f"{fid['numbers_dropped']} added={fid['numbers_added']}"
+                    )
+            else:
+                print("[skip] rewrite_plain_english (--no-openai)")
+
+            # 5) Bad-arg path returns a clean message, not a crash.
             res3 = await session.call_tool("find_organizations", {"query": ""})
             txt3 = _first_text(res3)
             if "Invalid arguments" in txt3 or "error" in txt3.lower():
@@ -138,8 +186,14 @@ async def _run(query: str) -> int:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--query", default="Lightspeed")
+    ap.add_argument(
+        "--no-openai",
+        action="store_true",
+        help="skip the rewrite_plain_english round trip (the only "
+             "check here that spends money -- fractions of a cent)",
+    )
     args = ap.parse_args()
-    raise SystemExit(anyio.run(_run, args.query))
+    raise SystemExit(anyio.run(_run, args.query, args.no_openai))
 
 
 if __name__ == "__main__":

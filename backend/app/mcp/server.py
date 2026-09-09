@@ -26,11 +26,13 @@ def build_default_server():
     save_strategy_draft / finalize_strategy_agreement), the interactive
     base-value agent's tools (get_base_value_context / set_base_value), and
     the interactive eventuality-mapping agent's tools
-    (get_eventuality_context / set_strategy_eventualities) — none of which
+    (get_eventuality_context / set_strategy_eventualities), and the
+    plain-English rewrite tool (rewrite_plain_english) — none of which
     exist on slack_registry itself, so Todd's Slack bot never gains write
-    access or scenario-agent exposure. See chat_mcp_tools.py,
-    chat_modeling_session_tools.py, chat_scenario_tools.py,
-    chat_base_value_tools.py, and chat_eventuality_tools.py.
+    access, scenario-agent exposure, or an outbound path to OpenAI. See
+    chat_mcp_tools.py, chat_modeling_session_tools.py,
+    chat_scenario_tools.py, chat_base_value_tools.py,
+    chat_eventuality_tools.py, and chat_rewrite_tools.py.
 
     Every tool's text output is run through the PII scrubber, which masks
     high-harm structured identifiers (SSNs, bank/account/routing numbers,
@@ -38,6 +40,12 @@ def build_default_server():
     email snippet. Business contact names/emails are intentionally NOT
     redacted — they're the product of the dossier tools. On Team plans
     (no audit logs) this scrubber is the primary technical control.
+
+    Note the direction: ``response_filter`` only sees text coming BACK
+    from a tool. ``rewrite_plain_english`` sends text OUT to OpenAI, so
+    the filter would mask an identifier only after the third party had
+    already received it — that tool scrubs its own input instead. Any
+    future tool with third-party egress must do the same.
 
     Imported lazily so that merely importing this module (e.g. for a
     quick CLI ``--help``) doesn't force a settings load / DB pool
@@ -49,6 +57,7 @@ def build_default_server():
     from ..services import chat_base_value_tools  # noqa: F401 -- registers onto mcp_registry
     from ..services import chat_eventuality_tools  # noqa: F401 -- registers onto mcp_registry
     from ..services import chat_simulation_tools  # noqa: F401 -- registers onto mcp_registry
+    from ..services import chat_rewrite_tools  # noqa: F401 -- registers onto mcp_registry
 
     return build_server(
         mcp_registry, SERVER_NAME, response_filter=make_response_filter()
