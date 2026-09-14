@@ -319,9 +319,28 @@ MCP_REIMPLEMENTED: dict[str, str] = {
     ),
 }
 
-# Deliberately NOT exposed over MCP. Empty on purpose -- withholding a tool
-# breaks parity, so it needs a real reason here, not just an omission.
-MCP_WITHHELD: dict[str, str] = {}
+# Deliberately NOT exposed over MCP. Withholding a tool breaks parity, so
+# each one needs a real reason here, not just an omission.
+MCP_WITHHELD: dict[str, str] = {
+    "web_search": (
+        "Same logic as ask_data_room's reimplementation, taken one step "
+        "further: this tool's whole body is a server-side model call "
+        "(Gemini + Google Search grounding), and an MCP caller IS a model "
+        "with first-party web search of its own. Proxying its searches "
+        "through our Gemini key would be slower, worse grounded, billed to "
+        "us, and would need a GEMINI_API_KEY on ion-claude-mcp that the "
+        "service does not have -- exactly the failure ask_data_room hit. "
+        "There is no retrieval-only version to reimplement, so it is "
+        "withheld rather than replaced."
+    ),
+    "research_company_web": (
+        "Withheld for the same reason as web_search: it is a grounded "
+        "Gemini call, and a claude.ai caller can research a company with "
+        "its own web search. The value Todd gets from it -- a fixed "
+        "section layout so the model doesn't improvise one per lookup -- "
+        "is prompt guidance the MCP caller can be given directly."
+    ),
+}
 
 
 def _assert_surface_declared() -> None:

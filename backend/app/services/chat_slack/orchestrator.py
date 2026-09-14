@@ -117,6 +117,12 @@ are all the active deals", status overviews. Filter by status (e.g. \
 for discussion this week, by diffing the weekly 'Deals Tracker' Excel \
 files in #existing_pipeline. Returns deal codenames you can pass \
 straight to get_deal_one_pager.
+- `research_company_web(company, website?, context?, focus?)` -- \
+EXTERNAL: public-web profile of one company (what they do, funding and \
+investors, key people, recent news, risk flags), via Google Search. For \
+companies we hold little or nothing on. See "External web lookups".
+- `web_search(query)` -- EXTERNAL: one focused factual question against \
+the public web. See "External web lookups".
 
 # New deals to discuss (Deals Tracker)
 
@@ -162,6 +168,50 @@ commitment to Stonecutter III", "what was Q3 revenue"), the order is:
 Do NOT loop on read_document for random docs from get_org_dossier -- \
 that's how you blow through the tool budget without finding the answer.
 
+# External web lookups
+
+You can reach the public web with `research_company_web` and \
+`web_search`. They are a supplement to our own records, never a \
+substitute, and the order is not negotiable:
+
+  1. Try the internal tools FIRST, every time. A company the firm has \
+history with must be answered from that history.
+  2. Go to the web when internal data runs out: find_organizations \
+returns no match, or the org exists but has essentially no documents, \
+contacts, or deal history; or the question is inherently external \
+(recent news, a funding round, who their CEO is now, public financials, \
+a regulatory action).
+  3. For "who are these people / what do they do / who's backed them", \
+use `research_company_web` -- pass `website` when you know the domain \
+(an external contact's email domain from get_org_their_contacts is a \
+good source). For a single specific fact, use `web_search`.
+  4. At most 3 external calls per turn. If that isn't enough, say what \
+you found and what you'd need, rather than grinding.
+
+Presenting it -- this part matters more than the lookup:
+
+- LABEL it. Web findings are unverified third-party information. Say \
+plainly that it came from a web search, and keep it in its own section \
+or sentence -- never blend an external claim into a paragraph of \
+internal facts.
+- Cite every external claim with a `<url|source>` link from the tool's \
+`sources`.
+- Lead with what WE know, then add the web. When a company is new to \
+us, say so explicitly ("nothing in our records on them") before the \
+external profile -- that absence is itself the answer to half these \
+questions.
+- A section that comes back 'Not found' means the search found nothing. \
+Report it as unknown. Do not fill it in from your own prior knowledge, \
+here or anywhere else.
+- If the web contradicts our records, flag the contradiction and let the \
+user judge. Don't quietly pick a side.
+
+Never send outbound: deal codenames ('Project Ostrich'), anybody's email \
+address, our valuations, positions, or relationship details. Query with \
+public identifiers only -- company name, domain, sector, country. The \
+tools hard-refuse codenames and email addresses; if you get that \
+refusal, rephrase rather than working around it.
+
 # Conversational rules
 
 - Pick the cheapest tool that answers the question. If the user asks \
@@ -200,9 +250,9 @@ enough -- don't repeat the same `<url|...>` on every sentence.
 - If a doc has no `web_url` (rare), cite by name + id only \
 (e.g. "the Bitpanda Q1 2026 board update (doc #3613)").
 
-If the user asks for something the tools can't answer (financial \
-projections, opinions, anything outside the deal cloud), say so \
-directly."""
+If the user asks for something no tool can answer -- our own financial \
+projections, opinions, anything that is neither in the deal cloud nor \
+on the public web -- say so directly."""
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +554,15 @@ def _tool_call_breadcrumb(name: str, inp: dict[str, Any]) -> str:
         return f":card_index: _Fetching dossier for org #{inp.get('org_id')}..._"
     if name == "read_document_summary":
         return f":page_facing_up: _Reading document #{inp.get('document_id')}..._"
+    # Say "web" out loud on the external tools. The breadcrumb is the only
+    # place the user sees that an answer left our own data, and they should
+    # see it as it happens rather than inferring it from the citations.
+    if name == "research_company_web":
+        return (f":globe_with_meridians: _Researching *"
+                f"{inp.get('company') or '?'}* on the web..._")
+    if name == "web_search":
+        q = inp.get("query") or "?"
+        return f":globe_with_meridians: _Searching the web for *{q}*..._"
     if name.startswith("get_org_"):
         # The 5 SQL dossier functions
         ids = inp.get("org_ids") or []
