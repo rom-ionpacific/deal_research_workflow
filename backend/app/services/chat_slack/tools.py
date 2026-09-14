@@ -20,7 +20,8 @@ from typing import Any
 import psycopg2.extras
 from pydantic import BaseModel, Field
 
-from ..chat_lib import ToolRegistry, ToolResult
+from ..chat_lib import (ToolRegistry, ToolResult,
+                        register_company_web_tools, register_web_tools)
 from ..org_dossier import get_org_dossier as _get_org_dossier
 from ..org_search import find_comparable_organizations, search_organizations
 from .deals_tracker import compute_new_deals_to_discuss, TrackerError
@@ -2532,3 +2533,22 @@ def check_data_room_build_sweep(inp: CheckDataRoomBuildSweepInput, ctx: dict) ->
                  "question was not found in the documents that were checked."
         ),
     })
+
+
+# ---------------------------------------------------------------------------
+# External web lookups (Gemini + Google Search grounding)
+# ---------------------------------------------------------------------------
+#
+# Always-on for Todd, unlike the web chat where the same `web_search` is
+# gated behind a per-message toggle. Slack has nowhere to put a toggle, and
+# a magic phrase the user has to know ("search the web for...") is a worse
+# answer than a tool the model reaches for only when internal data runs
+# out. The internal-first ordering is therefore enforced in the SYSTEM
+# PROMPT (see chat_slack/orchestrator.py) rather than by withholding the
+# schema, and both tools refuse to send email addresses or Ion deal
+# codenames outbound regardless of what the model asks for.
+#
+# Registered last so the tool order -- which prompt caching keys on --
+# stays stable for every internal tool above.
+register_web_tools(slack_registry)
+register_company_web_tools(slack_registry)
