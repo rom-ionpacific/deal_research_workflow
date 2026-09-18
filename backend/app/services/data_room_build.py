@@ -156,3 +156,75 @@ def get_build_job(job_id: int) -> BuildJobDetail:
         content_pending=resp.get("content_pending"),
         subscriber_emails=resp.get("subscriber_emails") or [],
     )
+
+
+# ---------------------------------------------------------------------------
+# Unread-document partitioning, shared by the two surfaces that report it
+# ---------------------------------------------------------------------------
+
+# dce's reason codes (data_room_build_job.REASON_*). Kept as plain strings --
+# drw never imports dce Python, per this module's own convention.
+REASON_OVER_CAP = "over_cap"
+REASON_STALE_SKIP = "stale_skip"
+REASON_UNREADABLE = "unreadable"
+
+_SPREADSHEET_EXTS = (".xlsx", ".xls", ".xlsm", ".csv")
+
+
+def _fmt_mb(n: int | None) -> str:
+    return f"{n / 1_000_000:.0f} MB" if n else "unknown size"
+
+
+def partition_unread_docs(coverage_summary: dict) -> dict:
+    """Split a coverage_summary's unread documents by WHY they went unread.
+
+    Returns {over_cap, stale_skip, unreadable, total, has_spreadsheet},
+    where the first three are lists of dce's rich doc dicts.
+
+    Why this exists: every unread file used to be reported with one
+    sentence -- "could NOT be read by the scanner ... spreadsheets are
+    rarely machine-readable here". For a 146 MB AGM PDF that was wrong
+    twice over (not a spreadsheet; never read rather than unreadable), and
+    it hid the one thing the reader could actually act on, which was to
+    compress the file. The three reasons need three different sentences:
+
+      over_cap    too large for its type's ceiling -- compress or split it
+      stale_skip  skipped under a LOWER old ceiling, now within the limit,
+                  awaiting a re-scan it will not queue for by itself
+      unreadable  opened and yielded nothing usable -- retryable
+
+    Falls back to "everything is `unreadable`" when the entries carry no
+    `reason`, which is what a coverage_summary written before dce emitted
+    reasons looks like. That keeps an old room's warning exactly as it was
+    rather than silently reclassifying it.
+
+    `has_spreadsheet` is reported so the spreadsheet caveat can be attached
+    only when a spreadsheet is actually among the unread files -- it was
+    previously asserted unconditionally, including for rooms whose unread
+    files were all PDFs.
+    """
+    docs = coverage_summary.get("unreadable_docs") or []
+    total = coverage_summary.get("docs_unreadable") or 0
+    out = {"over_cap": [], "stale_skip": [], "unreadable": [],
+           "total": total, "has_spreadsheet": False}
+    for d in docs:
+        reason = (d or {}).get("reason") or REASON_UNREADABLE
+        if reason not in out:
+            reason = REASON_UNREADABLE
+        out[reason].append(d)
+        name = ((d or {}).get("name") or "").lower()
+        if name.endswith(_SPREADSHEET_EXTS):
+            out["has_spreadsheet"] = True
+    return out
+
+
+def describe_unread_doc(d: dict) -> str:
+    """One file, with the size detail that makes its reason concrete."""
+    name = d.get("name") or "unnamed file"
+    if d.get("reason") == REASON_OVER_CAP:
+        return (f"{name} ({_fmt_mb(d.get('size_bytes'))}, over the "
+                f"{_fmt_mb(d.get('size_limit'))} limit for this file type)")
+    if d.get("reason") == REASON_STALE_SKIP:
+        return (f"{name} ({_fmt_mb(d.get('size_bytes'))}, now within the "
+                f"{_fmt_mb(d.get('size_limit'))} limit -- needs a re-scan)")
+    return name

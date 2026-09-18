@@ -18,6 +18,13 @@ import logging
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from ..config import settings
+from ..services.data_room_build import (
+    REASON_OVER_CAP,
+    REASON_STALE_SKIP,
+    REASON_UNREADABLE,
+    describe_unread_doc,
+    partition_unread_docs,
+)
 from ..services.slack.users import notify_slack_dm
 
 logger = logging.getLogger(__name__)
@@ -57,19 +64,50 @@ def _format_unreadable_warning(coverage_summary: dict) -> str:
     n = coverage_summary.get("docs_unreadable") or 0
     if not n:
         return ""
-    names = coverage_summary.get("unreadable_doc_names") or []
     scanned = coverage_summary.get("docs_scanned")
     in_folder = coverage_summary.get("docs_in_folder")
+    parts = partition_unread_docs(coverage_summary)
+
+    # "were not read" rather than "could NOT be read": most of these are
+    # files the scanner declined to open on size grounds, not files it
+    # failed on, and the old wording made a perfectly good 146 MB PDF sound
+    # corrupt. The spreadsheet caveat now only appears when a spreadsheet is
+    # actually among them.
+    caveat = (" Spreadsheets in particular are rarely machine-readable here."
+              if parts["has_spreadsheet"] else "")
     head = (
-        f":warning: *{n} of {in_folder} document(s) could NOT be read* "
-        f"(only {scanned} were scanned). Spreadsheets in particular are "
-        f"rarely machine-readable here, so treat the gap list below as "
+        f":warning: *{n} of {in_folder} document(s) were NOT read* "
+        f"(only {scanned} were scanned).{caveat} Treat the gap list below as "
         f"*not yet evidenced* rather than confirmed missing -- the answer "
         f"may be inside one of these files:"
     )
-    listed = "\n".join(f"- {nm}" for nm in names)
+
+    sections: list[str] = []
+    for reason, title in (
+        (REASON_OVER_CAP, "*Too large to read* -- compress or split, "
+                          "then re-run this room:"),
+        (REASON_STALE_SKIP, "*Skipped under an older size limit* -- now "
+                            "within the limit, needs a re-scan:"),
+        (REASON_UNREADABLE, "*Could not be read* (opened, no usable text):"),
+    ):
+        docs = parts[reason]
+        if docs:
+            sections.append(
+                title + "\n"
+                + "\n".join(f"- {describe_unread_doc(d)}" for d in docs)
+            )
+    if not sections:
+        # No rich entries at all -- an old coverage_summary with only the
+        # names list. Report it exactly as before rather than lose the names.
+        names = coverage_summary.get("unreadable_doc_names") or []
+        sections.append("\n".join(f"- {nm}" for nm in names))
+
+    listed = "\n".join(sections)
+    shown = sum(len(parts[r]) for r in
+                (REASON_OVER_CAP, REASON_STALE_SKIP, REASON_UNREADABLE)) or \
+        len(coverage_summary.get("unreadable_doc_names") or [])
     if coverage_summary.get("unreadable_doc_names_truncated"):
-        listed += f"\n- ...and {n - len(names)} more"
+        listed += f"\n- ...and {n - shown} more"
     return f"{head}\n{listed}\n\n"
 
 
