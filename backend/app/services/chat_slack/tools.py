@@ -22,6 +22,9 @@ from pydantic import BaseModel, Field
 
 from ..chat_lib import (ToolRegistry, ToolResult,
                         register_company_web_tools, register_web_tools)
+from ..data_room_build import (REASON_OVER_CAP, REASON_STALE_SKIP,
+                               REASON_UNREADABLE, describe_unread_doc,
+                               partition_unread_docs)
 from ..org_dossier import get_org_dossier as _get_org_dossier
 from ..org_search import find_comparable_organizations, search_organizations
 from .deals_tracker import compute_new_deals_to_discuss, TrackerError
@@ -2163,23 +2166,56 @@ def _unreadable_note(summary: dict) -> str:
     n = summary.get("docs_unreadable") or 0
     if not n:
         return ""
-    # Prefer the rich form (name + path + web_url) so each unread file can be
-    # rendered as a clickable link; fall back to names-only for a
-    # coverage_summary written before dce started emitting unreadable_docs.
-    docs = summary.get("unreadable_docs")
-    if docs:
-        listed = "; ".join(
-            f"{d.get('name')} [link: {d.get('web_url')}]" if d.get("web_url")
-            else f"{d.get('name')} [no link; path: {d.get('path') or 'unknown'}]"
+
+    def _render(docs: list[dict]) -> str:
+        return "; ".join(
+            f"{describe_unread_doc(d)} [link: {d.get('web_url')}]"
+            if d.get("web_url")
+            else f"{describe_unread_doc(d)} "
+                 f"[no link; path: {d.get('path') or 'unknown'}]"
             for d in docs
         )
+
+    # Prefer the rich form (name + path + web_url + reason) so each unread
+    # file can be rendered as a clickable link AND attributed to the right
+    # cause; fall back to names-only for a coverage_summary written before
+    # dce started emitting unreadable_docs.
+    docs = summary.get("unreadable_docs")
+    if docs:
+        parts = partition_unread_docs(summary)
+        # Each cause gets its own clause, because they tell the user to do
+        # three different things. Reporting them as one undifferentiated
+        # "could not be read" is what described a 146 MB AGM PDF as a
+        # scanner failure with a spreadsheet caveat attached.
+        clauses = []
+        if parts[REASON_OVER_CAP]:
+            clauses.append(
+                f"TOO LARGE to read, so never opened -- say so plainly and "
+                f"that compressing or splitting the file would fix it: "
+                f"{_render(parts[REASON_OVER_CAP])}"
+            )
+        if parts[REASON_STALE_SKIP]:
+            clauses.append(
+                f"skipped under an older, lower size limit and now WITHIN "
+                f"the limit -- these need a re-scan, they are not too large "
+                f"today: {_render(parts[REASON_STALE_SKIP])}"
+            )
+        if parts[REASON_UNREADABLE]:
+            caveat = (" (spreadsheets are rarely machine-readable here)"
+                      if parts["has_spreadsheet"] else "")
+            clauses.append(
+                f"opened but yielded no usable text{caveat}: "
+                f"{_render(parts[REASON_UNREADABLE])}"
+            )
+        listed = ". Also ".join(clauses)
         count_listed = len(docs)
         link_rule = (
             " When you name any of these files to the user, make it a "
             "clickable markdown link to its link value -- [filename](url) -- "
             "never a bare filename the reader has to go hunting for, and "
             "never a raw URL. For a file with no link, give its path instead "
-            "and say it has no link; do not invent one."
+            "and say it has no link; do not invent one. Do NOT tell the user "
+            "a file is unreadable when the reason given is its size."
         )
     else:
         names = summary.get("unreadable_doc_names") or []
@@ -2189,12 +2225,11 @@ def _unreadable_note(summary: dict) -> str:
     if summary.get("unreadable_doc_names_truncated"):
         listed += f"; ...and {n - count_listed} more"
     return (
-        f" IMPORTANT: {n} of {summary.get('docs_in_folder')} documents could "
-        f"NOT be read by the scanner (only {summary.get('docs_scanned')} were "
-        f"scanned) -- spreadsheets are rarely machine-readable here. Tell the "
-        f"user the gap list is NOT YET EVIDENCED rather than confirmed "
+        f" IMPORTANT: {n} of {summary.get('docs_in_folder')} documents were "
+        f"NOT read (only {summary.get('docs_scanned')} were scanned). Tell "
+        f"the user the gap list is NOT YET EVIDENCED rather than confirmed "
         f"missing, and name these unread files as the place the answer may "
-        f"actually live: {listed}.{link_rule}"
+        f"actually live, with the reason for each: {listed}.{link_rule}"
     )
 
 
