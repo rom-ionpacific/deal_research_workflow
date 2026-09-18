@@ -166,6 +166,7 @@ def get_build_job(job_id: int) -> BuildJobDetail:
 # drw never imports dce Python, per this module's own convention.
 REASON_OVER_CAP = "over_cap"
 REASON_STALE_SKIP = "stale_skip"
+REASON_UNSUPPORTED = "unsupported_type"
 REASON_UNREADABLE = "unreadable"
 
 _SPREADSHEET_EXTS = (".xlsx", ".xls", ".xlsm", ".csv")
@@ -188,10 +189,15 @@ def partition_unread_docs(coverage_summary: dict) -> dict:
     it hid the one thing the reader could actually act on, which was to
     compress the file. The three reasons need three different sentences:
 
-      over_cap    too large for its type's ceiling -- compress or split it
-      stale_skip  skipped under a LOWER old ceiling, now within the limit,
-                  awaiting a re-scan it will not queue for by itself
-      unreadable  opened and yielded nothing usable -- retryable
+      over_cap     too large for its type's ceiling -- compress or split it
+      stale_skip   skipped under a LOWER old ceiling, now within the limit,
+                   awaiting a re-scan it will not queue for by itself
+      unsupported  no reader for this type at ALL (video, .msg) -- neither
+                   size nor a re-scan changes anything, so do not suggest
+                   either. Kept apart from over_cap because those files are
+                   usually ALSO oversized, and "compress this 1.5 GB video
+                   so the checklist can read it" is advice that cannot work.
+      unreadable   opened and yielded nothing usable -- retryable
 
     Falls back to "everything is `unreadable`" when the entries carry no
     `reason`, which is what a coverage_summary written before dce emitted
@@ -205,8 +211,8 @@ def partition_unread_docs(coverage_summary: dict) -> dict:
     """
     docs = coverage_summary.get("unreadable_docs") or []
     total = coverage_summary.get("docs_unreadable") or 0
-    out = {"over_cap": [], "stale_skip": [], "unreadable": [],
-           "total": total, "has_spreadsheet": False}
+    out = {"over_cap": [], "stale_skip": [], "unsupported_type": [],
+           "unreadable": [], "total": total, "has_spreadsheet": False}
     for d in docs:
         reason = (d or {}).get("reason") or REASON_UNREADABLE
         if reason not in out:
@@ -227,4 +233,6 @@ def describe_unread_doc(d: dict) -> str:
     if d.get("reason") == REASON_STALE_SKIP:
         return (f"{name} ({_fmt_mb(d.get('size_bytes'))}, now within the "
                 f"{_fmt_mb(d.get('size_limit'))} limit -- needs a re-scan)")
+    if d.get("reason") == REASON_UNSUPPORTED:
+        return f"{name} ({d.get('mime_type') or 'unsupported type'})"
     return name
