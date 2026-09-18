@@ -22,6 +22,7 @@ from ..services.data_room_build import (
     REASON_OVER_CAP,
     REASON_STALE_SKIP,
     REASON_UNREADABLE,
+    REASON_UNSUPPORTED,
     describe_unread_doc,
     partition_unread_docs,
 )
@@ -88,6 +89,8 @@ def _format_unreadable_warning(coverage_summary: dict) -> str:
                           "then re-run this room:"),
         (REASON_STALE_SKIP, "*Skipped under an older size limit* -- now "
                             "within the limit, needs a re-scan:"),
+        (REASON_UNSUPPORTED, "*No reader for this file type* -- nothing to "
+                             "do; the content is not machine-readable here:"),
         (REASON_UNREADABLE, "*Could not be read* (opened, no usable text):"),
     ):
         docs = parts[reason]
@@ -104,7 +107,8 @@ def _format_unreadable_warning(coverage_summary: dict) -> str:
 
     listed = "\n".join(sections)
     shown = sum(len(parts[r]) for r in
-                (REASON_OVER_CAP, REASON_STALE_SKIP, REASON_UNREADABLE)) or \
+                (REASON_OVER_CAP, REASON_STALE_SKIP, REASON_UNSUPPORTED,
+                 REASON_UNREADABLE)) or \
         len(coverage_summary.get("unreadable_doc_names") or [])
     if coverage_summary.get("unreadable_doc_names_truncated"):
         listed += f"\n- ...and {n - shown} more"

@@ -23,8 +23,8 @@ from pydantic import BaseModel, Field
 from ..chat_lib import (ToolRegistry, ToolResult,
                         register_company_web_tools, register_web_tools)
 from ..data_room_build import (REASON_OVER_CAP, REASON_STALE_SKIP,
-                               REASON_UNREADABLE, describe_unread_doc,
-                               partition_unread_docs)
+                               REASON_UNREADABLE, REASON_UNSUPPORTED,
+                               describe_unread_doc, partition_unread_docs)
 from ..org_dossier import get_org_dossier as _get_org_dossier
 from ..org_search import find_comparable_organizations, search_organizations
 from .deals_tracker import compute_new_deals_to_discuss, TrackerError
@@ -2199,6 +2199,12 @@ def _unreadable_note(summary: dict) -> str:
                 f"skipped under an older, lower size limit and now WITHIN "
                 f"the limit -- these need a re-scan, they are not too large "
                 f"today: {_render(parts[REASON_STALE_SKIP])}"
+            )
+        if parts[REASON_UNSUPPORTED]:
+            clauses.append(
+                f"of a file type with NO reader here at all, so neither "
+                f"compressing nor re-scanning would help -- do not suggest "
+                f"either: {_render(parts[REASON_UNSUPPORTED])}"
             )
         if parts[REASON_UNREADABLE]:
             caveat = (" (spreadsheets are rarely machine-readable here)"
