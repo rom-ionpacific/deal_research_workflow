@@ -60,17 +60,24 @@ def handle_turn(
     text: str,
     trigger: str,
     response_url: Optional[str],
+    files: Optional[list[dict]] = None,
 ) -> None:
     """Single conversation turn. Runs in a BackgroundTask, so blocking
     Slack + DB calls are fine.
 
     `trigger='slash'` keeps the canned 5-answer dossier flow. Any other
     trigger (DM, @mention) goes through the Phase 3 conversational
-    engine in `chat_slack/`."""
+    engine in `chat_slack/`.
+
+    `files` is the Slack event's attachment array. Only the
+    conversational path can do anything with it -- the slash flow is a
+    fixed org dossier, and `/todd` can't carry an upload anyway."""
     if client is None and not response_url:
         print("[todd/handle_turn] no Slack client AND no response_url; dropping",
               flush=True)
         return
+
+    files = files or []
 
     query = (text or "").strip()
 
@@ -85,6 +92,7 @@ def handle_turn(
                 user_id=user_id,
                 user_email=user_email,
                 text=query,
+                files=files,
             )
         except Exception as e:
             # Surface a friendly error so the user doesn't stare at

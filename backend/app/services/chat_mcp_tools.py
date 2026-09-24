@@ -340,6 +340,22 @@ MCP_WITHHELD: dict[str, str] = {
         "section layout so the model doesn't improvise one per lookup -- "
         "is prompt guidance the MCP caller can be given directly."
     ),
+    "read_uploaded_file": (
+        "Reads a file somebody dropped into a Slack conversation with "
+        "Todd, scoped to that conversation by the (team_id, channel_id) "
+        "in ctx. An MCP caller has no Slack conversation, so ctx is empty "
+        "and a lookup by file_name would fall back to matching across "
+        "EVERY channel -- one user's DM upload surfacing in another "
+        "user's claude.ai session. There is nothing to reimplement "
+        "either: a claude.ai caller attaches files to its own context "
+        "directly and never needs this."
+    ),
+    "list_uploaded_files": (
+        "Same reason as read_uploaded_file: it enumerates one Slack "
+        "channel's uploads and needs the conversation key from ctx, "
+        "which an MCP caller doesn't have. Exposing it would list other "
+        "people's attachments or nothing at all."
+    ),
 }
 
 
