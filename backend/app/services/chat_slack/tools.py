@@ -2577,6 +2577,207 @@ def check_data_room_build_sweep(inp: CheckDataRoomBuildSweepInput, ctx: dict) ->
 
 
 # ---------------------------------------------------------------------------
+# Files the user dropped into the Slack conversation
+# ---------------------------------------------------------------------------
+#
+# Uploads are extracted eagerly, at message-receive time, by
+# chat_slack/uploads.py -- the turn the model sees already carries the
+# first EXCERPT_CHARS of each file. These two tools cover what the
+# excerpt can't: the rest of a long document, and a file from an earlier
+# turn that has since fallen out of the trimmed message history.
+#
+# Deliberately NOT exposed over MCP (see chat_mcp_tools.MCP_WITHHELD) --
+# there is no Slack conversation on that surface, so there is nothing
+# for them to read.
+
+
+class ReadUploadedFileInput(BaseModel):
+    file_id: str | None = Field(
+        None,
+        description=(
+            "Slack file id of the upload, e.g. 'F07ABCDEF'. This is the "
+            "file_id shown in the ATTACHED FILES block of the user's "
+            "message. Preferred over file_name."
+        ),
+        max_length=64,
+    )
+    file_name: str | None = Field(
+        None,
+        description=(
+            "Alternative to file_id: the file's name, or part of it "
+            "(case-insensitive). Use when the user refers to a file from an "
+            "earlier turn by name and you don't have its id. The most "
+            "recently uploaded match in this conversation wins."
+        ),
+        max_length=255,
+    )
+    query: str | None = Field(
+        None,
+        description=(
+            "Topic filter. When set, returns only the ~500-character windows "
+            "around each occurrence of this text instead of the document from "
+            "the top. Use it on anything long -- a deck, a memo, an LPA -- "
+            "rather than paging through with max_chars."
+        ),
+        max_length=200,
+    )
+    max_chars: int = Field(
+        20000,
+        description="Cap on returned characters.",
+        ge=500, le=60000,
+    )
+    offset: int = Field(
+        0,
+        description=(
+            "Start reading this many characters in. Only for walking a long "
+            "file sequentially when query isn't the right tool; ignored when "
+            "query is set."
+        ),
+        ge=0,
+    )
+
+
+@slack_registry.tool(
+    "read_uploaded_file",
+    (
+        "Read the text of a file the user uploaded to this Slack "
+        "conversation (PDF / DOCX / PPTX / XLSX / TXT / image / zip). "
+        "The user's message already shows the first ~2,000 characters of "
+        "anything they just attached -- call this when you need more than "
+        "that, or when they refer to a file from an earlier message. "
+        "Identify it by file_id (preferred) or file_name. For anything "
+        "long, pass `query` to pull just the passages about a topic "
+        "instead of reading from the top. Returns body, total_chars, "
+        "truncated, plus the file's Slack permalink."
+    ),
+    ReadUploadedFileInput,
+)
+def read_uploaded_file(inp: ReadUploadedFileInput, ctx: dict) -> ToolResult:
+    from ..document_body import _filter_body_to_snippets
+    from .uploads import lookup_uploaded_file
+
+    if not inp.file_id and not inp.file_name:
+        return ToolResult(output={
+            "ok": False,
+            "error": "Give me either file_id or file_name.",
+        })
+
+    row = lookup_uploaded_file(
+        slack_file_id=inp.file_id,
+        name=inp.file_name,
+        team_id=ctx.get("team_id"),
+        channel_id=ctx.get("channel_id"),
+    )
+    if row is None:
+        return ToolResult(output={
+            "ok": False,
+            "error": (
+                "No uploaded file matching "
+                f"{inp.file_id or inp.file_name!r} in this conversation. "
+                "Call list_uploaded_files to see what has been shared here."
+            ),
+        })
+
+    if not row["ok"]:
+        return ToolResult(output={
+            "ok": False,
+            "name": row["name"],
+            "permalink": row["permalink"],
+            "error": row["error"] or "That file couldn't be read.",
+        })
+
+    body = row["body"] or ""
+    total = len(body)
+
+    if inp.query:
+        filtered = _filter_body_to_snippets(body, inp.query, inp.max_chars)
+        if not filtered:
+            return ToolResult(output={
+                "ok": False,
+                "name": row["name"],
+                "total_chars": total,
+                "error": f"query_not_found:{inp.query}",
+                "hint": ("That phrase isn't in the file. Try a shorter or "
+                         "different term, or drop query to read from the top."),
+            })
+        return ToolResult(output={
+            "ok": True,
+            "file_id": row["slack_file_id"],
+            "name": row["name"],
+            "permalink": row["permalink"],
+            "query": inp.query,
+            "body": filtered,
+            "total_chars": total,
+            "returned_chars": len(filtered),
+            "truncated": len(filtered) < total,
+            "note": "Filtered to passages matching query, not the whole file.",
+        })
+
+    chunk = body[inp.offset:inp.offset + inp.max_chars]
+    end = inp.offset + len(chunk)
+    return ToolResult(output={
+        "ok": True,
+        "file_id": row["slack_file_id"],
+        "name": row["name"],
+        "permalink": row["permalink"],
+        "body": chunk,
+        "offset": inp.offset,
+        "total_chars": total,
+        "returned_chars": len(chunk),
+        "truncated": end < total,
+        "next_offset": end if end < total else None,
+    })
+
+
+class ListUploadedFilesInput(BaseModel):
+    limit: int = Field(
+        20, description="Max files to list, newest first.", ge=1, le=50
+    )
+
+
+@slack_registry.tool(
+    "list_uploaded_files",
+    (
+        "List the files people have uploaded to this Slack conversation, "
+        "newest first, with each one's file_id, name, size and whether it "
+        "could be read. Use when the user refers to a file you can't "
+        "identify ('the deck I sent last week') so you can pick the right "
+        "file_id for read_uploaded_file."
+    ),
+    ListUploadedFilesInput,
+)
+def list_uploaded_files(inp: ListUploadedFilesInput, ctx: dict) -> ToolResult:
+    from .uploads import list_conversation_uploads
+
+    team_id = ctx.get("team_id")
+    channel_id = ctx.get("channel_id")
+    if not team_id or not channel_id:
+        return ToolResult(output={
+            "ok": False,
+            "error": "No Slack conversation context available.",
+        })
+
+    rows = list_conversation_uploads(
+        team_id=team_id, channel_id=channel_id, limit=inp.limit
+    )
+    return ToolResult(output={
+        "ok": True,
+        "count": len(rows),
+        "files": [{
+            "file_id": r["slack_file_id"],
+            "name": r["name"],
+            "filetype": r["filetype"],
+            "size_bytes": r["size_bytes"],
+            "readable": r["ok"],
+            "total_chars": r["total_chars"],
+            "error": r["error"],
+            "permalink": r["permalink"],
+            "uploaded_at": r["created_at"].isoformat() if r["created_at"] else None,
+        } for r in rows],
+    })
+
+
+# ---------------------------------------------------------------------------
 # External web lookups (Gemini + Google Search grounding)
 # ---------------------------------------------------------------------------
 #

@@ -96,7 +96,21 @@ async def slack_events(
     # at first call).
     from ..services.slack.client import bot_user_id
     bot_uid = bot_user_id()
-    if (
+    # A human's file upload arrives as subtype='file_share' carrying a
+    # `files` array. That is NOT an echo, but the `app_id` clause below is
+    # broad enough to swallow one if Slack ever stamps an app_id on it --
+    # which would make attachments silently never work, with no error to
+    # debug from. So exempt the case explicitly: a message with files, from
+    # a real user who is not us, with no bot_id, is somebody sending Todd a
+    # document. The bot_id / bot_uid checks still catch Todd's own uploads.
+    human_upload = bool(
+        event.get("files")
+        and event.get("user")
+        and not event.get("bot_id")
+        and event.get("user") != bot_uid
+        and event.get("subtype") in (None, "file_share")
+    )
+    if not human_upload and (
         event.get("bot_id")
         or event.get("subtype") in ("bot_message", "message_changed",
                                      "message_deleted", "message_replied")
@@ -116,6 +130,11 @@ async def slack_events(
         return empty_ok()
 
     user_id = event.get("user")
+    # Slack sends the attachment metadata inline on the message event. It
+    # is only present when the app holds the `files:read` scope -- without
+    # it the array is absent and an upload looks like an empty message,
+    # which is exactly what used to happen.
+    files = [f for f in (event.get("files") or []) if isinstance(f, dict)]
     raw_text = (event.get("text") or "").strip()
     # Strip `<@U...>` mention tokens (and the optional `|name` suffix
     # Slack adds when the bot's display name has been resolved). For
@@ -136,7 +155,8 @@ async def slack_events(
     thread_ts = None if is_dm else (event.get("thread_ts") or event.get("ts"))
 
     print(f"[slack/events] received {event_type} channel_type={event.get('channel_type')} "
-          f"user={user_id} text_len={len(text)} thread_ts={thread_ts}",
+          f"user={user_id} text_len={len(text)} thread_ts={thread_ts} "
+          f"files={[f.get('name') for f in files]}",
           flush=True)
 
     background.add_task(
@@ -148,6 +168,7 @@ async def slack_events(
         text=text,
         trigger="event",
         response_url=None,
+        files=files,
     )
     return empty_ok()
 
@@ -228,6 +249,7 @@ def _dispatch_turn(
     text: str,
     trigger: str,
     response_url: str | None,
+    files: list[dict] | None = None,
 ) -> None:
     """Resolve identity then hand off to conversation.handle_turn.
     Runs in a thread (BackgroundTask) so blocking Slack calls are fine.
@@ -250,6 +272,7 @@ def _dispatch_turn(
             text=text,
             trigger=trigger,
             response_url=response_url,
+            files=files,
         )
     except Exception as e:
         # BackgroundTask exceptions are otherwise swallowed; surface here.
