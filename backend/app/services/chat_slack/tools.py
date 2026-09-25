@@ -2778,6 +2778,346 @@ def list_uploaded_files(inp: ListUploadedFilesInput, ctx: dict) -> ToolResult:
 
 
 # ---------------------------------------------------------------------------
+# Writing spreadsheets back into the conversation
+# ---------------------------------------------------------------------------
+#
+# Two tools, because there are two different problems.
+#
+# `create_spreadsheet` takes rows FROM THE MODEL. That is the flexible
+# one -- a comparison table, a tidied-up extract from a document
+# somebody just uploaded, anything derived rather than stored. Its
+# ceiling is the model's own output budget (MAX_TOKENS in
+# orchestrator.py), so it is good for tens of rows, not thousands.
+#
+# `export_to_spreadsheet` never sends the data through the model at
+# all: it re-runs an existing tool server-side, pages it to exhaustion
+# and writes what comes back. The deal book is ~1,450 rows, which the
+# model could not retype inside any sane token budget and would
+# silently truncate if it tried. Naming an export costs ~20 tokens.
+#
+# Both are MCP_WITHHELD -- they upload into a Slack channel, and an MCP
+# caller has no channel to upload to.
+
+# source -> how to fetch it in full. `tool` is re-invoked through this
+# same registry rather than the SQL being copied, so an export cannot
+# drift from what the equivalent question returns in chat.
+_EXPORT_SOURCES: dict[str, dict] = {
+    "deals": {
+        "tool": "list_all_deals",
+        "rows_key": "deals",
+        "page": 500,
+        "filters": ("status", "company"),
+        "sheet": "Deals",
+        "preferred": ["deal_name", "company", "status", "transaction_type"],
+        "describe": "every deal in the book, with its counterpart company and status",
+    },
+    "funds": {
+        "tool": "list_funds",
+        "rows_key": "funds",
+        "page": 200,
+        "filters": ("name", "reportable_only"),
+        "sheet": "Funds",
+        "preferred": ["fund_id", "fund_name", "short_name", "fund_type",
+                      "fund_status", "vintage_year"],
+        "describe": "every fund/SPV with committed capital and performance",
+    },
+}
+
+# Stop rather than page forever if a source ever stops reporting
+# truncation honestly.
+_EXPORT_MAX_ROWS = 20_000
+_EXPORT_MAX_PAGES = 60
+
+
+def _fetch_all_rows(source: str, filters: dict, ctx: dict) -> tuple[list[dict], dict]:
+    """Page a source tool to exhaustion. Returns (rows, last_output)."""
+    spec = _EXPORT_SOURCES[source]
+    tool = slack_registry.get(spec["tool"])
+    rows: list[dict] = []
+    out: dict = {}
+    offset = 0
+    for _ in range(_EXPORT_MAX_PAGES):
+        payload = dict(filters)
+        payload["limit"] = spec["page"]
+        payload["offset"] = offset
+        result = tool.handler(tool.input_model(**payload), ctx)
+        out = result.output if hasattr(result, "output") else result
+        if not isinstance(out, dict):
+            break
+        page = out.get(spec["rows_key"]) or []
+        rows.extend(page)
+        if not page or not out.get("truncated") or len(rows) >= _EXPORT_MAX_ROWS:
+            break
+        offset += len(page)
+    return rows[:_EXPORT_MAX_ROWS], out
+
+
+class SpreadsheetSheetInput(BaseModel):
+    name: str = Field(
+        "Sheet1",
+        description="Tab name. Excel caps these at 31 characters.",
+        max_length=120,
+    )
+    rows: list[dict[str, Any]] = Field(
+        ...,
+        description=(
+            "The data, one object per row, keys as column names. Use the "
+            "SAME keys on every row. Put numbers and dates through as JSON "
+            "numbers and 'YYYY-MM-DD' strings rather than pre-formatting "
+            "them with currency symbols or thousands separators -- the "
+            "point of a spreadsheet is that the reader can sort and sum it."
+        ),
+        max_length=2000,
+    )
+    columns: list[str] | None = Field(
+        None,
+        description=(
+            "Optional column order, by row key. Omit to use the order the "
+            "keys first appear in. Keys you leave out are dropped."
+        ),
+        max_length=200,
+    )
+    column_labels: list[str] | None = Field(
+        None,
+        description=(
+            "Optional human headers, positionally matching `columns`. Omit "
+            "and the keys are title-cased ('deal_name' -> 'Deal Name')."
+        ),
+        max_length=200,
+    )
+
+
+class CreateSpreadsheetInput(BaseModel):
+    filename: str = Field(
+        "todd-export.xlsx",
+        description=("Filename for the upload; '.xlsx' is appended if you "
+                     "leave it off. Name it for the content, e.g. "
+                     "'moove-cap-table.xlsx'."),
+        max_length=120,
+    )
+    sheets: list[SpreadsheetSheetInput] = Field(
+        ...,
+        description="One entry per tab. Usually just one.",
+        min_length=1, max_length=10,
+    )
+    comment: str | None = Field(
+        None,
+        description=(
+            "One short line posted with the file, e.g. 'Active pipeline as "
+            "of today -- 34 deals.' Slack mrkdwn."
+        ),
+        max_length=1000,
+    )
+
+
+@slack_registry.tool(
+    "create_spreadsheet",
+    (
+        "Build an .xlsx from rows YOU supply and post it into this Slack "
+        "conversation. Use for tables you derive or assemble: a "
+        "comparison, a tidied extract from a document the user uploaded, "
+        "a shortlist. The file is uploaded for you -- do NOT then repeat "
+        "the table in your reply. "
+        "For a whole internal dataset (the full deal book, every fund) "
+        "use export_to_spreadsheet instead: it fetches server-side and "
+        "won't truncate, whereas the rows you write here are capped by "
+        "your own output budget -- keep this to roughly 100 rows."
+    ),
+    CreateSpreadsheetInput,
+)
+def create_spreadsheet(inp: CreateSpreadsheetInput, ctx: dict) -> ToolResult:
+    from .spreadsheet import (SpreadsheetError, build_workbook, safe_filename,
+                              upload_to_slack)
+
+    sheets = [{
+        "name": sh.name,
+        "rows": sh.rows,
+        "columns": sh.columns,
+        "column_labels": sh.column_labels,
+    } for sh in inp.sheets]
+    total_rows = sum(len(sh["rows"]) for sh in sheets)
+    if not total_rows:
+        return ToolResult(output={
+            "ok": False,
+            "error": ("No rows given, so there's nothing to put in the file. "
+                      "If you meant a whole internal dataset, use "
+                      "export_to_spreadsheet."),
+        })
+
+    try:
+        content = build_workbook(sheets)
+    except SpreadsheetError as e:
+        return ToolResult(output={"ok": False, "error": str(e)})
+    except Exception as e:  # noqa: BLE001 -- malformed model rows, not a crash
+        return ToolResult(output={
+            "ok": False,
+            "error": f"Couldn't build the spreadsheet ({type(e).__name__}: {e}).",
+        })
+
+    up = upload_to_slack(
+        content=content,
+        filename=safe_filename(inp.filename),
+        channel_id=ctx.get("channel_id") or "",
+        thread_ts=ctx.get("thread_ts"),
+        initial_comment=inp.comment,
+    )
+    if not up.get("ok"):
+        return ToolResult(output={"ok": False, "error": up.get("error")})
+    return ToolResult(output={
+        "ok": True,
+        "filename": up["filename"],
+        "permalink": up.get("permalink"),
+        "rows": total_rows,
+        "sheets": [sh["name"] for sh in sheets],
+        "note": ("The file is already posted in the conversation. Confirm it "
+                 "in one short line; do not repeat the table."),
+    })
+
+
+class ExportToSpreadsheetInput(BaseModel):
+    source: str = Field(
+        ...,
+        description=(
+            "Which dataset to export in full. "
+            "'deals' -- the whole deal book (deal name, company, status, "
+            "transaction type); filter with `status` and/or `company`. "
+            "'funds' -- every fund/SPV with committed capital and "
+            "performance; filter with `name` and/or `reportable_only`."
+        ),
+    )
+    status: list[str] | None = Field(
+        None,
+        description=("deals only: restrict to these statuses, e.g. "
+                     "['Active Pipeline']. Most of the book is "
+                     "'Passed/Dead', so ask whether they want it all "
+                     "before exporting ~1,450 rows unfiltered."),
+    )
+    company: str | None = Field(
+        None,
+        description="deals only: substring filter on company or deal name.",
+        max_length=120,
+    )
+    name: str | None = Field(
+        None, description="funds only: fuzzy filter on fund name.",
+        max_length=200,
+    )
+    reportable_only: bool | None = Field(
+        None,
+        description="funds only: restrict to DealCloud-reportable funds.",
+    )
+    filename: str | None = Field(
+        None, description="Optional filename; one is derived if omitted.",
+        max_length=120,
+    )
+    comment: str | None = Field(
+        None, description="One short line posted with the file.",
+        max_length=1000,
+    )
+
+
+@slack_registry.tool(
+    "export_to_spreadsheet",
+    (
+        "Export a whole internal dataset to .xlsx and post it into this "
+        "Slack conversation. The rows are fetched server-side and paged "
+        "to completion, so nothing is truncated and none of the data "
+        "passes through your output budget -- this is the right tool for "
+        "'export all the deals', 'send me the fund list as a "
+        "spreadsheet'. Sources: 'deals' (filter: status, company), "
+        "'funds' (filter: name, reportable_only). The file is uploaded "
+        "for you -- confirm in one line and do NOT list the rows. "
+        "For a table you assemble yourself, use create_spreadsheet."
+    ),
+    ExportToSpreadsheetInput,
+)
+def export_to_spreadsheet(inp: ExportToSpreadsheetInput, ctx: dict) -> ToolResult:
+    from .spreadsheet import (SpreadsheetError, build_workbook, columns_from_rows,
+                              flatten_row, safe_filename, upload_to_slack)
+
+    source = (inp.source or "").strip().lower()
+    spec = _EXPORT_SOURCES.get(source)
+    if spec is None:
+        return ToolResult(output={
+            "ok": False,
+            "error": (f"I don't have an export called {inp.source!r}. "
+                      f"Available: {', '.join(sorted(_EXPORT_SOURCES))}. "
+                      "For anything else, assemble the rows yourself and "
+                      "use create_spreadsheet."),
+        })
+
+    supplied = {k: getattr(inp, k) for k in ("status", "company", "name",
+                                             "reportable_only")
+                if getattr(inp, k) is not None}
+    filters = {k: v for k, v in supplied.items() if k in spec["filters"]}
+    ignored = sorted(set(supplied) - set(filters))
+
+    try:
+        rows, last = _fetch_all_rows(source, filters, ctx)
+    except Exception as e:  # noqa: BLE001 -- a source failing is not a crash
+        return ToolResult(output={
+            "ok": False,
+            "error": f"Couldn't fetch the {source} data ({type(e).__name__}: {e}).",
+        })
+
+    if not rows:
+        return ToolResult(output={
+            "ok": False,
+            "error": (f"No {source} matched those filters, so there's nothing "
+                      "to export. Say so rather than sending an empty file."),
+            "filters": filters,
+        })
+
+    flat = [flatten_row(r) for r in rows]
+    columns = columns_from_rows(flat, preferred=spec["preferred"])
+    try:
+        content = build_workbook([{
+            "name": spec["sheet"], "rows": flat, "columns": columns,
+        }])
+    except SpreadsheetError as e:
+        return ToolResult(output={"ok": False, "error": str(e)})
+
+    bits = [source] + [str(v) for v in filters.values() if isinstance(v, str)]
+    if isinstance(filters.get("status"), list):
+        bits += filters["status"]
+    fname = safe_filename(inp.filename or "-".join(bits).lower().replace(" ", "-"))
+
+    up = upload_to_slack(
+        content=content,
+        filename=fname,
+        channel_id=ctx.get("channel_id") or "",
+        thread_ts=ctx.get("thread_ts"),
+        initial_comment=inp.comment,
+    )
+    if not up.get("ok"):
+        return ToolResult(output={"ok": False, "error": up.get("error")})
+
+    out: dict[str, Any] = {
+        "ok": True,
+        "filename": up["filename"],
+        "permalink": up.get("permalink"),
+        "source": source,
+        "rows": len(rows),
+        "columns": len(columns),
+        "filters": filters,
+        "note": ("The file is already posted in the conversation. Confirm it "
+                 "in one short line with the row count; do not list the rows."),
+    }
+    if ignored:
+        out["ignored_filters"] = (
+            f"{', '.join(ignored)} don't apply to the {source} export and "
+            "were not used -- mention that if the user asked for them.")
+    if len(rows) >= _EXPORT_MAX_ROWS:
+        out["truncated_at"] = _EXPORT_MAX_ROWS
+    total = (last or {}).get("total_matching")
+    if isinstance(total, int):
+        out["total_matching"] = total
+        if total > len(rows):
+            out["incomplete"] = (
+                f"Only {len(rows):,} of {total:,} rows were exported. Say so.")
+    return ToolResult(output=out)
+
+
+# ---------------------------------------------------------------------------
 # External web lookups (Gemini + Google Search grounding)
 # ---------------------------------------------------------------------------
 #

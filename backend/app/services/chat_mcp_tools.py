@@ -356,6 +356,21 @@ MCP_WITHHELD: dict[str, str] = {
         "which an MCP caller doesn't have. Exposing it would list other "
         "people's attachments or nothing at all."
     ),
+    "create_spreadsheet": (
+        "Its whole output is a file UPLOADED INTO A SLACK CHANNEL, taken "
+        "from ctx. An MCP caller has no channel, so the tool would build "
+        "a workbook and have nowhere to put it. A claude.ai caller can "
+        "also just write the file itself. If an MCP-side version is ever "
+        "wanted it needs a different contract -- return the bytes, don't "
+        "post them -- which is a reimplementation, not parity."
+    ),
+    "export_to_spreadsheet": (
+        "Same reason as create_spreadsheet: it uploads to the Slack "
+        "channel in ctx. The underlying data is already on the MCP "
+        "surface through list_all_deals and list_funds, which an MCP "
+        "caller can page and render however it likes, so nothing is "
+        "actually withheld except the upload."
+    ),
 }
 
 
