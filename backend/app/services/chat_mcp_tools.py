@@ -71,7 +71,11 @@ from pydantic import BaseModel, Field
 from ..config import settings
 from ..db import get_conn
 from .chat_lib import ToolResult
-from .chat_slack.tools import slack_registry
+from .chat_slack.tools import (
+    slack_registry,
+    _find_docs_by_path,
+    _format_doc_matches,
+)
 
 MAX_NOTES_CHARS = 20_000
 
@@ -281,6 +285,7 @@ def _build_preview(inp: ResearchActivityInput) -> dict:
 # Same implementation on both surfaces.
 MCP_INHERITED: frozenset[str] = frozenset({
     "find_organizations",
+    "find_documents_by_name",
     "find_comparable_orgs",
     "bundle_via_supersede",
     "get_org_portfolio_status",
@@ -423,10 +428,24 @@ class McpAskDataRoomInput(BaseModel):
             "never ask the user for it just to make this call."
         ),
     )
-    question: str = Field(
-        ...,
-        min_length=4, max_length=2000,
-        description="The question to retrieve relevant documents for.",
+    question: str | None = Field(
+        default=None,
+        max_length=2000,
+        description=(
+            "The question to retrieve relevant documents for. Optional "
+            "when `path_or_name` is given on its own."
+        ),
+    )
+    path_or_name: str | None = Field(
+        default=None,
+        max_length=400,
+        description=(
+            "Optional LITERAL filename/folder-path filter, applied before "
+            "retrieval -- use it to confine a question to one part of the "
+            "room ('VDR/LOIs - Contracts'). To simply FIND a document by "
+            "name, or to establish whether one exists at all, call "
+            "find_documents_by_name instead."
+        ),
     )
 
 
@@ -444,8 +463,12 @@ class McpAskDataRoomInput(BaseModel):
         "thin, call read_document on its document_id to read the full "
         "body before concluding anything. These are retrieval hits, not "
         "the whole room: never report a fact or document as absent just "
-        "because it isn't here -- use start_data_room_build_sweep for an "
-        "exhaustive per-document pass.\n\n"
+        "because it isn't here. To establish whether a document EXISTS, "
+        "or to find one by filename or folder, call "
+        "find_documents_by_name -- it scans every indexed path, so its "
+        "empty result is definitive where this tool's is not. For an "
+        "exhaustive per-document content pass, use "
+        "start_data_room_build_sweep.\n\n"
         "Every document comes with a Link. Whenever you name a specific "
         "document, render it as a markdown link -- [document name](link) -- "
         "never a raw doc_id and never a bare URL. The returned instructions "
@@ -476,24 +499,51 @@ def mcp_ask_data_room(inp: McpAskDataRoomInput, ctx: dict) -> ToolResult:
     except _DceUnavailable as e:
         return ToolResult(output=f"Data room build unavailable: {e}")
 
-    if job.status != "complete":
-        return ToolResult(output=(
-            f"job {inp.job_id} is not complete yet (status={job.status}, "
-            f"{job.docs_processed}/{job.docs_total} docs processed) -- "
-            "call check_data_room_build again shortly, or wait for the "
-            "Slack DM."
-        ))
     if not job.doc_ids:
         return ToolResult(output=(
-            f"job {inp.job_id}'s folder has no readable documents to search."
+            f"job {inp.job_id} has no readable documents to search yet "
+            f"(status={job.status}, {job.docs_processed}/{job.docs_total} "
+            f"docs processed) -- call check_data_room_build again shortly."
+        ))
+    if not inp.question and not inp.path_or_name:
+        return ToolResult(output=(
+            "give either `question` (retrieve documents for it) or "
+            "`path_or_name` (find documents by filename/folder)."
         ))
 
-    try:
-        return ToolResult(
-            output=retrieve_room_context_for_docs(job.doc_ids, inp.question)
+    doc_ids = job.doc_ids
+    parts: list[str] = []
+    # Mirrors the Slack tool: an incomplete room is still worth asking, and
+    # the check-for-new-documents rule flips a finished room back to
+    # 'pending' over a handful of added files.
+    if job.status != "complete":
+        behind = max(0, (job.docs_total or 0) - (job.docs_processed or 0))
+        parts.append(
+            f"[Note: this room is still being built (status={job.status}; "
+            + (f"{job.docs_processed}/{job.docs_total} docs read, {behind} "
+               f"outstanding" if behind else
+               "newly-added documents are still being picked up")
+            + "). Retrieval below covers only the documents read so far.]"
         )
-    except _ClaudeRoomError as e:
-        return ToolResult(output=f"Data room retrieval error: {e}")
+    if inp.path_or_name:
+        rows = _find_docs_by_path(inp.path_or_name, doc_ids=doc_ids)
+        if not rows:
+            return ToolResult(output=(
+                f"No document in this room has {inp.path_or_name!r} in its "
+                f"filename or folder path (a literal lookup over every "
+                f"indexed path, so this is definitive for the room). Call "
+                f"find_documents_by_name without a job_id to search the "
+                f"whole document index."
+            ))
+        parts.append(_format_doc_matches(rows, inp.path_or_name))
+        doc_ids = [r["id"] for r in rows]
+
+    if inp.question:
+        try:
+            parts.append(retrieve_room_context_for_docs(doc_ids, inp.question))
+        except _ClaudeRoomError as e:
+            return ToolResult(output=f"Data room retrieval error: {e}")
+    return ToolResult(output=("\n\n".join(p for p in parts if p)))
 
 
 @mcp_registry.tool(
