@@ -424,7 +424,7 @@ class ReadDocumentInput(BaseModel):
 @slack_registry.tool(
     "search_documents",
     (
-        "Find documents BY TOPIC or filename, scoped to org_ids. "
+        "Find documents BY TOPIC, scoped to org_ids. "
         "Use this BEFORE read_document whenever the user asks about "
         "content (financials, fund terms, deal status, etc.) -- "
         "spelunking the dossier's chronological doc list is slow "
@@ -438,6 +438,11 @@ class ReadDocumentInput(BaseModel):
         "is about when the preview does not. An EMPTY criteria list is "
         "not a signal -- plenty of documents match no checklist item, "
         "and most of the corpus has not been through that pass at all. "
+        "This is top-k ranking, so it can MISS a document that exists "
+        "and can never show that one is absent: for 'is there a file "
+        "called X', 'what is in folder Y', or any question about a "
+        "document's existence or location, call find_documents_by_name, "
+        "which scans every indexed path. "
         "Pass the canonical org_ids from bundle_via_supersede; empty "
         "list searches the whole corpus (avoid unless org search has "
         "failed). Read-only."
@@ -2333,6 +2338,154 @@ def check_data_room_build(inp: CheckDataRoomBuildInput, ctx: dict) -> ToolResult
     })
 
 
+_PATH_MATCH_LIMIT = 200
+
+
+def _find_docs_by_path(
+    text: str, doc_ids: list[int] | None = None
+) -> list[dict]:
+    """Literal case-insensitive substring match on a document's full path.
+
+    Deliberately not the semantic retriever. Asked "is there a file named
+    X", a top-k topic search answers with the nearest thematic match plus a
+    hedge about coverage, which reads as "probably not" whether or not the
+    file exists -- on 2026-09-30 a real, freshly-added "Positron GC CSA
+    Reservation Letter" was reported absent for exactly that reason.
+    Existence and location are index questions and deserve an index answer,
+    where "no rows" actually means no such file.
+
+    `path` already ends in the filename, so one ILIKE covers a folder
+    ('VDR/LOIs - Contracts'), a partial filename or an extension.
+    """
+    sql = """
+        SELECT id, name, path, web_url, summary IS NOT NULL AS readable
+        FROM dealcloud.document
+        WHERE path ILIKE %s
+    """
+    args: list = [f"%{text}%"]
+    if doc_ids is not None:
+        sql += " AND id = ANY(%s)"
+        args.append(doc_ids)
+    sql += " ORDER BY path LIMIT %s"
+    args.append(_PATH_MATCH_LIMIT)
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(sql, tuple(args))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def _format_doc_matches(rows: list[dict], text: str) -> str:
+    more = " (first 200)" if len(rows) >= _PATH_MATCH_LIMIT else ""
+    lines = [f"{len(rows)}{more} document(s) whose name/path contains "
+             f"{text!r}:"]
+    for r in rows:
+        mark = "" if r["readable"] else "  [indexed, not yet read]"
+        lines.append(f"- [{r['id']}] {r['path']}{mark}")
+    lines.append(
+        "Pass an id above to read_document / read_document_summary."
+    )
+    return "\n".join(lines)
+
+
+def _join_parts(parts: list[str]) -> str:
+    return "\n\n".join(p for p in parts if p)
+
+
+class FindDocumentsByNameInput(BaseModel):
+    path_or_name: str = Field(
+        ...,
+        min_length=2, max_length=400,
+        description=(
+            "LITERAL text to match against each document's filename and "
+            "folder path -- not a topic or a question. Matched "
+            "case-insensitively as a substring of the full path, so a "
+            "folder ('_SINGLE ASSET DEALS/2026/Positron'), a partial "
+            "filename ('Reservation Letter') or an extension ('.xlsx') "
+            "all work."
+        ),
+    )
+    job_id: int | None = Field(
+        default=None,
+        description=(
+            "Optional data-room build job id, to restrict the search to "
+            "that room's documents. Omit to search the whole document "
+            "index, which is the right choice when the user is asking "
+            "about a folder no room has been built over."
+        ),
+    )
+
+
+@slack_registry.tool(
+    "find_documents_by_name",
+    (
+        "Find documents by FILENAME or FOLDER PATH, as a literal index "
+        "lookup. Use this -- not search_documents, and not ask_data_room "
+        "-- whenever the question is about WHERE a document sits or "
+        "WHETHER one exists: 'is there a file called X', 'what is in the "
+        "folder Y', 'was the LOI added yet', 'list the contracts folder'. "
+        "search_documents ranks documents by topic and returns only the "
+        "top few, so it can miss a file that exists and cannot tell you a "
+        "file is absent; this tool scans every indexed path, so an empty "
+        "result is a definitive 'no such file is indexed'. Returns "
+        "document ids to pass to read_document or read_document_summary, "
+        "and works with or without a data room."
+    ),
+    FindDocumentsByNameInput,
+)
+def find_documents_by_name(
+    inp: FindDocumentsByNameInput, ctx: dict
+) -> ToolResult:
+    doc_ids = None
+    scope = "the document index"
+    if inp.job_id is not None:
+        # Imported here, not at module scope: data_room_build imports back
+        # into this module, as the other data-room tools above do.
+        from ..data_room_build import (
+            DceUnavailable as _DceUnavailable,
+            get_build_job,
+        )
+        try:
+            job = get_build_job(inp.job_id)
+        except ValueError as e:
+            return ToolResult(output=str(e))
+        except _DceUnavailable as e:
+            return ToolResult(output=f"Data room build unavailable: {e}")
+        if job is None:
+            return ToolResult(output=f"No data room build job {inp.job_id}.")
+        doc_ids = job.doc_ids or []
+        scope = f"data room job {inp.job_id} ({len(doc_ids)} documents)"
+        if not doc_ids:
+            return ToolResult(output=(
+                f"Data room job {inp.job_id} has no documents yet, so there "
+                f"is nothing to match."
+            ))
+    rows = _find_docs_by_path(inp.path_or_name, doc_ids=doc_ids)
+    if not rows:
+        msg = (
+            f"No document in {scope} has {inp.path_or_name!r} in its "
+            f"filename or folder path. This is a literal lookup over every "
+            f"indexed path, not a top-k search, so nothing matching is "
+            f"indexed."
+        )
+        if doc_ids is not None:
+            # "Not in this room" is a different claim from "no such file".
+            # Say which one it is, so the answer is never "it does not
+            # exist" about a file sitting one folder outside the room.
+            elsewhere = _find_docs_by_path(inp.path_or_name)
+            if elsewhere:
+                shown = _format_doc_matches(elsewhere, inp.path_or_name)
+                return ToolResult(output=(
+                    f"{msg} It does exist outside this room, though -- "
+                    f"{len(elsewhere)} match(es) elsewhere in the document "
+                    f"index:\n{shown}"
+                ))
+        return ToolResult(output=(
+            msg + " If the file was added to SharePoint very recently, "
+            "build_data_room over its folder will index it first."
+        ))
+    return ToolResult(output=_format_doc_matches(rows, inp.path_or_name))
+
+
 class AskDataRoomInput(BaseModel):
     job_id: int = Field(..., description="The job_id returned by build_data_room.")
     requested_by_email: str | None = Field(
@@ -2344,13 +2497,31 @@ class AskDataRoomInput(BaseModel):
             "never ask the user for it just to make this call."
         ),
     )
-    question: str = Field(
-        ...,
-        min_length=4, max_length=2000,
+    question: str | None = Field(
+        default=None,
+        max_length=2000,
         description=(
             "Question to ask of the data room's documents. Phrased as a "
             "complete question; the answer will only draw on this job's "
-            "actual documents, never outside knowledge."
+            "actual documents, never outside knowledge. Optional when "
+            "`path_or_name` is given on its own."
+        ),
+    )
+    path_or_name: str | None = Field(
+        default=None,
+        max_length=400,
+        description=(
+            "LITERAL text to match against each document's filename and "
+            "folder path -- not a topic. Use this, not `question`, whenever "
+            "the ask is about WHERE a document sits or WHETHER one exists: "
+            "'is there a file called X', 'what is in the folder Y', 'list "
+            "the LOIs folder'. Matched case-insensitively as a substring of "
+            "the full path, so a folder ('VDR/LOIs - Contracts'), a partial "
+            "filename ('Reservation Letter') or an extension ('.xlsx') all "
+            "work. Answers from the index, so 'no match' means the room "
+            "genuinely holds no such file -- unlike a topic search, which "
+            "can miss a file that exists. Combine with `question` to ask "
+            "something of just the documents under that path."
         ),
     )
 
@@ -2384,24 +2555,73 @@ def ask_data_room(inp: AskDataRoomInput, ctx: dict) -> ToolResult:
     except _DceUnavailable as e:
         return ToolResult(output=f"Data room build unavailable: {e}")
 
-    if job.status != "complete":
-        return ToolResult(output=(
-            f"job {inp.job_id} is not complete yet (status={job.status}, "
-            f"{job.docs_processed}/{job.docs_total} docs processed) -- "
-            "call check_data_room_build again shortly, or wait for the "
-            "Slack DM."
-        ))
     if not job.doc_ids:
         return ToolResult(output=(
-            f"job {inp.job_id}'s folder has no readable documents to "
-            "search."
+            f"job {inp.job_id} has no readable documents to search yet "
+            f"(status={job.status}, {job.docs_processed}/{job.docs_total} "
+            f"docs processed) -- call check_data_room_build again shortly, "
+            f"or wait for the Slack DM."
+        ))
+    # An incomplete room is still worth asking. Refusing outright meant a
+    # handful of newly-added files -- which the check-for-new-documents
+    # rule surfaces by flipping a finished room back to 'pending' -- made
+    # a 1,500-document room unusable. Answer from what has been read, and
+    # say what has not.
+    pending_note = ""
+    if job.status != "complete":
+        behind = max(0, (job.docs_total or 0) - (job.docs_processed or 0))
+        # docs_total lags when the folder has just gained files, so a bare
+        # "1586/1586 docs read" next to status=scanning reads as finished.
+        progress = (
+            f"{job.docs_processed}/{job.docs_total} docs read, {behind} "
+            f"outstanding" if behind else
+            "newly-added documents are still being picked up"
+        )
+        pending_note = (
+            f"[Note: this room is still being built (status={job.status}; "
+            f"{progress}). The answer below draws only on the documents "
+            f"read so far; call check_data_room_build for progress.]"
+        )
+
+    if not inp.question and not inp.path_or_name:
+        return ToolResult(output=(
+            "give either `question` (ask the documents something) or "
+            "`path_or_name` (find documents by filename/folder)."
         ))
 
+    doc_ids = job.doc_ids
+    listing = ""
+    if inp.path_or_name:
+        # A LITERAL index lookup, deliberately not the semantic retriever.
+        # Asked "is there a file named X", topic search answers with the
+        # nearest thematic match and a hedge about coverage -- which reads
+        # as "probably not" whether or not the file exists. On 2026-09-30
+        # that is exactly what happened: a real, freshly-added
+        # "Positron GC CSA Reservation Letter" was reported as absent
+        # because a top-k search over 1,607 documents never surfaced it.
+        # Existence and location are index questions and deserve an index
+        # answer -- here, "no match" actually means no match.
+        rows = _find_docs_by_path(inp.path_or_name, doc_ids=doc_ids)
+        if not rows:
+            return ToolResult(output=(
+                f"No document in this room's {len(doc_ids)} indexed files has "
+                f"{inp.path_or_name!r} in its name or folder path. This is a "
+                f"literal index lookup over the whole room, not a top-k "
+                f"search, so this is a definitive answer for the files the "
+                f"room has indexed."
+            ))
+        listing = _format_doc_matches(rows, inp.path_or_name)
+        # Narrow any follow-up question to just these documents.
+        doc_ids = [r["id"] for r in rows]
+
+    if not inp.question:
+        return ToolResult(output=_join_parts([pending_note, listing]))
+
     try:
-        result = ask_room_for_docs(job.doc_ids, inp.question)
+        result = ask_room_for_docs(doc_ids, inp.question)
     except _ClaudeRoomError as e:
         return ToolResult(output=f"Claude room error: {e}")
-    return ToolResult(output=result)
+    return ToolResult(output=_join_parts([pending_note, listing, result]))
 
 
 class StartDataRoomBuildSweepInput(BaseModel):
