@@ -286,6 +286,7 @@ def _build_preview(inp: ResearchActivityInput) -> dict:
 MCP_INHERITED: frozenset[str] = frozenset({
     "find_organizations",
     "find_documents_by_name",
+    "find_in_documents",
     "find_comparable_orgs",
     "bundle_via_supersede",
     "get_org_portfolio_status",
