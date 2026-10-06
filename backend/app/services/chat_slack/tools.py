@@ -2391,6 +2391,159 @@ def _join_parts(parts: list[str]) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
+_SNIPPET_BEFORE = 200
+_SNIPPET_LEN = 460
+_CONTENT_MATCH_LIMIT = 30
+
+
+def _find_text_in_bodies(
+    text: str, doc_ids: list[int] | None = None
+) -> tuple[list[dict], dict]:
+    """Literal case-insensitive search of cached document BODIES.
+
+    The content-side twin of _find_docs_by_path. A figure, a clause or a
+    name is a literal question, and semantic top-k answers it badly: asked
+    where a $3.55bn pipeline number came from, retrieval returned
+    thematically-similar documents and the real source -- one sentence in
+    one email -- was never ranked. A substring scan found it in a single
+    query the moment that email had a cached body.
+
+    Returns (rows, coverage). Coverage matters as much as the rows: only
+    some documents have had their body extracted, so "no match" means
+    "not in the text we hold", never "not in this room". The caller must
+    say so.
+    """
+    scope_sql, scope_args = "", []
+    if doc_ids is not None:
+        scope_sql = " AND id = ANY(%s)"
+        scope_args = [doc_ids]
+
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            f"""
+            SELECT count(*) AS total,
+                   count(*) FILTER (WHERE body IS NOT NULL) AS with_body
+            FROM dealcloud.document
+            WHERE true{scope_sql}
+            """,
+            tuple(scope_args),
+        )
+        coverage = dict(cur.fetchone() or {})
+        # strpos/substring rather than returning bodies: a body runs to tens
+        # of thousands of characters and 30 of them would swamp the turn.
+        cur.execute(
+            f"""
+            WITH m AS (
+                SELECT id, name, path, body,
+                       strpos(lower(body), lower(%s)) AS pos
+                FROM dealcloud.document
+                WHERE body ILIKE %s{scope_sql}
+            )
+            SELECT id, name, path, pos,
+                   substring(body from greatest(1, pos - %s) for %s) AS snippet
+            FROM m
+            ORDER BY path
+            LIMIT %s
+            """,
+            tuple([text, f"%{text}%"] + scope_args
+                  + [_SNIPPET_BEFORE, _SNIPPET_LEN, _CONTENT_MATCH_LIMIT]),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    return rows, coverage
+
+
+class FindInDocumentsInput(BaseModel):
+    text: str = Field(
+        ...,
+        min_length=2, max_length=200,
+        description=(
+            "LITERAL text to find inside documents -- a figure ('3.55'), a "
+            "phrase ('liquidation preference'), a name. Matched as a "
+            "case-insensitive substring of the document's extracted text, "
+            "NOT semantically, so write it exactly as it would appear in "
+            "the file. Numbers are formatted inconsistently across "
+            "documents, so if '3.55bn' finds nothing, try '3.55' or "
+            "'3,550'."
+        ),
+    )
+    job_id: int | None = Field(
+        default=None,
+        description=(
+            "Optional data-room build job id, to restrict the search to "
+            "that room's documents. Omit to search every document whose "
+            "text has been extracted."
+        ),
+    )
+
+
+@slack_registry.tool(
+    "find_in_documents",
+    (
+        "Find which document CONTAINS a given piece of text, and show it "
+        "in context. Use this -- not search_documents, not ask_data_room "
+        "-- when the question is where a specific figure, phrase or clause "
+        "comes from: 'where does the $3.55bn number come from', 'which "
+        "document says the liquidation preference is 1x', 'who mentioned "
+        "the Q4 tape out'. Those tools rank documents by topic and return "
+        "only the top few, so the one document holding a number may never "
+        "surface; this scans the extracted text of every document and "
+        "returns the surrounding passage, so you can quote the source "
+        "exactly and cite the file it came from. Returns document ids for "
+        "read_document when you need more than the snippet. IMPORTANT: it "
+        "searches only documents whose text has been extracted, and the "
+        "result says how many that was -- a nil result means 'not in the "
+        "text we hold', never 'not in this room'."
+    ),
+    FindInDocumentsInput,
+)
+def find_in_documents(inp: FindInDocumentsInput, ctx: dict) -> ToolResult:
+    doc_ids = None
+    where = "every document with extracted text"
+    if inp.job_id is not None:
+        from ..data_room_build import (
+            DceUnavailable as _DceUnavailable, get_build_job,
+        )
+        try:
+            job = get_build_job(inp.job_id)
+        except ValueError as e:
+            return ToolResult(output=str(e))
+        except _DceUnavailable as e:
+            return ToolResult(output=f"Data room build unavailable: {e}")
+        doc_ids = job.doc_ids or []
+        where = f"data room job {inp.job_id}"
+        if not doc_ids:
+            return ToolResult(output=f"Data room job {inp.job_id} has no documents yet.")
+
+    rows, cov = _find_text_in_bodies(inp.text, doc_ids=doc_ids)
+    with_body = cov.get("with_body") or 0
+    total = cov.get("total") or 0
+    searched = (f"Searched the extracted text of {with_body} of {total} "
+                f"documents in {where}")
+    if total and with_body < total:
+        searched += (f"; {total - with_body} have no extracted text yet, so "
+                     f"they could not be searched")
+    searched += "."
+
+    if not rows:
+        return ToolResult(output=(
+            f"No document contains {inp.text!r}. {searched} If you expected "
+            f"a hit, try a different formatting of the same value (for a "
+            f"figure: '3.55' rather than '$3.55bn')."
+        ))
+
+    out = [f"{len(rows)} document(s) contain {inp.text!r}:", ""]
+    for r in rows:
+        snippet = " ".join((r["snippet"] or "").split())
+        out.append(f"- [{r['id']}] {r['path']}")
+        out.append(f"      ...{snippet}...")
+    out.append("")
+    out.append(searched)
+    out.append("Quote from the passage above; call read_document on an id "
+               "for the full text.")
+    return ToolResult(output="\n".join(out))
+
+
 class FindDocumentsByNameInput(BaseModel):
     path_or_name: str = Field(
         ...,
